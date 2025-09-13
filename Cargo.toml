@@ -1,0 +1,15 @@
+[package]
+name = "code-combo"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anthropic-api = "0.0.5"
+
+[workspace]
+resolver = "2"
+members = []
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"

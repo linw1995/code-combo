@@ -1,0 +1,51 @@
+{
+  inputs = {
+    utils.url = "github:numtide/flake-utils";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    fenix.url = "github:nix-community/fenix";
+    fenix.inputs.nixpkgs.follows = "nixpkgs";
+  };
+
+  outputs = {
+    self,
+    nixpkgs,
+    utils,
+    ...
+  } @ inputs:
+    utils.lib.eachDefaultSystem
+    (
+      system: let
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = [
+            inputs.fenix.overlays.default
+          ];
+        };
+      in {
+        devShells = let
+          components = [
+            "cargo"
+            "clippy"
+            "rust-src"
+            "rustc"
+            "rustfmt"
+            "llvm-tools"
+            "rust-analyzer"
+          ];
+          packages = with pkgs; [
+            # Development
+            grcov
+            pre-commit
+          ];
+        in rec {
+          default = stable;
+          stable = pkgs.mkShell {
+            nativeBuildInputs = with pkgs; [
+              (fenix.stable.withComponents components)
+            ];
+            inherit packages;
+          };
+        };
+      }
+    );
+}
