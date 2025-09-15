@@ -1,3 +1,5 @@
 mod combo;
+mod config;
 
-pub use combo::{Combo, ComboMetadata, Instruction, parse};
+pub use combo::*;
+pub use config::*;
