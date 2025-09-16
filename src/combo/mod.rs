@@ -4,14 +4,15 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub struct ComboMetadata {
     name: String,
+    #[serde(default)]
     description: String,
     #[serde(flatten)]
-    mode: Mode,
+    mode: ComboMode,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "mode", rename_all = "snake_case")]
-pub enum Mode {
+pub enum ComboMode {
     BashXtrace {
         command_prefix: String,
     },
@@ -19,7 +20,7 @@ pub enum Mode {
     Unknown,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub enum Instruction {
     Text(String),
     Command { command: String, output: String },
@@ -32,5 +33,7 @@ pub struct Combo {
 }
 
 mod parser;
+mod starter;
 
 pub use parser::parse;
+pub use starter::execute_starter;

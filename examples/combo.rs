@@ -1,7 +1,7 @@
 use anthropic_api::{Credentials, messages::*};
 use serde_json::json;
 
-use code_combo::Instruction;
+use code_combo::{Instruction, execute_starter};
 
 #[tokio::main]
 async fn main() {
@@ -21,9 +21,8 @@ async fn main() {
         }),
     };
 
-    let combo_output = include_str!("../target/commit.md");
-
-    let combo = code_combo::parse(combo_output);
+    let starter = execute_starter("./examples/commit.sh", true).await;
+    let combo = starter.combo.unwrap();
 
     let content = format!(
         r#"

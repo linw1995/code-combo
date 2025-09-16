@@ -11,7 +11,7 @@ pub fn parse_instructions(text: &str, command_prefix: &str) -> Vec<Instruction> 
             {
                 output.push_str(&$block);
             } else {
-                instructions.push(Instruction::Text($block));
+                instructions.push(Instruction::Text($block.trim_end().to_string()))
             }
         };
     }

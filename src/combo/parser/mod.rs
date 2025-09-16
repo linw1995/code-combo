@@ -1,11 +1,11 @@
-use crate::combo::{Combo, ComboMetadata, Mode};
+use crate::combo::{Combo, ComboMetadata, ComboMode};
 
 use tree_sitter::{Node, Parser, TreeCursor};
 
 pub fn parse(text: &str) -> Combo {
     let (metadata, text) = spilt_metadata(text);
 
-    use Mode::*;
+    use ComboMode::*;
     let instructions = match &metadata.mode {
         BashXtrace { command_prefix } => bash_xtrace::parse_instructions(text, command_prefix),
         Unknown => {
@@ -100,7 +100,7 @@ $ git log -n 5
         let (meta, _) = spilt_metadata(TEXT);
         assert_eq!(meta.name, "commit");
         assert_eq!(meta.description, "Git Commit with Proper Message");
-        if let Mode::BashXtrace { command_prefix } = meta.mode
+        if let ComboMode::BashXtrace { command_prefix } = meta.mode
             && command_prefix == "$ "
         {
             // success
