@@ -3,6 +3,10 @@ name = "code-combo"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "coco"
+path = "src/main.rs"
+
 [dependencies]
 anthropic-api = "0.0.5"
 clap = { version = "4.5.47", features = ["derive"] }
