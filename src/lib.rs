@@ -1,6 +1,8 @@
+mod agent;
 mod combo;
 mod config;
 
+pub use agent::*;
 pub use combo::*;
 pub use config::*;
 

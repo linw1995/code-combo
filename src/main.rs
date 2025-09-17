@@ -8,7 +8,7 @@ use anthropic_api::{
     },
 };
 use clap::{Parser, Subcommand};
-use code_combo::{Combo, Config, Instruction, discover_combo_starters, execute_starter};
+use code_combo::{Combo, Config, Executor, Instruction, discover_combo_starters, execute_starter};
 use serde_json::json;
 
 /// Code Combo
@@ -171,6 +171,7 @@ All the commands that you need have already been executed.
             }
             ResponseContentBlock::ToolUse { name, input, .. } => {
                 println!("Assistant decided to use the tool: {}: {}", name, input);
+                Executor::default().execute(&name, input).await;
             }
             ResponseContentBlock::Thinking {
                 signature,
