@@ -25,8 +25,7 @@ pub struct Starter {
     pub combo: Result<Combo, StarterError>,
 }
 
-#[allow(dead_code)]
-async fn discover_combo_starters(path: &str) -> Vec<Starter> {
+pub async fn discover_combo_starters(path: &str) -> Vec<Starter> {
     match fs::read_dir(path).await {
         Ok(mut entries) => {
             let mut starters = vec![];
