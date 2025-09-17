@@ -10,6 +10,7 @@ use anthropic_api::{
 use clap::{Parser, Subcommand};
 use code_combo::{Combo, Config, Executor, Instruction, discover_combo_starters, execute_starter};
 use serde_json::json;
+use tokio::io::{self, AsyncBufReadExt, BufReader};
 
 /// Code Combo
 #[derive(Parser)]
@@ -171,7 +172,16 @@ All the commands that you need have already been executed.
             }
             ResponseContentBlock::ToolUse { name, input, .. } => {
                 println!("Assistant decided to use the tool: {}: {}", name, input);
-                Executor::default().execute(&name, input).await;
+                println!("Press Enter to execute the command...");
+                let mut user_input = String::new();
+                if BufReader::new(io::stdin())
+                    .read_line(&mut user_input)
+                    .await
+                    .is_ok()
+                    && user_input.as_str() == "\n"
+                {
+                    Executor::default().execute(&name, input).await;
+                }
             }
             ResponseContentBlock::Thinking {
                 signature,
