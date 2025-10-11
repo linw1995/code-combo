@@ -4,12 +4,9 @@ mod logging;
 use color_eyre::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::{FutureExt, StreamExt};
-use ratatui::{
-    DefaultTerminal, Frame,
-    style::Stylize,
-    text::Line,
-    widgets::{Block, Paragraph},
-};
+use ratatui::{DefaultTerminal, Frame};
+
+use components::{Component, Input};
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
@@ -22,15 +19,17 @@ async fn main() -> color_eyre::Result<()> {
     result
 }
 
-#[derive(Debug, Default)]
-pub struct App {
+#[derive(Default)]
+pub struct App<'a> {
     /// Is the application running?
     running: bool,
     // Event stream.
     event_stream: EventStream,
+    // View.
+    input: Input<'a>,
 }
 
-impl App {
+impl<'a> App<'a> {
     /// Construct a new instance of [`App`].
     pub fn new() -> Self {
         Self::default()
@@ -52,19 +51,9 @@ impl App {
     /// - <https://docs.rs/ratatui/latest/ratatui/widgets/index.html>
     /// - <https://github.com/ratatui/ratatui/tree/master/examples>
     fn draw(&mut self, frame: &mut Frame) {
-        let title = Line::from("Ratatui Simple Template")
-            .bold()
-            .blue()
-            .centered();
-        let text = "Hello, Ratatui!\n\n\
-            Created using https://github.com/ratatui/templates\n\
-            Press `Esc`, `Ctrl-C` or `q` to stop running.";
-        frame.render_widget(
-            Paragraph::new(text)
-                .block(Block::bordered().title(title))
-                .centered(),
-            frame.area(),
-        )
+        self.input
+            .draw(frame, frame.area())
+            .expect("Should success");
     }
 
     /// Reads the crossterm events and updates the state of [`App`].
@@ -87,7 +76,10 @@ impl App {
             (_, KeyCode::Esc | KeyCode::Char('q'))
             | (KeyModifiers::CONTROL, KeyCode::Char('c') | KeyCode::Char('C')) => self.quit(),
             // Add other key handlers here.
-            _ => {}
+            _ => {
+                self.input
+                    .handle_events(Some(crate::components::Event::Key(key)));
+            }
         }
     }
 
