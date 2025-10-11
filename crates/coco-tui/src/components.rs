@@ -2,8 +2,10 @@ use color_eyre::Result;
 use crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::{Frame, layout::Rect};
 
+mod chat;
 mod input;
 
+pub use chat::Chat;
 pub use input::Input;
 
 #[derive(Debug)]

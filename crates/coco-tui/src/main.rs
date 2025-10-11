@@ -6,7 +6,7 @@ use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyM
 use futures::{FutureExt, StreamExt};
 use ratatui::{DefaultTerminal, Frame};
 
-use components::{Component, Input};
+use components::{Chat, Component};
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
@@ -26,7 +26,7 @@ pub struct App<'a> {
     // Event stream.
     event_stream: EventStream,
     // View.
-    input: Input<'a>,
+    chat: Chat<'a>,
 }
 
 impl<'a> App<'a> {
@@ -51,9 +51,7 @@ impl<'a> App<'a> {
     /// - <https://docs.rs/ratatui/latest/ratatui/widgets/index.html>
     /// - <https://github.com/ratatui/ratatui/tree/master/examples>
     fn draw(&mut self, frame: &mut Frame) {
-        self.input
-            .draw(frame, frame.area())
-            .expect("Should success");
+        self.chat.draw(frame, frame.area()).expect("Should success");
     }
 
     /// Reads the crossterm events and updates the state of [`App`].
@@ -77,7 +75,7 @@ impl<'a> App<'a> {
             | (KeyModifiers::CONTROL, KeyCode::Char('c') | KeyCode::Char('C')) => self.quit(),
             // Add other key handlers here.
             _ => {
-                self.input
+                self.chat
                     .handle_events(Some(crate::components::Event::Key(key)));
             }
         }
