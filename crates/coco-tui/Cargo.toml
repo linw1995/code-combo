@@ -3,9 +3,17 @@ name = "coco-tui"
 edition.workspace = true
 version.workspace = true
 
+# Terminal UI dependencies for building console interfaces
 [dependencies]
-color-eyre = "0.6.3"
-crossterm = { version = "0.28.1", features = ["event-stream"] }
-futures = "0.3.31"
+# Terminal UI framework
 ratatui = "0.29.0"
+
+# Terminal backend and input handling
+crossterm = { version = "0.28.1", features = ["event-stream"] }
+
+# Async utilities
+futures = "0.3.31"
 tokio.workspace = true
+
+# Error handling with better reports
+color-eyre = "0.6.3"
