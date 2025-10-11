@@ -7,6 +7,8 @@ version.workspace = true
 [dependencies]
 # Terminal UI framework
 ratatui = "0.29.0"
+## Widgets
+tui-textarea = "0.7.0"
 
 # Terminal backend and input handling
 crossterm = { version = "0.28.1", features = ["event-stream"] }

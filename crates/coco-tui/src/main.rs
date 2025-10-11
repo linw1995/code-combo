@@ -1,3 +1,4 @@
+mod components;
 mod logging;
 
 use color_eyre::Result;
