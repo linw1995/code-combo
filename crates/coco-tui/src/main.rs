@@ -1,3 +1,5 @@
+mod logging;
+
 use color_eyre::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::{FutureExt, StreamExt};
@@ -10,6 +12,8 @@ use ratatui::{
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
+    crate::logging::init()?;
+
     color_eyre::install()?;
     let terminal = ratatui::init();
     let result = App::new().run(terminal).await;

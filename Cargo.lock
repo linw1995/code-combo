@@ -235,6 +235,9 @@ dependencies = [
  "futures",
  "ratatui",
  "tokio",
+ "tracing",
+ "tracing-error",
+ "tracing-subscriber",
 ]
 
 [[package]]

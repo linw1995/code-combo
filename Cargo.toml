@@ -25,8 +25,8 @@ tokio.workspace = true
 snafu = "0.8.9"
 
 # Logging and tracing
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 # External API integration
 anthropic-api = "0.0.5"
@@ -50,3 +50,6 @@ tempfile = "3.22.0"
 
 [workspace.dependencies]
 tokio = { version = "1.47.1", features = ["full"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+tracing-error = "0.2.1"
