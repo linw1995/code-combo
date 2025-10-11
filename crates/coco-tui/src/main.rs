@@ -2,7 +2,7 @@ mod components;
 mod logging;
 
 use color_eyre::Result;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures::{FutureExt, StreamExt};
 use ratatui::{DefaultTerminal, Frame};
 
@@ -59,7 +59,7 @@ impl<'a> App<'a> {
         let event = self.event_stream.next().fuse().await;
         if let Some(Ok(evt)) = event {
             match evt {
-                Event::Key(key) if key.kind == KeyEventKind::Press => self.on_key_event(key),
+                Event::Key(key) => self.on_key_event(key),
                 Event::Mouse(_) => {}
                 Event::Resize(_, _) => {}
                 _ => {}
@@ -76,7 +76,7 @@ impl<'a> App<'a> {
             // Add other key handlers here.
             _ => {
                 self.chat
-                    .handle_events(Some(crate::components::Event::Key(key)));
+                    .handle_event(Some(crate::components::Event::Key(key)));
             }
         }
     }
