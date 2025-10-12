@@ -8,14 +8,13 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders};
 use tracing::debug;
 
-use super::{Action, Component};
-
-use super::Input;
+use super::{Action, Component, Content, Input, Message, Role};
 
 #[derive(Default)]
 pub struct Chat<'a> {
     focus: Focus,
     pub input: Input<'a>,
+    pub messages: Vec<Message>,
 }
 
 #[derive(Default, PartialEq)]
@@ -44,6 +43,10 @@ impl Component for Chat<'_> {
             (_, KeyCode::Enter) => {
                 let value = self.input.clear();
                 debug!(?value, "submiting");
+                self.messages.push(Message {
+                    role: Role::User,
+                    content: Content::Plain(value),
+                });
                 None
             }
             _ => {
@@ -67,7 +70,13 @@ impl Component for Chat<'_> {
         use Constraint::{Length, Min};
 
         let vertical = Layout::vertical([Min(0), Length(1), Length(2)]);
-        let [_main_area, divider, input_area] = vertical.areas(area);
+        let [area_messages, divider, area_input] = vertical.areas(area);
+
+        let chunks = Layout::vertical(self.messages.iter().map(|m| Length(m.height() as u16)))
+            .split(area_messages);
+        for (idx, message) in self.messages.iter_mut().enumerate() {
+            message.draw(frame, chunks[idx]).unwrap();
+        }
 
         frame.render_widget(
             Block::new()
@@ -84,6 +93,6 @@ impl Component for Chat<'_> {
                 ])),
             divider,
         );
-        self.input.draw(frame, input_area)
+        self.input.draw(frame, area_input)
     }
 }

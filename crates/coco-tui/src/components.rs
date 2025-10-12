@@ -4,9 +4,11 @@ use ratatui::{Frame, layout::Rect};
 
 mod chat;
 mod input;
+mod messages;
 
 pub use chat::Chat;
 pub use input::Input;
+pub use messages::{Content, Message, Role};
 
 #[derive(Debug)]
 #[allow(dead_code)]
