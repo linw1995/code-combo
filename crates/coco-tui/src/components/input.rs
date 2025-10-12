@@ -10,12 +10,22 @@ use tracing::debug;
 
 use super::{Action, Component};
 
-#[derive(Default)]
-#[allow(dead_code)]
 pub struct Input<'a> {
     blur: bool,
     state: State,
     pub textarea: tui_textarea::TextArea<'a>,
+}
+
+impl Default for Input<'_> {
+    fn default() -> Self {
+        let mut textarea = tui_textarea::TextArea::default();
+        textarea.set_cursor_line_style(Style::reset());
+        Self {
+            blur: false,
+            state: State::Ready,
+            textarea,
+        }
+    }
 }
 
 #[derive(Default, Debug, PartialEq)]
@@ -24,6 +34,18 @@ enum State {
     #[default]
     Ready,
     Procesing,
+}
+
+impl Input<'_> {
+    /// Clears all content from the input and returns the deleted text.
+    ///
+    /// This method selects all text in the textarea, cuts it to clipboard,
+    /// and returns the content that was removed.
+    pub fn clear(&mut self) -> String {
+        self.textarea.select_all();
+        self.textarea.cut();
+        self.textarea.yank_text()
+    }
 }
 
 impl Component for Input<'_> {
@@ -47,8 +69,9 @@ impl Component for Input<'_> {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        let mut block = Block::new()
+        let block = Block::new()
             .borders(Borders::BOTTOM)
+            .border_set(border::THICK)
             .title_bottom(Line::from(""))
             .title_bottom(
                 Line::from({
@@ -64,13 +87,7 @@ impl Component for Input<'_> {
                 })
                 .left_aligned(),
             )
-            .padding(Padding::left(1))
-            .border_set(border::THICK);
-
-        if !self.blur {
-            let instructions = Line::from(vec![" Submit ".into(), "<Enter> ".blue().bold()]);
-            block = block.title_bottom(instructions.left_aligned());
-        }
+            .padding(Padding::left(1));
 
         frame.render_widget(&self.textarea, block.inner(area));
         frame.render_widget(block, area);

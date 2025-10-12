@@ -3,6 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::prelude::*;
+use ratatui::symbols::border;
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders};
 use tracing::debug;
@@ -30,6 +31,8 @@ impl Component for Chat<'_> {
 
         match (key.modifiers, key.code) {
             (_, KeyCode::Tab) => {
+                // TODO: no Tab control.
+                // Esc -> selection mode, Up/Down -> Move Selection, Enter -> focus
                 if self.focus == Focus::Input {
                     self.focus = Focus::Messages;
                     self.input.update(Action::Blur).unwrap()
@@ -37,6 +40,11 @@ impl Component for Chat<'_> {
                     self.focus = Focus::Input;
                     self.input.update(Action::Focus).unwrap()
                 }
+            }
+            (_, KeyCode::Enter) => {
+                let value = self.input.clear();
+                debug!(?value, "submiting");
+                None
             }
             _ => {
                 match self.focus {
@@ -63,11 +71,16 @@ impl Component for Chat<'_> {
 
         frame.render_widget(
             Block::new()
-                .borders(Borders::TOP)
+                .borders(Borders::BOTTOM)
+                .border_set(border::THICK)
                 .title_bottom(Line::from(""))
                 .title_bottom(Line::from(vec![
                     " Toggle Focus ".into(),
-                    "<Tab> ".blue().bold(),
+                    " <Tab> ".blue().bold(),
+                ]))
+                .title_bottom(Line::from(vec![
+                    " Submit ".into(),
+                    " <Enter> ".blue().bold(),
                 ])),
             divider,
         );
