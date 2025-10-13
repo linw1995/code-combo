@@ -1,11 +1,13 @@
-use color_eyre::eyre::Result;
+use color_eyre::Result;
 use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::prelude::*;
-use ratatui::symbols::border;
-use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders};
+use ratatui::{
+    Frame,
+    layout::{Constraint, Layout, Rect},
+    prelude::*,
+    symbols::border,
+    text::Line,
+    widgets::{Block, Borders},
+};
 use tracing::debug;
 
 use super::{Action, Component, Content, Input, Message, Role};
@@ -25,7 +27,7 @@ enum Focus {
 }
 
 impl Component for Chat<'_> {
-    fn handle_key_event(&mut self, key: KeyEvent) -> Option<Action> {
+    fn handle_key_event(&mut self, key: &KeyEvent) {
         debug!(?key, "handling key event");
 
         match (key.modifiers, key.code) {
@@ -34,10 +36,10 @@ impl Component for Chat<'_> {
                 // Esc -> selection mode, Up/Down -> Move Selection, Enter -> focus
                 if self.focus == Focus::Input {
                     self.focus = Focus::Messages;
-                    self.input.update(Action::Blur).unwrap()
+                    self.input.update(&Action::Blur);
                 } else {
                     self.focus = Focus::Input;
-                    self.input.update(Action::Focus).unwrap()
+                    self.input.update(&Action::Focus);
                 }
             }
             (_, KeyCode::Enter) => {
@@ -47,23 +49,20 @@ impl Component for Chat<'_> {
                     role: Role::User,
                     content: Content::Plain(value),
                 });
-                None
             }
             _ => {
                 match self.focus {
                     Focus::Input => self.input.handle_key_event(key),
                     Focus::Messages => {
                         // TODO: handle event
-                        None
                     }
                 }
             }
         }
     }
 
-    fn update(&mut self, action: Action) -> Result<Option<Action>> {
+    fn update(&mut self, action: &Action) {
         debug!(?action, "updating");
-        Ok(None)
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {

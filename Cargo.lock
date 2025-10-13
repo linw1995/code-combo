@@ -230,11 +230,13 @@ checksum = "b94f61472cee1439c0b966b47e3aca9ae07e45d070759512cd390ea2bebc6675"
 name = "coco-tui"
 version = "0.1.0"
 dependencies = [
+ "code-combo",
  "color-eyre",
  "crossterm",
  "futures",
  "ratatui",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-error",
  "tracing-subscriber",

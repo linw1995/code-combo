@@ -10,7 +10,7 @@ use tracing::{debug, warn};
 
 use crate::{Combo, parse};
 
-#[derive(Debug, Snafu)]
+#[derive(Debug, Clone, Snafu)]
 pub enum StarterError {
     #[snafu(display("Starter timeout after {seconds}s"))]
     Timeout { seconds: usize },
@@ -20,6 +20,7 @@ pub enum StarterError {
     Invalid { reason: String },
 }
 
+#[derive(Debug, Clone)]
 pub struct Starter {
     pub path: String,
     pub combo: Result<Combo, StarterError>,

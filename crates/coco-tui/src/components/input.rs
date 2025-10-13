@@ -1,4 +1,4 @@
-use color_eyre::eyre::Result;
+use color_eyre::Result;
 use crossterm::event::KeyEvent;
 use ratatui::{
     Frame,
@@ -49,13 +49,11 @@ impl Input<'_> {
 }
 
 impl Component for Input<'_> {
-    fn handle_key_event(&mut self, key: KeyEvent) -> Option<Action> {
-        debug!(?key, "handling key event");
-        self.textarea.input(key);
-        None
+    fn handle_key_event(&mut self, key: &KeyEvent) {
+        self.textarea.input(key.to_owned());
     }
 
-    fn update(&mut self, action: Action) -> Result<Option<Action>> {
+    fn update(&mut self, action: &Action) {
         debug!(?action, "updating");
         match action {
             Action::Focus => {
@@ -64,8 +62,8 @@ impl Component for Input<'_> {
             Action::Blur => {
                 self.blur = true;
             }
+            _ => {}
         }
-        Ok(None)
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {

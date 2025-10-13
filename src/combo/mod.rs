@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ComboMetadata {
     pub name: String,
@@ -12,7 +12,7 @@ pub struct ComboMetadata {
     pub mode: ComboMode,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum ComboMode {
     BashXtrace {
@@ -34,13 +34,13 @@ impl Display for ComboMode {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Instruction {
     Text(String),
     Command { command: String, output: String },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Combo {
     pub metadata: ComboMetadata,
     pub instructions: Vec<Instruction>,
@@ -50,4 +50,4 @@ mod parser;
 mod starter;
 
 pub use parser::parse;
-pub use starter::{discover_combo_starters, execute_starter};
+pub use starter::{Starter, discover_combo_starters, execute_starter};

@@ -1,4 +1,4 @@
-use color_eyre::eyre::Result;
+use color_eyre::Result;
 use ratatui::{
     Frame,
     prelude::*,
@@ -37,9 +37,7 @@ impl Message {
 
 impl Component for Message {
     #[allow(unused_variables)]
-    fn update(&mut self, action: Action) -> Result<Option<Action>> {
-        Ok(None)
-    }
+    fn update(&mut self, action: &Action) {}
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         use Constraint::*;
 
