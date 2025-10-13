@@ -16,9 +16,39 @@ pub use messages::{Content, Message, Role};
 /// `Component` is a trait that represents a visual and interactive element of the user interface.
 #[allow(dead_code)]
 pub trait Component {
+    /// Get the children components of this component.
+    ///
+    /// This method returns an iterator over mutable references to the child components.
+    /// By default, it returns an empty iterator, meaning the component has no children.
+    /// Components that contain other components should override this method to return
+    /// their children.
+    ///
+    /// # Returns
+    ///
+    /// * `Box<dyn Iterator<Item = &'_ mut dyn Component> + '_>` - An iterator over mutable references to child components.
     fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
         Box::new(std::iter::empty())
     }
+
+    /// Configure the component with action and event senders.
+    ///
+    /// This method sets up the communication channels for the component and its children
+    /// by configuring both action and event senders. It recursively calls config on all
+    /// child components to ensure they have access to the communication channels.
+    ///
+    /// # Arguments
+    ///
+    /// * `action_tx` - An unbounded sender for sending actions to other components.
+    /// * `event_tx` - An unbounded sender for sending events to other components.
+    fn config(&mut self, action_tx: UnboundedSender<Action>, event_tx: UnboundedSender<Event>) {
+        self.config_action_sender(action_tx.clone());
+        self.config_event_sender(event_tx.clone());
+
+        for child in self.children() {
+            child.config(action_tx.clone(), event_tx.clone());
+        }
+    }
+
     /// Configure the action sender for the component.
     ///
     /// This method is called only once during component initialization to set up
@@ -29,6 +59,7 @@ pub trait Component {
     /// * `tx` - An unbounded sender that can be used to send actions to other components.
     #[allow(unused_variables)]
     fn config_action_sender(&mut self, tx: UnboundedSender<Action>) {}
+
     /// Configure the event sender for the component.
     ///
     /// This method is called only once during component initialization to set up
@@ -39,6 +70,7 @@ pub trait Component {
     /// * `tx` - An unbounded sender that can be used to send events to other components.
     #[allow(unused_variables)]
     fn config_event_sender(&mut self, tx: UnboundedSender<Event>) {}
+
     /// Handle incoming events and proprogate events if necessary.
     ///
     /// # Arguments
@@ -55,6 +87,7 @@ pub trait Component {
             }
         }
     }
+
     /// Handle key events.
     ///
     /// # Arguments
@@ -62,6 +95,7 @@ pub trait Component {
     /// * `key` - A key event to be processed.
     #[allow(unused_variables)]
     fn handle_key_event(&mut self, key: &KeyEvent) {}
+
     /// Handle mouse events.
     ///
     /// # Arguments
@@ -81,6 +115,7 @@ pub trait Component {
             child.update(action);
         }
     }
+
     /// Update the state of the component based on a received action. (REQUIRED)
     ///
     /// # Arguments
@@ -88,6 +123,7 @@ pub trait Component {
     /// * `action` - An action that may modify the state of the component.
     #[allow(unused_variables)]
     fn update(&mut self, action: &Action);
+
     /// Render the component on the screen. (REQUIRED)
     ///
     /// # Arguments

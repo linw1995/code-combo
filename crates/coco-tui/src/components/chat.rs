@@ -27,6 +27,13 @@ enum Focus {
 }
 
 impl Component for Chat<'_> {
+    fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
+        let mut children: Vec<&mut dyn Component> = vec![];
+        children.push(&mut self.input);
+        children.extend(self.messages.iter_mut().map(|m| m as &mut dyn Component));
+        Box::new(children.into_iter())
+    }
+
     fn handle_key_event(&mut self, key: &KeyEvent) {
         debug!(?key, "handling key event");
 

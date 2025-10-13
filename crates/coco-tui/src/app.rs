@@ -118,6 +118,9 @@ impl App {
     }
 
     pub async fn run(&mut self) -> Result<()> {
+        self.root
+            .config(self.action_tx.clone(), self.event_tx.clone());
+
         self.enter()?;
         loop {
             self.handle_event().await?;
