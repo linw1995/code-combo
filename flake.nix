@@ -40,9 +40,14 @@
         in rec {
           default = stable;
           stable = pkgs.mkShell {
-            nativeBuildInputs = with pkgs; [
-              (fenix.stable.withComponents components)
-            ];
+            nativeBuildInputs = with pkgs; ([
+                (fenix.stable.withComponents components)
+              ]
+              ++ lib.optionals stdenv.isLinux [pkg-config]);
+            buildInputs = with pkgs; ([]
+              ++ lib.optionals stdenv.isLinux [
+                openssl
+              ]);
             inherit packages;
           };
         };
