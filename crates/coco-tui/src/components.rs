@@ -3,7 +3,7 @@ use crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::{Frame, layout::Rect};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::{actions::Action, events::Event};
+use crate::{actions::*, events::*};
 
 /// A macro to handle component events in a standardized way.
 ///

@@ -10,7 +10,7 @@ use ratatui::{
 };
 use tracing::debug;
 
-use super::{Action, Component, Content, Event, Input, Message, Role};
+use super::{Action, ComboEvent, Component, Content, Event, Input, Message, Role};
 
 #[derive(Default)]
 pub struct Chat<'a> {
@@ -26,6 +26,21 @@ enum Focus {
     Messages,
 }
 
+impl Chat<'_> {
+    fn handle_combo_event(&mut self, event: &ComboEvent) {
+        debug!(?event, "receive combo event");
+        match event {
+            // TODO: Cache all available starters
+            ComboEvent::Discovered { .. } => {}
+            // TODO: Add a combo message to display executing progress
+            ComboEvent::Executing { .. } => {}
+            _ => {
+                // Ignore other kinds of events
+            }
+        }
+    }
+}
+
 impl Component for Chat<'_> {
     fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
         let mut children: Vec<&mut dyn Component> = vec![];
@@ -35,11 +50,18 @@ impl Component for Chat<'_> {
     }
 
     fn handle_event(&mut self, event: &Event) {
-        // Handle key events manually
-        if let Event::Key(key) = event {
-            self.handle_key_event(key);
-        } else {
-            handle_component_event!(self, event);
+        // Override the default handle_event method to handle specific events manually
+        match event {
+            Event::Key(key) => {
+                self.handle_key_event(key);
+            }
+            Event::Combo(combo) => {
+                self.handle_combo_event(combo);
+            }
+            _ => {
+                // Handle other kinds of events by default
+                handle_component_event!(self, event);
+            }
         }
     }
 

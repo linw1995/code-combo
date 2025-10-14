@@ -1,5 +1,6 @@
 use std::{
     io::{Stdout, stdout},
+    path::PathBuf,
     time::Duration,
 };
 
@@ -13,16 +14,16 @@ use futures::{FutureExt, StreamExt};
 use ratatui::backend::CrosstermBackend as Backend;
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
-    task::JoinHandle,
+    task::{self, JoinHandle},
     time::interval,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
 use crate::{
-    actions::Action,
+    actions::{Action, ComboAction},
     components::{Chat, Component},
-    events::Event,
+    events::{ComboEvent, Event},
 };
 
 pub struct App {
@@ -39,12 +40,13 @@ pub struct App {
     root: Box<dyn Component>,
 
     // Config
+    config_dir: PathBuf,
     frame_rate: f64,
 }
 
 impl App {
     /// Construct a new instance of [`App`].
-    pub fn new() -> Result<Self> {
+    pub fn new(config_dir: PathBuf) -> Result<Self> {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (action_tx, action_rx) = mpsc::unbounded_channel();
         Ok(Self {
@@ -56,17 +58,23 @@ impl App {
             event_tx,
             action_tx,
             action_rx,
-            frame_rate: 60.0,
             root: Box::new(Chat::default()),
+            config_dir,
+            frame_rate: 60.0,
         })
     }
 
-    #[inline]
-    fn send_action(&self, action: Action) {
+    pub fn send_action(&self, action: Action) {
         self.action_tx.send(action).unwrap()
     }
 
-    pub fn cancel(&self) {
+    #[inline]
+    fn send_event(&self, event: Event) {
+        self.event_tx.send(event).unwrap()
+    }
+
+    #[inline]
+    fn cancel(&self) {
         self.cancellation_token.cancel();
     }
 
@@ -198,12 +206,13 @@ impl App {
 
     fn handle_action(&mut self) -> Result<()> {
         while let Ok(action) = self.action_rx.try_recv() {
-            if action != Action::Render {
+            if !matches!(action, Action::Render) {
                 debug!(?action, "handle action");
             }
             match action {
                 Action::Quit => self.should_quit = true,
                 Action::Render => self.render()?,
+                Action::Combo(action) => self.handle_combo(action),
                 _ => {
                     self.root.handle_action(&action);
                 }
@@ -211,6 +220,7 @@ impl App {
         }
         Ok(())
     }
+
     fn render(&mut self) -> Result<()> {
         self.terminal.draw(|frame| {
             if let Err(err) = self.root.draw(frame, frame.area()) {
@@ -218,5 +228,27 @@ impl App {
             }
         })?;
         Ok(())
+    }
+
+    fn handle_combo(&mut self, action: ComboAction) {
+        let combo_dir = self.config_dir.join("combos").to_string_lossy().to_string();
+        match action {
+            ComboAction::Discover => {
+                self.send_event(Event::Combo(ComboEvent::Discovering));
+                let combo_dir = combo_dir.clone();
+                let tx = self.event_tx.clone();
+                task::spawn(async move {
+                    let starters = code_combo::discover_combo_starters(&combo_dir).await;
+                    tx.send(Event::Combo(ComboEvent::Discovered { starters }))
+                        .unwrap();
+                });
+            }
+            ComboAction::Execute { name } => {
+                // TODO: discover first
+                self.send_event(Event::Combo(ComboEvent::Executing { name: name.clone() }));
+                // TODO: implement combo execution
+                unimplemented!()
+            }
+        }
     }
 }
