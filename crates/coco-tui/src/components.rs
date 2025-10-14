@@ -5,6 +5,42 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{actions::Action, events::Event};
 
+/// A macro to handle component events in a standardized way.
+///
+/// This macro provides a consistent pattern for handling different types of events
+/// (keyboard, mouse, and other events) for UI components. It matches on the event type
+/// and calls the appropriate handler method on the component. For non-key/mouse events,
+/// it propagates the event to all child components.
+///
+/// # Arguments
+///
+/// * `$component` - The component instance that will handle the event
+/// * `$event` - The event to be processed
+///
+/// # Example
+///
+/// ```rust
+/// handle_component_event!(self, event);
+/// ```
+///
+/// # Why
+///
+/// This approach is preferred over a helper method in the trait to maintain clean and
+/// organized trait methods.
+macro_rules! handle_component_event {
+    ($component:ident, $event:ident) => {
+        match $event {
+            Event::Key(key_event) => $component.handle_key_event(key_event),
+            Event::Mouse(mouse_event) => $component.handle_mouse_event(mouse_event),
+            _ => {
+                for child in $component.children() {
+                    child.handle_event($event);
+                }
+            }
+        }
+    };
+}
+
 mod chat;
 mod input;
 mod messages;
@@ -77,15 +113,7 @@ pub trait Component {
     ///
     /// * `event` - An event to be processed.
     fn handle_event(&mut self, event: &Event) {
-        match event {
-            Event::Key(key_event) => self.handle_key_event(key_event),
-            Event::Mouse(mouse_event) => self.handle_mouse_event(mouse_event),
-            _ => {
-                for child in self.children() {
-                    child.handle_event(event);
-                }
-            }
-        }
+        handle_component_event!(self, event);
     }
 
     /// Handle key events.

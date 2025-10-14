@@ -10,7 +10,7 @@ use ratatui::{
 };
 use tracing::debug;
 
-use super::{Action, Component, Content, Input, Message, Role};
+use super::{Action, Component, Content, Event, Input, Message, Role};
 
 #[derive(Default)]
 pub struct Chat<'a> {
@@ -32,6 +32,15 @@ impl Component for Chat<'_> {
         children.push(&mut self.input);
         children.extend(self.messages.iter_mut().map(|m| m as &mut dyn Component));
         Box::new(children.into_iter())
+    }
+
+    fn handle_event(&mut self, event: &Event) {
+        // Handle key events manually
+        if let Event::Key(key) = event {
+            self.handle_key_event(key);
+        } else {
+            handle_component_event!(self, event);
+        }
     }
 
     fn handle_key_event(&mut self, key: &KeyEvent) {

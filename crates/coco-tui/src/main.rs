@@ -1,5 +1,6 @@
 mod actions;
 mod app;
+#[macro_use]
 mod components;
 mod events;
 mod logging;
