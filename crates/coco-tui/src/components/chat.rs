@@ -14,9 +14,18 @@ use super::{Action, ComboEvent, Component, Content, Event, Input, Message, Role}
 
 #[derive(Default)]
 pub struct Chat<'a> {
+    state: State,
     focus: Focus,
     pub input: Input<'a>,
     pub messages: Vec<Message>,
+}
+
+#[derive(Default)]
+enum State {
+    #[default]
+    Ready,
+    Procesing,
+    ComboDiscovering,
 }
 
 #[derive(Default, PartialEq)]
@@ -30,10 +39,20 @@ impl Chat<'_> {
     fn handle_combo_event(&mut self, event: &ComboEvent) {
         debug!(?event, "receive combo event");
         match event {
+            ComboEvent::Discovering => {
+                self.state = State::ComboDiscovering;
+            }
             // TODO: Cache all available starters
-            ComboEvent::Discovered { .. } => {}
+            ComboEvent::Discovered { .. } => {
+                self.state = State::Ready;
+            }
             // TODO: Add a combo message to display executing progress
-            ComboEvent::Executing { .. } => {}
+            ComboEvent::Executing { .. } => {
+                self.state = State::Procesing;
+            }
+            ComboEvent::Executed { .. } => {
+                self.state = State::Ready;
+            }
             _ => {
                 // Ignore other kinds of events
             }
@@ -81,12 +100,16 @@ impl Component for Chat<'_> {
                 }
             }
             (_, KeyCode::Enter) => {
-                let value = self.input.clear();
-                debug!(?value, "submiting");
-                self.messages.push(Message {
-                    role: Role::User,
-                    content: Content::Plain(value),
-                });
+                if matches!(self.state, State::Ready) {
+                    let value = self.input.clear();
+                    debug!(?value, "submiting");
+                    self.messages.push(Message {
+                        role: Role::User,
+                        content: Content::Plain(value),
+                    });
+                } else {
+                    // TODO: Display an alert when input submission is not available
+                }
             }
             _ => {
                 match self.focus {
@@ -106,8 +129,8 @@ impl Component for Chat<'_> {
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         use Constraint::{Length, Min};
 
-        let vertical = Layout::vertical([Min(0), Length(1), Length(2)]);
-        let [area_messages, divider, area_input] = vertical.areas(area);
+        let vertical = Layout::vertical([Min(0), Length(1), Length(1), Length(1)]);
+        let [area_messages, divider, area_input, bottom] = vertical.areas(area);
 
         let chunks = Layout::vertical(self.messages.iter().map(|m| Length(m.height() as u16)))
             .split(area_messages);
@@ -129,6 +152,24 @@ impl Component for Chat<'_> {
                     " <Enter> ".blue().bold(),
                 ])),
             divider,
+        );
+        frame.render_widget(
+            Block::new()
+                .borders(Borders::BOTTOM)
+                .border_set(border::THICK)
+                .title_bottom(Line::from(""))
+                .title_bottom(
+                    Line::from({
+                        match self.state {
+                            State::Ready => " [Ready] ".green(),
+                            State::Procesing => " [Procesing] ".yellow(),
+                            State::ComboDiscovering => " [Discovering] ".yellow(),
+                        }
+                        .bold()
+                    })
+                    .left_aligned(),
+                ),
+            bottom,
         );
         self.input.draw(frame, area_input)
     }

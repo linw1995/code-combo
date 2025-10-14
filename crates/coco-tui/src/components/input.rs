@@ -1,18 +1,10 @@
 use color_eyre::Result;
 use crossterm::event::KeyEvent;
-use ratatui::{
-    Frame,
-    prelude::*,
-    symbols::border,
-    widgets::{Block, Borders, Padding},
-};
-use tracing::debug;
+use ratatui::{Frame, prelude::*};
 
-use super::{Action, Component};
+use super::Component;
 
 pub struct Input<'a> {
-    blur: bool,
-    state: State,
     pub textarea: tui_textarea::TextArea<'a>,
 }
 
@@ -20,20 +12,8 @@ impl Default for Input<'_> {
     fn default() -> Self {
         let mut textarea = tui_textarea::TextArea::default();
         textarea.set_cursor_line_style(Style::reset());
-        Self {
-            blur: false,
-            state: State::Ready,
-            textarea,
-        }
+        Self { textarea }
     }
-}
-
-#[derive(Default, Debug, PartialEq)]
-#[allow(dead_code)]
-enum State {
-    #[default]
-    Ready,
-    Procesing,
 }
 
 impl Input<'_> {
@@ -53,42 +33,8 @@ impl Component for Input<'_> {
         self.textarea.input(key.to_owned());
     }
 
-    fn update(&mut self, action: &Action) {
-        debug!(?action, "updating");
-        match action {
-            Action::Focus => {
-                self.blur = false;
-            }
-            Action::Blur => {
-                self.blur = true;
-            }
-            _ => {}
-        }
-    }
-
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        let block = Block::new()
-            .borders(Borders::BOTTOM)
-            .border_set(border::THICK)
-            .title_bottom(Line::from(""))
-            .title_bottom(
-                Line::from({
-                    let mut state = match self.state {
-                        State::Ready => " [Ready] ".green(),
-                        State::Procesing => " [Procesing] ".yellow(),
-                    }
-                    .bold();
-                    if self.blur {
-                        state = state.gray()
-                    }
-                    state
-                })
-                .left_aligned(),
-            )
-            .padding(Padding::left(1));
-
-        frame.render_widget(&self.textarea, block.inner(area));
-        frame.render_widget(block, area);
+        frame.render_widget(&self.textarea, area);
         Ok(())
     }
 }

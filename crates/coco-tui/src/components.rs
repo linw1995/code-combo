@@ -144,13 +144,13 @@ pub trait Component {
         }
     }
 
-    /// Update the state of the component based on a received action. (REQUIRED)
+    /// Update the state of the component based on a received action.
     ///
     /// # Arguments
     ///
     /// * `action` - An action that may modify the state of the component.
     #[allow(unused_variables)]
-    fn update(&mut self, action: &Action);
+    fn update(&mut self, action: &Action) {}
 
     /// Render the component on the screen. (REQUIRED)
     ///
