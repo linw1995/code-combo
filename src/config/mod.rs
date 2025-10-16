@@ -1,10 +1,15 @@
 mod provider;
 
+use std::path::PathBuf;
+
 pub use provider::{ProviderConfig, ProviderKind};
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct Config {
     pub providers: Vec<ProviderConfig>,
+
+    #[serde(skip)]
+    pub config_dir: PathBuf,
 }
 
 impl Config {
@@ -16,5 +21,9 @@ impl Config {
         } else {
             Err("Unsupported config file format".into())
         }
+    }
+
+    pub fn combo_dir(&self) -> PathBuf {
+        self.config_dir.join("combos")
     }
 }

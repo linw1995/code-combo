@@ -4,10 +4,11 @@ use clap::{Parser, Subcommand};
 use code_combo::Config;
 use color_eyre::eyre::eyre;
 
-use crate::actions::{Action, ComboAction};
+use crate::actions::ComboAction;
 
 mod actions;
 mod app;
+mod global;
 #[macro_use]
 mod components;
 mod events;
@@ -61,17 +62,19 @@ async fn main() -> color_eyre::Result<()> {
         args.config_path
             .replace(config_dir.join("config.toml").to_string_lossy().to_string());
     }
-    let _config = Config::parse_file(&args.config_path.unwrap())
+    let mut config = Config::parse_file(&args.config_path.unwrap())
         .map_err(|err| eyre!("parse file error: {err}"))?;
+    config.config_dir = config_dir;
+    global::set_config(config).await;
 
-    let mut app = crate::app::App::new(config_dir)?;
+    let mut app = crate::app::App::new()?;
     match args.command {
         Some(Commands::Combo(combo_cmd)) => match combo_cmd {
             ComboCommands::List => {
-                app.send_action(Action::Combo(ComboAction::Discover));
+                app.send_action(ComboAction::Discover.into());
             }
             ComboCommands::Run { name } => {
-                app.send_action(Action::Combo(ComboAction::Execute { name }));
+                app.send_action(ComboAction::Execute { name }.into());
             }
         },
         None => {}

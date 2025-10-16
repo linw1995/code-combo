@@ -1,6 +1,5 @@
 use std::{
     io::{Stdout, stdout},
-    path::PathBuf,
     time::Duration,
 };
 
@@ -14,16 +13,17 @@ use futures::{FutureExt, StreamExt};
 use ratatui::backend::CrosstermBackend as Backend;
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
-    task::{self, JoinHandle},
+    task::JoinHandle,
     time::interval,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, trace, warn};
 
 use crate::{
-    actions::{Action, ComboAction},
+    actions::Action,
     components::{Chat, Component},
-    events::{ComboEvent, Event},
+    events::Event,
+    global,
 };
 
 pub struct App {
@@ -40,15 +40,17 @@ pub struct App {
     root: Box<dyn Component>,
 
     // Config
-    config_dir: PathBuf,
     frame_rate: f64,
 }
 
 impl App {
     /// Construct a new instance of [`App`].
-    pub fn new(config_dir: PathBuf) -> Result<Self> {
+    pub fn new() -> Result<Self> {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (action_tx, action_rx) = mpsc::unbounded_channel();
+
+        global::initialize(event_tx.clone(), action_tx.clone());
+
         Ok(Self {
             terminal: ratatui::Terminal::new(Backend::new(stdout()))?,
             task: tokio::spawn(async {}),
@@ -59,7 +61,6 @@ impl App {
             action_tx,
             action_rx,
             root: Box::new(Chat::default()),
-            config_dir,
             frame_rate: 60.0,
         })
     }
@@ -86,6 +87,7 @@ impl App {
             self.cancellation_token.clone(),
             self.frame_rate,
         );
+        self.send_event(Event::Init);
         self.task = tokio::spawn(async {
             event_loop.await;
         });
@@ -126,9 +128,6 @@ impl App {
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        self.root
-            .config(self.action_tx.clone(), self.event_tx.clone());
-
         self.enter()?;
         loop {
             self.handle_event().await?;
@@ -149,10 +148,6 @@ impl App {
         let mut event_stream = EventStream::new();
         let mut render_interval = interval(Duration::from_secs_f64(1.0 / frame_rate));
 
-        // if this fails, then it's likely a bug in the calling code
-        event_tx
-            .send(Event::Init)
-            .expect("failed to send init event");
         loop {
             let event = tokio::select! {
                 _ = cancellation_token.cancelled() => {
@@ -208,11 +203,12 @@ impl App {
         while let Ok(action) = self.action_rx.try_recv() {
             if !matches!(action, Action::Render) {
                 debug!(?action, "handle action");
+            } else {
+                trace!(?action, "handle action");
             }
             match action {
                 Action::Quit => self.should_quit = true,
                 Action::Render => self.render()?,
-                Action::Combo(action) => self.handle_combo(action),
                 _ => {
                     self.root.handle_action(&action);
                 }
@@ -228,27 +224,5 @@ impl App {
             }
         })?;
         Ok(())
-    }
-
-    fn handle_combo(&mut self, action: ComboAction) {
-        let combo_dir = self.config_dir.join("combos").to_string_lossy().to_string();
-        match action {
-            ComboAction::Discover => {
-                self.send_event(Event::Combo(ComboEvent::Discovering));
-                let combo_dir = combo_dir.clone();
-                let tx = self.event_tx.clone();
-                task::spawn(async move {
-                    let starters = code_combo::discover_combo_starters(&combo_dir).await;
-                    tx.send(Event::Combo(ComboEvent::Discovered { starters }))
-                        .unwrap();
-                });
-            }
-            ComboAction::Execute { name } => {
-                // TODO: discover first
-                self.send_event(Event::Combo(ComboEvent::Executing { name: name.clone() }));
-                // TODO: implement combo execution
-                unimplemented!()
-            }
-        }
     }
 }

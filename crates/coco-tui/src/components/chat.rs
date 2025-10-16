@@ -10,7 +10,9 @@ use ratatui::{
 };
 use tracing::debug;
 
-use super::{Action, ComboEvent, Component, Content, Event, Input, Message, Role};
+use super::{
+    Action, Combo, ComboAction, ComboEvent, Component, Content, Event, Input, Message, Role,
+};
 
 #[derive(Default)]
 pub struct Chat<'a> {
@@ -42,19 +44,13 @@ impl Chat<'_> {
             ComboEvent::Discovering => {
                 self.state = State::ComboDiscovering;
             }
-            // TODO: Cache all available starters
-            ComboEvent::Discovered { .. } => {
-                self.state = State::Ready;
-            }
-            // TODO: Add a combo message to display executing progress
             ComboEvent::Executing { .. } => {
                 self.state = State::Procesing;
             }
-            ComboEvent::Executed { .. } => {
+            ComboEvent::Discovered { .. }
+            | ComboEvent::Executed { .. }
+            | ComboEvent::NotFound { .. } => {
                 self.state = State::Ready;
-            }
-            _ => {
-                // Ignore other kinds of events
             }
         }
     }
@@ -76,6 +72,8 @@ impl Component for Chat<'_> {
             }
             Event::Combo(combo) => {
                 self.handle_combo_event(combo);
+                // Combo events need to be handled by children components
+                handle_component_event!(self, event);
             }
             _ => {
                 // Handle other kinds of events by default
@@ -124,6 +122,16 @@ impl Component for Chat<'_> {
 
     fn update(&mut self, action: &Action) {
         debug!(?action, "updating");
+
+        if let Action::Combo(ComboAction::Discover | ComboAction::Execute { .. }) = action {
+            let combo = Combo::default();
+            // Add a combo message to handle the current action and any subsequent actions.
+            self.messages.push(Message {
+                role: Role::User,
+                content: Content::Combo(combo),
+            });
+            debug!("Combo message pushed");
+        }
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {

@@ -1,7 +1,7 @@
 use color_eyre::Result;
 use crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::{Frame, layout::Rect};
-use tokio::sync::mpsc::UnboundedSender;
+use tracing::trace;
 
 use crate::{actions::*, events::*};
 
@@ -47,7 +47,7 @@ mod messages;
 
 pub use chat::Chat;
 pub use input::Input;
-pub use messages::{Content, Message, Role};
+pub use messages::*;
 
 /// `Component` is a trait that represents a visual and interactive element of the user interface.
 #[allow(dead_code)]
@@ -65,47 +65,6 @@ pub trait Component {
     fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
         Box::new(std::iter::empty())
     }
-
-    /// Configure the component with action and event senders.
-    ///
-    /// This method sets up the communication channels for the component and its children
-    /// by configuring both action and event senders. It recursively calls config on all
-    /// child components to ensure they have access to the communication channels.
-    ///
-    /// # Arguments
-    ///
-    /// * `action_tx` - An unbounded sender for sending actions to other components.
-    /// * `event_tx` - An unbounded sender for sending events to other components.
-    fn config(&mut self, action_tx: UnboundedSender<Action>, event_tx: UnboundedSender<Event>) {
-        self.config_action_sender(action_tx.clone());
-        self.config_event_sender(event_tx.clone());
-
-        for child in self.children() {
-            child.config(action_tx.clone(), event_tx.clone());
-        }
-    }
-
-    /// Configure the action sender for the component.
-    ///
-    /// This method is called only once during component initialization to set up
-    /// the communication channel for sending actions.
-    ///
-    /// # Arguments
-    ///
-    /// * `tx` - An unbounded sender that can be used to send actions to other components.
-    #[allow(unused_variables)]
-    fn config_action_sender(&mut self, tx: UnboundedSender<Action>) {}
-
-    /// Configure the event sender for the component.
-    ///
-    /// This method is called only once during component initialization to set up
-    /// the communication channel for sending events.
-    ///
-    /// # Arguments
-    ///
-    /// * `tx` - An unbounded sender that can be used to send events to other components.
-    #[allow(unused_variables)]
-    fn config_event_sender(&mut self, tx: UnboundedSender<Event>) {}
 
     /// Handle incoming events and proprogate events if necessary.
     ///
@@ -138,9 +97,11 @@ pub trait Component {
     ///
     /// * `action` - An action to be processed.
     fn handle_action(&mut self, action: &Action) {
+        trace!("update self");
         self.update(action);
         for child in self.children() {
-            child.update(action);
+            trace!("update child");
+            child.handle_action(action);
         }
     }
 

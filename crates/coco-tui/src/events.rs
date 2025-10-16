@@ -23,3 +23,9 @@ pub enum ComboEvent {
 
     NotFound { name: String },
 }
+
+impl From<ComboEvent> for Event {
+    fn from(val: ComboEvent) -> Self {
+        Event::Combo(val)
+    }
+}

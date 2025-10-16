@@ -1,17 +1,27 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
     OpenAI,
     Anthropic,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ProviderConfig {
     pub name: String,
     pub kind: ProviderKind,
     pub api_key: String,
     pub base_url: String,
+}
+
+impl std::fmt::Debug for ProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderConfig")
+            .field("name", &self.name)
+            .field("kind", &self.kind)
+            .field("base_url", &self.base_url)
+            .finish_non_exhaustive()
+    }
 }
