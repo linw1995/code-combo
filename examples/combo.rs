@@ -21,7 +21,8 @@ async fn main() {
         }),
     };
 
-    let starter = execute_starter("./examples/commit.sh", true).await;
+    let (execution, _) = execute_starter("./examples/commit.sh", true);
+    let starter = execution.await.expect("execute_starter failed");
     let combo = starter.combo.unwrap();
 
     let content = format!(

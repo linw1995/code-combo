@@ -35,6 +35,9 @@ anthropic-api = "0.0.5"
 tree-sitter = { version = "0.25" }
 tree-sitter-md = { version = "0.3.2" }
 
+# Datetime utilities
+chrono = "0.4.42"
+
 [workspace]
 resolver = "2"
 members = ["crates/coco-tui"]

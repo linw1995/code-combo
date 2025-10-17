@@ -50,4 +50,4 @@ mod parser;
 mod starter;
 
 pub use parser::parse;
-pub use starter::{Starter, discover_combo_starters, execute_starter};
+pub use starter::{Line, LineContent, Starter, discover_combo_starters, execute_starter};

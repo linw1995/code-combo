@@ -44,7 +44,7 @@ impl Chat<'_> {
             ComboEvent::Discovering => {
                 self.state = State::ComboDiscovering;
             }
-            ComboEvent::Executing { .. } => {
+            ComboEvent::Executing { .. } | ComboEvent::Output { .. } => {
                 self.state = State::Procesing;
             }
             ComboEvent::Discovered { .. }

@@ -32,7 +32,7 @@ impl Message {
     pub fn height(&self) -> usize {
         let content = match self.content {
             Content::Plain(ref text) => text.split("\n").count(),
-            Content::Combo(_) => 3,
+            Content::Combo(_) => 10,
             #[allow(unreachable_patterns)]
             _ => 1,
         };

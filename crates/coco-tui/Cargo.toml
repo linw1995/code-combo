@@ -27,4 +27,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-error.workspace = true
 tokio-util = "0.7.16"
+
+# CLI
 clap = "4.5.49"

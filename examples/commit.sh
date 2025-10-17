@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Set PS4 to customize the xtrace output format
 # this will prefix each command with a dollar sign
@@ -36,3 +36,10 @@ git log -n 5
 git diff --staged --stat
 
 git diff --staged
+
+set +x
+
+if [ -f .pre-commit-config.yaml ]; then
+	set -x
+	pre-commit run
+fi

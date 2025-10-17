@@ -91,8 +91,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }) {
                     println!("Executing combo '{}' from {}...", name, starter.path);
-                    let starter = execute_starter(&starter.path, true).await;
-                    run_agent(&starter.combo.unwrap(), &config).await;
+                    let (starter, _rx) = execute_starter(&starter.path, true);
+                    run_agent(&starter.await.unwrap().combo.unwrap(), &config).await;
                 } else {
                     eprintln!("Combo '{}' not found.", name);
                 };
