@@ -9,6 +9,7 @@ use ratatui::{
     text::Line,
     widgets::{Block, Paragraph},
 };
+use throbber_widgets_tui::{Throbber, ThrobberState};
 use tracing::{debug, warn};
 
 use super::{Component, Content, ContentComponent};
@@ -20,6 +21,7 @@ use crate::{
 
 #[derive(Default)]
 pub struct Combo {
+    indicator: Option<ThrobberState>,
     state: State,
 }
 
@@ -33,11 +35,13 @@ const LIMIT: usize = 10;
 
 impl Content for Combo {
     fn height(&self) -> usize {
+        let indicator_height = if self.indicator.is_some() { 1 } else { 0 };
+        let border_height = 1 + 1;
         match self.state.event {
             Some(ComboEvent::Executing { .. } | ComboEvent::Executed { .. }) => {
-                self.state.output.len() + 2 // output area + block width
+                self.state.output.len() + indicator_height + border_height
             }
-            _ => 1,
+            _ => indicator_height + border_height,
         }
     }
 }
@@ -87,9 +91,24 @@ impl Component for Combo {
                     // Already in final state, skip updating
                     return;
                 }
+
+                match &event {
+                    ComboEvent::Discovering | ComboEvent::Executing { .. } => {
+                        self.indicator = Some(ThrobberState::default());
+                    }
+                    ComboEvent::Discovered { .. }
+                    | ComboEvent::Executed { .. }
+                    | ComboEvent::NotFound { .. } => self.indicator = None,
+                    _ => {} // ignore
+                }
                 self.state.event = Some(event.to_owned());
             }
         } else {
+            if let Event::Tick = event
+                && let Some(indicator) = &mut self.indicator
+            {
+                indicator.calc_next();
+            }
             handle_component_event!(self, event);
         }
     }
@@ -109,7 +128,7 @@ impl Component for Combo {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        use Constraint::Length;
+        use Constraint::{Length, Min};
 
         // Use block title to show progress message and indicator with simple loading character
         let title = match &self.state.event {
@@ -137,10 +156,18 @@ impl Component for Combo {
             }
         };
         let block = Block::bordered().title(title);
+        let mut output_area = block.inner(area);
+
+        if let Some(indicator) = &mut self.indicator {
+            let [new_output_area, indicator_area] =
+                Layout::vertical([Min(0), Length(1)]).areas(output_area);
+            output_area = new_output_area;
+
+            frame.render_stateful_widget(Throbber::default(), indicator_area, indicator);
+        }
 
         if let Some(ComboEvent::Executing { .. } | ComboEvent::Executed { .. }) = &self.state.event
         {
-            let output_area = block.inner(area);
             let chunks =
                 Layout::vertical(self.state.output.iter().map(|_| Length(1))).split(output_area);
             for (idx, line) in self.state.output.iter().enumerate() {

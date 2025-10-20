@@ -9,6 +9,7 @@ pub enum Event {
     Combo(ComboEvent),
 
     Init,
+    Tick,
     Render,
 }
 

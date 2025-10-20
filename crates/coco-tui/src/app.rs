@@ -41,6 +41,7 @@ pub struct App {
 
     // Config
     frame_rate: f64,
+    tick_rate: f64,
 }
 
 impl App {
@@ -62,6 +63,7 @@ impl App {
             action_rx,
             root: Box::new(Chat::default()),
             frame_rate: 60.0,
+            tick_rate: 4.0,
         })
     }
 
@@ -86,6 +88,7 @@ impl App {
             self.event_tx.clone(),
             self.cancellation_token.clone(),
             self.frame_rate,
+            self.tick_rate,
         );
         self.send_event(Event::Init);
         self.task = tokio::spawn(async {
@@ -144,15 +147,18 @@ impl App {
         event_tx: UnboundedSender<Event>,
         cancellation_token: CancellationToken,
         frame_rate: f64,
+        tick_rate: f64,
     ) {
         let mut event_stream = EventStream::new();
+        let mut tick_interval = interval(Duration::from_secs_f64(1.0 / tick_rate));
         let mut render_interval = interval(Duration::from_secs_f64(1.0 / frame_rate));
 
         loop {
             let event = tokio::select! {
                 _ = cancellation_token.cancelled() => {
                     break;
-                }
+                },
+                _ = tick_interval.tick() => Event::Tick,
                 _ = render_interval.tick() => Event::Render,
                 crossterm_event = event_stream.next().fuse() => match crossterm_event {
                     Some(Ok(event)) => match event {
