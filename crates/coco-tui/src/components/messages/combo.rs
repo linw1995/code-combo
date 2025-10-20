@@ -10,7 +10,7 @@ use ratatui::{
 };
 use tracing::{debug, warn};
 
-use super::Component;
+use super::{Component, Content, ContentComponent};
 use crate::{
     actions::{Action, ComboAction},
     events::{ComboEvent, Event},
@@ -29,6 +29,12 @@ struct State {
 }
 
 const LIMIT: usize = 10;
+
+impl Content for Combo {
+    fn height(&self) -> usize {
+        LIMIT
+    }
+}
 
 impl Component for Combo {
     fn handle_event(&mut self, event: &Event) {
@@ -151,6 +157,8 @@ impl Component for Combo {
         Ok(())
     }
 }
+
+impl ContentComponent for Combo {}
 
 async fn discover() {
     let tx = global::event_tx();

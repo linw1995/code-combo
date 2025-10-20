@@ -11,7 +11,7 @@ use ratatui::{
 use tracing::debug;
 
 use super::{
-    Action, Combo, ComboAction, ComboEvent, Component, Content, Event, Input, Message, Role,
+    Action, Combo, ComboAction, ComboEvent, Component, Event, Input, Message, Plain, Role,
 };
 
 #[derive(Default)]
@@ -103,7 +103,7 @@ impl Component for Chat<'_> {
                     debug!(?value, "submiting");
                     self.messages.push(Message {
                         role: Role::User,
-                        content: Content::Plain(value),
+                        content: Box::new(Plain::new(value)),
                     });
                 } else {
                     // TODO: Display an alert when input submission is not available
@@ -128,7 +128,7 @@ impl Component for Chat<'_> {
             // Add a combo message to handle the current action and any subsequent actions.
             self.messages.push(Message {
                 role: Role::User,
-                content: Content::Combo(combo),
+                content: Box::new(combo),
             });
             debug!("Combo message pushed");
         }

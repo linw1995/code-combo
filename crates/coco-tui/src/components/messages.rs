@@ -10,7 +10,9 @@ use super::Component;
 use crate::actions::Action;
 
 mod combo;
+mod plain;
 pub use combo::Combo;
+pub use plain::Plain;
 
 pub enum Role {
     User,
@@ -18,34 +20,26 @@ pub enum Role {
     Bot,
 }
 
-pub enum Content {
-    Plain(String),
-    Combo(Combo),
+pub trait Content {
+    fn height(&self) -> usize;
 }
+
+pub trait ContentComponent: Component + Content {}
 
 pub struct Message {
     pub role: Role,
-    pub content: Content,
+    pub content: Box<dyn ContentComponent>,
 }
 
 impl Message {
     pub fn height(&self) -> usize {
-        let content = match self.content {
-            Content::Plain(ref text) => text.split("\n").count(),
-            Content::Combo(_) => 10,
-            #[allow(unreachable_patterns)]
-            _ => 1,
-        };
-        content + 1 // with border
+        self.content.height() + 1 // with border
     }
 }
 
 impl Component for Message {
     fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
-        match &mut self.content {
-            Content::Combo(combo) => Box::new(vec![combo as &mut dyn Component].into_iter()),
-            _ => Box::new(std::iter::empty()),
-        }
+        Box::new(vec![self.content.as_mut() as &mut dyn Component].into_iter())
     }
 
     fn update(&mut self, action: &Action) {
@@ -60,16 +54,7 @@ impl Component for Message {
         let area = block.inner(area);
 
         let [area_role, area_content] = Layout::horizontal([Length(8), Min(1)]).areas(area);
-        match &mut self.content {
-            Content::Plain(text) => {
-                let line = Line::from(vec![text.to_owned().into()]);
-                let paragraph = Paragraph::new(line);
-                frame.render_widget(paragraph, area_content);
-            }
-            Content::Combo(combo) => {
-                combo.draw(frame, area_content)?;
-            }
-        }
+        self.content.draw(frame, area_content)?;
 
         let paragraph = Paragraph::new(Line::from(
             match self.role {
