@@ -32,6 +32,7 @@ macro_rules! handle_component_event {
         match $event {
             Event::Key(key_event) => $component.handle_key_event(key_event),
             Event::Mouse(mouse_event) => $component.handle_mouse_event(mouse_event),
+            Event::Tick => $component.on_tick(),
             _ => {
                 for child in $component.children() {
                     child.handle_event($event);
@@ -90,6 +91,9 @@ pub trait Component {
     /// * `mouse` - A mouse event to be processed.
     #[allow(unused_variables)]
     fn handle_mouse_event(&mut self, mouse: &MouseEvent) {}
+
+    /// Handle tick events.
+    fn on_tick(&mut self) {}
 
     /// Handle incoming actions and proprogate action if necessary.
     ///

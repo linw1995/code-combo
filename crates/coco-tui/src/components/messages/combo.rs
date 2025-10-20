@@ -33,6 +33,52 @@ struct State {
 
 const LIMIT: usize = 10;
 
+impl Combo {
+    fn on_indicator_update(&mut self, event: &ComboEvent) {
+        match &event {
+            ComboEvent::Discovering | ComboEvent::Executing { .. } => {
+                self.indicator = Some(ThrobberState::default());
+            }
+            ComboEvent::Discovered { .. }
+            | ComboEvent::Executed { .. }
+            | ComboEvent::NotFound { .. } => self.indicator = None,
+            _ => {} // ignore
+        }
+    }
+
+    fn on_output_event(&mut self, target: &String, batch: &Vec<code_combo::Line>) {
+        match &self.state.event {
+            Some(ComboEvent::Executing { name } | ComboEvent::Executed { name, .. })
+                if name == target =>
+            {
+                let lines = &mut self.state.output;
+                let batch_size = batch.len();
+                let line_count = lines.len();
+                if batch_size > LIMIT {
+                    debug!(?LIMIT, ?batch_size, "Batch size exceeds limit, truncating");
+                    lines.clear();
+                    lines.extend(batch[batch_size - LIMIT..batch_size].to_vec());
+                } else if line_count + batch_size > LIMIT {
+                    debug!(
+                        ?line_count,
+                        ?batch_size,
+                        ?LIMIT,
+                        "Line count exceeds limit, removing oldest lines"
+                    );
+                    lines.drain(0..(line_count + batch_size - LIMIT));
+                    lines.extend(batch.to_owned());
+                } else {
+                    debug!(?line_count, ?batch_size, ?LIMIT, "Adding new lines");
+                    lines.extend(batch.to_owned());
+                }
+            }
+            _ => {
+                // ignore
+            }
+        }
+    }
+}
+
 impl Content for Combo {
     fn height(&self) -> usize {
         let indicator_height = if self.indicator.is_some() { 1 } else { 0 };
@@ -47,42 +93,16 @@ impl Content for Combo {
 }
 
 impl Component for Combo {
+    fn on_tick(&mut self) {
+        if let Some(indicator) = &mut self.indicator {
+            indicator.calc_next();
+        }
+    }
+
     fn handle_event(&mut self, event: &Event) {
         if let Event::Combo(event) = event {
-            if let ComboEvent::Output {
-                name: target,
-                lines: batch,
-            } = event
-            {
-                match &self.state.event {
-                    Some(ComboEvent::Executing { name } | ComboEvent::Executed { name, .. })
-                        if name == target =>
-                    {
-                        let lines = &mut self.state.output;
-                        let batch_size = batch.len();
-                        let line_count = lines.len();
-                        if batch_size > LIMIT {
-                            debug!(?LIMIT, ?batch_size, "Batch size exceeds limit, truncating");
-                            lines.clear();
-                            lines.extend(batch[batch_size - LIMIT..batch_size].to_vec());
-                        } else if line_count + batch_size > LIMIT {
-                            debug!(
-                                ?line_count,
-                                ?batch_size,
-                                ?LIMIT,
-                                "Line count exceeds limit, removing oldest lines"
-                            );
-                            lines.drain(0..(line_count + batch_size - LIMIT));
-                            lines.extend(batch.to_owned());
-                        } else {
-                            debug!(?line_count, ?batch_size, ?LIMIT, "Adding new lines");
-                            lines.extend(batch.to_owned());
-                        }
-                    }
-                    _ => {
-                        // ignore
-                    }
-                }
+            if let ComboEvent::Output { name, lines } = event {
+                self.on_output_event(name, lines);
             } else {
                 if matches!(
                     self.state.event,
@@ -91,24 +111,10 @@ impl Component for Combo {
                     // Already in final state, skip updating
                     return;
                 }
-
-                match &event {
-                    ComboEvent::Discovering | ComboEvent::Executing { .. } => {
-                        self.indicator = Some(ThrobberState::default());
-                    }
-                    ComboEvent::Discovered { .. }
-                    | ComboEvent::Executed { .. }
-                    | ComboEvent::NotFound { .. } => self.indicator = None,
-                    _ => {} // ignore
-                }
+                self.on_indicator_update(event);
                 self.state.event = Some(event.to_owned());
             }
         } else {
-            if let Event::Tick = event
-                && let Some(indicator) = &mut self.indicator
-            {
-                indicator.calc_next();
-            }
             handle_component_event!(self, event);
         }
     }
