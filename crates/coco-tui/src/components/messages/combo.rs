@@ -6,6 +6,7 @@ use ratatui::{
     layout::{Constraint, Layout},
     prelude::Rect,
     style::Color,
+    text::Line,
     widgets::{Block, Paragraph},
 };
 use tracing::{debug, warn};
@@ -32,7 +33,12 @@ const LIMIT: usize = 10;
 
 impl Content for Combo {
     fn height(&self) -> usize {
-        LIMIT
+        match self.state.event {
+            Some(ComboEvent::Executing { .. } | ComboEvent::Executed { .. }) => {
+                self.state.output.len() + 2 // output area + block width
+            }
+            _ => 1,
+        }
     }
 }
 
@@ -105,51 +111,41 @@ impl Component for Combo {
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         use Constraint::Length;
 
-        let block = Block::bordered().title("Combo");
-        match &self.state.event {
+        // Use block title to show progress message and indicator with simple loading character
+        let title = match &self.state.event {
             Some(ComboEvent::Discovering) => {
-                let p = Paragraph::new("Discovering...").style(Color::Yellow);
-                frame.render_widget(&p, block.inner(area));
+                Line::from("Discovering combo starters...").style(Color::Yellow)
             }
             Some(ComboEvent::Discovered { starters }) => {
-                let p = Paragraph::new(format!("Discovered {} starters", starters.len()))
-                    .style(Color::Green);
-                frame.render_widget(&p, block.inner(area));
+                Line::from(format!("Discovered {} combo starters", starters.len()))
+                    .style(Color::Green)
             }
             Some(ComboEvent::Executing { name }) => {
-                let chunks = Layout::vertical(self.state.output.iter().map(|_| Length(1)))
-                    .split(block.inner(area));
-                for (idx, line) in self.state.output.iter().enumerate() {
-                    let p = Paragraph::new(line.content.to_string());
-                    frame.render_widget(&p, chunks[idx]);
-                }
-                let p = Paragraph::new(format!("Executing starter {name:?}")).style(Color::Yellow);
-                frame.render_widget(&p, block.inner(area));
+                Line::from(format!("Executing combo starter {name:?}...")).style(Color::Yellow)
             }
-            Some(ComboEvent::Executed { name, starter }) => {
-                let chunks = Layout::vertical(self.state.output.iter().map(|_| Length(1)))
-                    .split(block.inner(area));
-                for (idx, line) in self.state.output.iter().enumerate() {
-                    let p = Paragraph::new(line.content.to_string());
-                    frame.render_widget(&p, chunks[idx]);
-                }
-                let p = Paragraph::new(format!(
-                    "Executed starter {name:?}, success: {}",
-                    starter.combo.is_ok()
-                ))
-                .style(Color::Green);
-                frame.render_widget(&p, block.inner(area));
-            }
+            Some(ComboEvent::Executed { name, starter }) => Line::from(format!(
+                "Executed combo starter {name:?}, success: {}",
+                starter.combo.is_ok()
+            ))
+            .style(Color::Green),
             Some(ComboEvent::NotFound { name }) => {
-                let p = Paragraph::new(format!("Starter {name:?} is not found")).style(Color::Red);
-                frame.render_widget(&p, block.inner(area));
+                Line::from(format!("Combo starter {name:?} is not found")).style(Color::Red)
             }
-            None => {
-                let p = Paragraph::new("No action is executed");
-                frame.render_widget(&p, block.inner(area));
-            }
+            None => Line::from("No action is executed"),
             Some(ComboEvent::Output { .. }) => {
                 unreachable!()
+            }
+        };
+        let block = Block::bordered().title(title);
+
+        if let Some(ComboEvent::Executing { .. } | ComboEvent::Executed { .. }) = &self.state.event
+        {
+            let output_area = block.inner(area);
+            let chunks =
+                Layout::vertical(self.state.output.iter().map(|_| Length(1))).split(output_area);
+            for (idx, line) in self.state.output.iter().enumerate() {
+                let p = Paragraph::new(line.content.to_string());
+                frame.render_widget(&p, chunks[idx]);
             }
         }
 
