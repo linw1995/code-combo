@@ -6,6 +6,7 @@ pub enum Event {
     Key(KeyEvent),
     Mouse(MouseEvent),
 
+    BotMessages(Vec<BotMessage>),
     Combo(ComboEvent),
 
     Init,
@@ -13,7 +14,6 @@ pub enum Event {
     Render,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum ComboEvent {
     Discovering,
@@ -30,4 +30,9 @@ impl From<ComboEvent> for Event {
     fn from(val: ComboEvent) -> Self {
         Event::Combo(val)
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum BotMessage {
+    Plain(String),
 }

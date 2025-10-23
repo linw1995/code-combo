@@ -1,3 +1,4 @@
+use code_combo::{Agent, Config};
 use color_eyre::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -11,13 +12,15 @@ use ratatui::{
 use tracing::debug;
 
 use super::{
-    Action, Combo, ComboAction, ComboEvent, Component, Event, Input, Message, Plain, Role,
+    Action, BotMessage, Combo, ComboAction, ComboEvent, Component, Event, Input, Message, Plain,
+    Role,
 };
+use crate::global;
 
-#[derive(Default)]
 pub struct Chat<'a> {
     state: State,
     focus: Focus,
+    agent: Agent,
     pub input: Input<'a>,
     pub messages: Vec<Message>,
 }
@@ -38,6 +41,16 @@ enum Focus {
 }
 
 impl Chat<'_> {
+    pub fn new(config: Config) -> Self {
+        Self {
+            state: State::default(),
+            focus: Focus::default(),
+            agent: Agent::new(config),
+            input: Input::default(),
+            messages: vec![],
+        }
+    }
+
     fn handle_combo_event(&mut self, event: &ComboEvent) {
         debug!(?event, "receive combo event");
         match event {
@@ -75,6 +88,17 @@ impl Component for Chat<'_> {
                 // Combo events need to be handled by children components
                 handle_component_event!(self, event);
             }
+            Event::BotMessages(msgs) => {
+                self.messages
+                    .extend(msgs.iter().cloned().map(|msg| Message {
+                        role: Role::Bot,
+                        content: Box::new(match msg {
+                            BotMessage::Plain(text) => Plain::new(text),
+                            #[allow(unreachable_patterns)]
+                            _ => unreachable!("unknown bot message type: {msg:?}"),
+                        }),
+                    }));
+            }
             _ => {
                 // Handle other kinds of events by default
                 handle_component_event!(self, event);
@@ -103,7 +127,27 @@ impl Component for Chat<'_> {
                     debug!(?value, "submiting");
                     self.messages.push(Message {
                         role: Role::User,
-                        content: Box::new(Plain::new(value)),
+                        content: Box::new(Plain::new(value.clone())),
+                    });
+
+                    let mut agent = self.agent.clone();
+                    tokio::task::spawn(async move {
+                        let msg = code_combo::Message {
+                            role: code_combo::MessageRole::User,
+                            content: code_combo::MessageContent::Text(value.clone()),
+                        };
+                        let msgs = agent.chat(msg).await;
+                        global::event_tx().send(Event::BotMessages(
+                            msgs.into_iter()
+                                .map(|m| {
+                                    if let code_combo::MessageContent::Text(text) = m.content {
+                                        BotMessage::Plain(text)
+                                    } else {
+                                        unreachable!("unknown content type: {:?}", m.content)
+                                    }
+                                })
+                                .collect(),
+                        ))
                     });
                 } else {
                     // TODO: Display an alert when input submission is not available

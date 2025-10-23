@@ -65,9 +65,9 @@ async fn main() -> color_eyre::Result<()> {
     let mut config = Config::parse_file(&args.config_path.unwrap())
         .map_err(|err| eyre!("parse file error: {err}"))?;
     config.config_dir = config_dir;
-    global::set_config(config).await;
+    global::set_config(config.clone()).await;
 
-    let mut app = crate::app::App::new()?;
+    let mut app = crate::app::App::new(config)?;
     match args.command {
         Some(Commands::Combo(combo_cmd)) => match combo_cmd {
             ComboCommands::List => {

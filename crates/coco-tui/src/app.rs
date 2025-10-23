@@ -3,6 +3,7 @@ use std::{
     time::Duration,
 };
 
+use code_combo::Config;
 use color_eyre::Result;
 use crossterm::{
     cursor,
@@ -46,7 +47,7 @@ pub struct App {
 
 impl App {
     /// Construct a new instance of [`App`].
-    pub fn new() -> Result<Self> {
+    pub fn new(config: Config) -> Result<Self> {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (action_tx, action_rx) = mpsc::unbounded_channel();
 
@@ -61,7 +62,7 @@ impl App {
             event_tx,
             action_tx,
             action_rx,
-            root: Box::new(Chat::default()),
+            root: Box::new(Chat::new(config)),
             frame_rate: 60.0,
             tick_rate: 4.0,
         })

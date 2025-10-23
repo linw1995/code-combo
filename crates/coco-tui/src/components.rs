@@ -92,6 +92,9 @@ pub trait Component {
     #[allow(unused_variables)]
     fn handle_mouse_event(&mut self, mouse: &MouseEvent) {}
 
+    /// Handle init event.
+    fn on_init(&mut self) {}
+
     /// Handle tick events.
     fn on_tick(&mut self) {}
 
