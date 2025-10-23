@@ -88,7 +88,11 @@ impl Component for Chat<'_> {
                 // Combo events need to be handled by children components
                 handle_component_event!(self, event);
             }
-            Event::BotMessages(msgs) => {
+            Event::Ask => {
+                self.state = State::Procesing;
+            }
+            Event::Answer(msgs) => {
+                self.state = State::Ready;
                 self.messages
                     .extend(msgs.iter().cloned().map(|msg| Message {
                         role: Role::Bot,
@@ -130,14 +134,16 @@ impl Component for Chat<'_> {
                         content: Box::new(Plain::new(value.clone())),
                     });
 
+                    let tx = global::event_tx();
                     let mut agent = self.agent.clone();
                     tokio::task::spawn(async move {
                         let msg = code_combo::Message {
                             role: code_combo::MessageRole::User,
                             content: code_combo::MessageContent::Text(value.clone()),
                         };
+                        tx.send(Event::Ask).unwrap();
                         let msgs = agent.chat(msg).await;
-                        global::event_tx().send(Event::BotMessages(
+                        tx.send(Event::Answer(
                             msgs.into_iter()
                                 .map(|m| {
                                     if let code_combo::MessageContent::Text(text) = m.content {
@@ -148,6 +154,7 @@ impl Component for Chat<'_> {
                                 })
                                 .collect(),
                         ))
+                        .unwrap();
                     });
                 } else {
                     // TODO: Display an alert when input submission is not available

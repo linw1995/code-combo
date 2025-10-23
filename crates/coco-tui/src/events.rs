@@ -6,7 +6,8 @@ pub enum Event {
     Key(KeyEvent),
     Mouse(MouseEvent),
 
-    BotMessages(Vec<BotMessage>),
+    Ask,
+    Answer(Vec<BotMessage>),
     Combo(ComboEvent),
 
     Init,
