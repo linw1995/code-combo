@@ -3,7 +3,7 @@ use color_eyre::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Flex, Layout, Rect},
     prelude::*,
     symbols::border,
     text::Line,
@@ -192,6 +192,7 @@ impl Component for Chat<'_> {
         let [area_messages, divider, area_input, bottom] = vertical.areas(area);
 
         let chunks = Layout::vertical(self.messages.iter().map(|m| Length(m.height() as u16)))
+            .flex(Flex::End)
             .split(area_messages);
         for (idx, message) in self.messages.iter_mut().enumerate() {
             message.draw(frame, chunks[idx]).unwrap();

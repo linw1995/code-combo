@@ -1,9 +1,5 @@
 use color_eyre::Result;
-use ratatui::{
-    Frame,
-    prelude::*,
-    widgets::{Block, Borders, Paragraph},
-};
+use ratatui::{Frame, prelude::*, widgets::Paragraph};
 use tracing::debug;
 
 use super::Component;
@@ -48,10 +44,6 @@ impl Component for Message {
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         use Constraint::*;
-
-        let block = Block::new().borders(Borders::BOTTOM);
-        frame.render_widget(&block, area);
-        let area = block.inner(area);
 
         let [area_role, area_content] = Layout::horizontal([Length(8), Min(1)]).areas(area);
         self.content.draw(frame, area_content)?;
