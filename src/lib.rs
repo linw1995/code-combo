@@ -1,10 +1,12 @@
 mod agent;
 mod combo;
 mod config;
+mod tools;
 
 pub use agent::*;
 pub use combo::*;
 pub use config::*;
+pub use tools::*;
 
 #[cfg(test)]
 #[ctor::ctor]

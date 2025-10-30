@@ -1,51 +1,52 @@
-use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, sync::Arc};
 
-#[derive(Default)]
-pub struct Executor {}
+use lazy_static::lazy_static;
+use serde_json::Value;
+use snafu::{Whatever, prelude::*};
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct BashInput {
-    pub command: String,
-    #[serde(default = "default_timeout_ms")]
-    pub timeout: u64,
+use crate::{BashTool, Tool};
+
+pub struct Executor {
+    tools: HashMap<String, Arc<dyn Tool>>,
 }
 
-fn default_timeout_ms() -> u64 {
-    600_000
+lazy_static! {
+    static ref BASH_TOOL: Arc<(dyn Tool + 'static)> = Arc::new(BashTool::default());
+    static ref DEFAULT_TOOLS: HashMap<String, Arc<(dyn Tool + 'static)>> = {
+        let mut m = HashMap::<String, Arc<(dyn Tool + 'static)>>::new();
+        m.extend(
+            [BASH_TOOL.clone()]
+                .into_iter()
+                .map(|t| (t.name().to_string(), t)),
+        );
+        m
+    };
 }
 
-impl Executor {
-    pub async fn execute(&self, name: &str, input: serde_json::Value) {
-        match name {
-            "Bash" => {
-                let input: BashInput = serde_json::from_value(input).expect("Valid input");
-                bash(input.command, input.timeout).await;
-            }
-            _ => unimplemented!("Unknown {name} tool"),
+impl Default for Executor {
+    fn default() -> Self {
+        Self {
+            tools: DEFAULT_TOOLS.clone(),
         }
     }
 }
 
-async fn bash(command: String, timeout: u64) {
-    use tokio::process::Command;
-    use tokio::time::{Duration, timeout as tokio_timeout};
+#[derive(Snafu, Debug)]
+pub enum ExecuteError {
+    #[snafu(display("tool {name:?} is not found"))]
+    NotFound { name: String },
+}
 
-    match tokio_timeout(
-        Duration::from_millis(timeout),
-        Command::new("bash").arg("-c").arg(command).output(),
-    )
-    .await
-    {
-        Ok(Ok(output)) => {
-            println!("Status: {}", output.status);
-            println!("Stdout: {}", String::from_utf8_lossy(&output.stdout));
-            eprintln!("Stderr: {}", String::from_utf8_lossy(&output.stderr));
-        }
-        Ok(Err(e)) => {
-            eprintln!("Failed to execute command: {}", e);
-        }
-        Err(_) => {
-            eprintln!("Command timed out after {} ms", timeout);
-        }
+impl Executor {
+    pub async fn execute(&self, name: &str, input: Value) -> Result<Value, Whatever> {
+        let Some(tool) = self.tools.get(name) else {
+            return Err(NotFoundSnafu {
+                name: name.to_string(),
+            }
+            .build())
+            .whatever_context("try get tool error");
+        };
+
+        tool.execute(input).await
     }
 }
