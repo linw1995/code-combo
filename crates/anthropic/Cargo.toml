@@ -1,0 +1,22 @@
+[package]
+name = "anthropic"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Builder
+bon = "3.8.1"
+
+# HTTP
+reqwest = { version = "0.12", features = ["json"] }
+
+# Serialization and data handling
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+snafu.workspace = true
+
+[dev-dependencies]
+# Async Runtime
+tokio.workspace = true

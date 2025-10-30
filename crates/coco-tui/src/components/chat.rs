@@ -137,16 +137,13 @@ impl Component for Chat<'_> {
                     let tx = global::event_tx();
                     let mut agent = self.agent.clone();
                     tokio::task::spawn(async move {
-                        let msg = code_combo::Message {
-                            role: code_combo::MessageRole::User,
-                            content: code_combo::MessageContent::Text(value.clone()),
-                        };
+                        let msg = code_combo::Message::user(code_combo::Content::Text(value));
                         tx.send(Event::Ask).unwrap();
                         let msgs = agent.chat(msg).await;
                         tx.send(Event::Answer(
                             msgs.into_iter()
                                 .map(|m| {
-                                    if let code_combo::MessageContent::Text(text) = m.content {
+                                    if let code_combo::Content::Text(text) = m.content {
                                         BotMessage::Plain(text)
                                     } else {
                                         unreachable!("unknown content type: {:?}", m.content)

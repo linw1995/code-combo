@@ -12,7 +12,6 @@ pub use plain::Plain;
 
 pub enum Role {
     User,
-    #[allow(dead_code)]
     Bot,
 }
 

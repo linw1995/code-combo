@@ -36,6 +36,8 @@
             # Development
             grcov
             pre-commit
+
+            cargo-nextest
           ];
         in rec {
           default = stable;

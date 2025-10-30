@@ -6,6 +6,7 @@ use snafu::{Whatever, prelude::*};
 
 use crate::{BashTool, Tool};
 
+#[derive(Clone)]
 pub struct Executor {
     tools: HashMap<String, Arc<dyn Tool>>,
 }

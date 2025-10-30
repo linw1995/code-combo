@@ -1,0 +1,5 @@
+[profile.default]
+default-filter = 'not test(tests::networking::)'
+
+[profile.networking]
+default-filter = 'test(tests::networking::)'
