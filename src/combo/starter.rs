@@ -214,25 +214,26 @@ mod test {
     async fn execute_starter_abort() -> Result<(), Box<dyn std::error::Error>> {
         let (_guard, file_path) = create_temp_combo(
             "commit.sh",
-            r#"
-#!/bin/bash
+            indoc! {r#"
+            #!/usr/bin/env bash
 
-cat <<EOF
----
-name: commit
-description: Git Commit with Proper Message
-mode: bash_xtrace
-command_prefix: "$ "
----
-Check the recent commits and adhere to the established commit message format.
+            cat <<EOF
+            ---
+            name: commit
+            description: Git Commit with Proper Message
+            mode: bash_xtrace
+            command_prefix: "$ "
+            ---
+            Check the recent commits and adhere to the established commit message format.
 
-Summarize the staged changes and commit them with a clear, concise, and formatted message as a single commit.
-EOF
+            Summarize the staged changes and commit them with a clear, concise, and formatted message as a single commit.
+            EOF
 
-# Enter to continue, Ctrl-D to abort
-read -rs || exit
-            "#,
-        ).await?;
+            # Enter to continue, Ctrl-D to abort
+            read -rs || exit
+            "#},
+        )
+            .await?;
 
         let (execution, _) = execute_starter(&file_path, false);
         let Starter { path, combo } = execution.await?;
@@ -258,7 +259,7 @@ read -rs || exit
         let (_guard, file_path) = create_temp_combo(
             "test.sh",
             indoc! {r#"
-            #!/bin/bash
+            #!/usr/bin/env bash
 
             cat <<-EOF
             ---

@@ -1,16 +1,18 @@
-use anthropic::{Block, Client};
-use tracing::warn;
+use anthropic::Client;
+use serde_json::Value;
+use tracing::{debug, warn};
 
 use super::Config;
 
 mod executor;
-pub use anthropic::{Content, Message, Role};
+pub use anthropic::{Block, Content, Message, Role};
 pub use executor::Executor;
 
 #[derive(Clone)]
 pub struct Agent {
     #[allow(dead_code)]
     config: Config,
+    executor: Executor,
     messages: Vec<Message>,
 }
 
@@ -18,36 +20,35 @@ impl Agent {
     pub fn new(config: Config) -> Self {
         Self {
             config,
+            executor: Executor::default(),
             messages: vec![],
         }
     }
 
-    pub async fn chat(&mut self, message: Message) -> Vec<Message> {
+    pub async fn chat(&mut self, message: Message) -> Message {
         self.messages.push(message);
 
         let (_, client) = self.pick_provider();
         let response = client
-            .messages(self.messages.clone())
+            .messages()
+            .conversations(self.messages.clone())
+            .tools(self.executor.anthropic_tools())
+            .call()
             .await
             .inspect_err(|err| {
                 warn!("send messsages error: {err:?}");
             })
             .unwrap();
-        let messages = response
-            .content
-            .into_iter()
-            .map(|content| match content {
-                Block::Text { text } => Message::assistant(Content::Text(text)),
-                _ => {
-                    warn!(?content, "Unsupported response content block");
-                    Message::assistant("Unsupported content block".into())
-                }
-            })
-            .collect::<Vec<_>>();
 
-        self.messages.extend(messages.clone());
+        let message = Message::assistant(Content::Multiple(response.content));
+        self.messages.push(message.clone());
 
-        messages
+        message
+    }
+
+    pub async fn execute(&mut self, name: &str, input: Value) {
+        let rv = self.executor.execute("", name, input).await;
+        debug!("[tmp] executed result: {rv:?}")
     }
 
     fn pick_provider(&self) -> (&str, Client) {

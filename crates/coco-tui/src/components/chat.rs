@@ -139,18 +139,20 @@ impl Component for Chat<'_> {
                     tokio::task::spawn(async move {
                         let msg = code_combo::Message::user(code_combo::Content::Text(value));
                         tx.send(Event::Ask).unwrap();
-                        let msgs = agent.chat(msg).await;
-                        tx.send(Event::Answer(
-                            msgs.into_iter()
+                        let msg = agent.chat(msg).await;
+                        tx.send(Event::Answer(match msg.content {
+                            code_combo::Content::Text(text) => vec![BotMessage::Plain(text)],
+                            code_combo::Content::Multiple(blocks) => blocks
+                                .into_iter()
                                 .map(|m| {
-                                    if let code_combo::Content::Text(text) = m.content {
+                                    if let code_combo::Block::Text { text } = m {
                                         BotMessage::Plain(text)
                                     } else {
-                                        unreachable!("unknown content type: {:?}", m.content)
+                                        unreachable!("unknown content type: {:?}", m)
                                     }
                                 })
                                 .collect(),
-                        ))
+                        }))
                         .unwrap();
                     });
                 } else {

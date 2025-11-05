@@ -77,15 +77,17 @@ pub struct MessagesRequest {
     pub tools: Vec<Tool>,
 }
 
+#[bon]
 impl MessagesRequest {
-    pub fn simple(model: &str, messages: Vec<Message>) -> Self {
+    #[builder]
+    pub fn new(model: &str, messages: Vec<Message>, #[builder(default)] tools: Vec<Tool>) -> Self {
         Self {
             model: model.to_string(),
             messages,
             max_tokens: 1024,
             temperature: None,
             tool_choice: None,
-            tools: vec![],
+            tools,
         }
     }
 }
@@ -268,7 +270,15 @@ mod tests {
             } = test_md();
 
             let msgs = vec![Message::user("Hello!".into())];
-            let resp = messages(cli, &base_url, MessagesRequest::simple(&model, msgs)).await?;
+            let resp = messages(
+                cli,
+                &base_url,
+                MessagesRequest::builder()
+                    .messages(msgs)
+                    .model(&model)
+                    .build(),
+            )
+            .await?;
             println!("{resp:?}");
 
             Ok(())

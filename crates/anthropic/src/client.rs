@@ -5,7 +5,7 @@ pub use messages::*;
 use reqwest::{Url, header::HeaderMap};
 use snafu::{ResultExt, Whatever};
 
-use crate::Message;
+use crate::{Message, Tool};
 
 pub struct Client {
     model: String,
@@ -39,11 +39,20 @@ impl Client {
         })
     }
 
-    pub async fn messages(&self, msgs: Vec<Message>) -> Result<MessagesResponse> {
+    #[builder]
+    pub async fn messages(
+        &self,
+        conversations: Vec<Message>,
+        tools: Vec<Tool>,
+    ) -> Result<MessagesResponse> {
         messages::messages(
             &self.cli,
             &self.base_url,
-            MessagesRequest::simple(&self.model, msgs),
+            MessagesRequest::builder()
+                .messages(conversations)
+                .model(&self.model)
+                .tools(tools)
+                .build(),
         )
         .await
     }

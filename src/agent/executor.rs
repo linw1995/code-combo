@@ -9,6 +9,8 @@ use crate::{BashTool, Tool};
 #[derive(Clone)]
 pub struct Executor {
     tools: HashMap<String, Arc<dyn Tool>>,
+    tools_pcl: HashMap<String, Vec<(String, PermissionControl)>>,
+    tools_once_pcl: HashMap<String, Vec<String>>,
 }
 
 lazy_static! {
@@ -27,6 +29,8 @@ lazy_static! {
 impl Default for Executor {
     fn default() -> Self {
         Self {
+            tools_pcl: HashMap::default(),
+            tools_once_pcl: HashMap::default(),
             tools: DEFAULT_TOOLS.clone(),
         }
     }
@@ -38,8 +42,28 @@ pub enum ExecuteError {
     NotFound { name: String },
 }
 
+#[derive(Debug)]
+pub enum ExecuteOutput<T> {
+    Granted(T),
+    Denied,
+    AskPermission,
+}
+
+#[derive(Clone, Debug)]
+pub enum PermissionControl {
+    Once(String),
+    Session,
+    Always,
+}
+
 impl Executor {
-    pub async fn execute(&self, name: &str, input: Value) -> Result<Value, Whatever> {
+    pub async fn execute(
+        &mut self,
+        id: &str,
+        name: &str,
+        input: Value,
+    ) -> Result<ExecuteOutput<Value>, Whatever> {
+        // Check tool
         let Some(tool) = self.tools.get(name) else {
             return Err(NotFoundSnafu {
                 name: name.to_string(),
@@ -48,6 +72,64 @@ impl Executor {
             .whatever_context("try get tool error");
         };
 
-        tool.execute(input).await
+        // Check Permission
+        let granted_once = if let Some(pcl) = self.tools_once_pcl.get_mut(name) {
+            let mut granted_idx: Option<usize> = None;
+            for (idx, granted) in pcl.iter().enumerate() {
+                if granted == id {
+                    granted_idx = Some(idx)
+                }
+            }
+            if let Some(idx) = granted_idx {
+                pcl.remove(idx);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if granted_once {
+            // Just execute the tool
+            tool.execute(input).await.map(ExecuteOutput::Granted)
+        } else {
+            // Check if the tool has permission control entries for this session
+            let Some(_pcl) = self.tools_pcl.get(name) else {
+                // No permission control entries found, request permission
+                return Ok(ExecuteOutput::AskPermission);
+            };
+            // TODO: Implement permission control list validation logic
+            unimplemented!("Permission control list validation not yet implemented")
+        }
+    }
+
+    /// Update Permission Control List
+    pub fn update_pcl(&mut self, name: &str, pc: PermissionControl) {
+        match pc {
+            PermissionControl::Once(granted_id) => {
+                if let Some(pcl) = self.tools_once_pcl.get_mut(name) {
+                    pcl.push(granted_id);
+                } else {
+                    self.tools_once_pcl
+                        .insert(name.to_string(), vec![granted_id]);
+                }
+            }
+            _ => {
+                unimplemented!("Permission control {pc:?} is not implemented")
+            }
+        }
+    }
+
+    /// Generate a list of Tools of Anthropic API
+    pub fn anthropic_tools(&self) -> Vec<anthropic::Tool> {
+        self.tools
+            .iter()
+            .map(|(name, t)| anthropic::Tool {
+                name: name.to_owned(),
+                description: t.description().to_string(),
+                input_schema: t.input_schema(),
+            })
+            .collect()
     }
 }
