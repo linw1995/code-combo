@@ -33,7 +33,11 @@ impl From<AskEvent> for Event {
 pub enum AnswerEvent {
     Bot(Vec<BotMessage>),
     // Below events come from User
-    ToolResult { id: String, output: Value },
+    ToolResult {
+        id: String,
+        is_error: bool,
+        output: Value,
+    },
 }
 
 impl From<AnswerEvent> for Event {

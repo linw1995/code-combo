@@ -1,5 +1,8 @@
+use std::sync::Arc;
+
 use anthropic::Client;
 use serde_json::Value;
+use tokio::sync::Mutex;
 use tracing::warn;
 
 use super::Config;
@@ -11,10 +14,10 @@ pub use executor::{ExecuteOutput, Executor};
 
 #[derive(Clone)]
 pub struct Agent {
-    #[allow(dead_code)]
     config: Config,
     executor: Executor,
-    messages: Vec<Message>,
+    /// Shared messages across cloned instances.
+    messages: Arc<Mutex<Vec<Message>>>,
 }
 
 impl Agent {
@@ -22,17 +25,18 @@ impl Agent {
         Self {
             config,
             executor: Executor::default(),
-            messages: vec![],
+            messages: Arc::new(Mutex::new(vec![])),
         }
     }
 
     pub async fn chat(&mut self, message: Message) -> Message {
-        self.messages.push(message);
+        let mut messages = self.messages.lock().await;
+        messages.push(message);
 
         let (_, client) = self.pick_provider();
         let response = client
             .messages()
-            .conversations(self.messages.clone())
+            .conversations(messages.clone())
             .tools(self.executor.anthropic_tools())
             .call()
             .await
@@ -42,7 +46,7 @@ impl Agent {
             .unwrap();
 
         let message = Message::assistant(Content::Multiple(response.content));
-        self.messages.push(message.clone());
+        messages.push(message.clone());
 
         message
     }

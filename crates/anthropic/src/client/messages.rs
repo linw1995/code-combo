@@ -2,6 +2,7 @@ use bon::bon;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use snafu::{Whatever, prelude::*};
+use tracing::trace;
 
 use crate::{Block, Message, Role, Tool};
 
@@ -195,7 +196,11 @@ pub async fn messages(
         .send()
         .await
         .whatever_context("send request error")?;
-    resp.json().await.whatever_context("read response error")
+
+    let resp = resp.text().await.whatever_context("read response error")?;
+    trace!(?req, resp, "messages API invoked");
+
+    serde_json::from_str(&resp).whatever_context("decode response error")
 }
 
 #[cfg(test)]

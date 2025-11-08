@@ -30,7 +30,6 @@ pub enum ToolState {
     Executing,
 
     Completed,
-    #[allow(dead_code)]
     Failed,
 }
 
@@ -117,9 +116,17 @@ impl Component for Tool {
                     self.update_state(ToolState::PendingConfirmation);
                 }
             }
-            Event::Answer(AnswerEvent::ToolResult { id, output }) => {
+            Event::Answer(AnswerEvent::ToolResult {
+                id,
+                is_error,
+                output,
+            }) => {
                 if &self.id == id {
-                    self.update_state(ToolState::Completed);
+                    self.update_state(if *is_error {
+                        ToolState::Failed
+                    } else {
+                        ToolState::Completed
+                    });
                     self.output = Some(output.to_owned());
                 }
             }

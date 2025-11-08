@@ -146,6 +146,20 @@ impl Chat<'_> {
             }
         }
     }
+
+    fn locate_tool_message(&mut self, id: &str) -> Option<usize> {
+        if let Some((idx, _)) = self.messages.iter().enumerate().find(|(_, m)| {
+            m.content
+                .as_any()
+                .downcast_ref::<Tool>()
+                .map(|tool| tool.id == id)
+                .unwrap_or_default()
+        }) {
+            Some(idx)
+        } else {
+            None
+        }
+    }
 }
 
 impl Component for Chat<'_> {
@@ -181,25 +195,36 @@ impl Component for Chat<'_> {
                     })
                 }));
             }
-            Event::Ask(AskEvent::ToolUsePermission(id))
-            | Event::Answer(AnswerEvent::ToolResult { id, .. }) => {
-                if let Some((idx, _)) = self.messages.iter().enumerate().find(|(_, m)| {
-                    m.content
-                        .as_any()
-                        .downcast_ref::<Tool>()
-                        .map(|tool| &tool.id == id)
-                        .unwrap_or_default()
-                }) {
+            Event::Ask(AskEvent::ToolUsePermission(id)) => {
+                if let Some(idx) = self.locate_tool_message(id) {
                     let focus = Focus::Messages(idx);
-                    if matches!(event, Event::Ask(_)) {
-                        // Move focus to tool use message when permission is required
-                        self.update_focus(focus);
-                    } else {
-                        // Move focus back to Input if tool use success.
-                        self.update_focus(Focus::Input);
-                    }
+                    // Move focus to tool use message when permission is required
+                    self.update_focus(focus);
                     // Pass through the relative event to its component.
                     self.messages[idx].handle_event(event);
+                }
+            }
+            Event::Answer(AnswerEvent::ToolResult {
+                id,
+                is_error,
+                output,
+            }) => {
+                if let Some(idx) = self.locate_tool_message(id) {
+                    // Move focus back to Input if tool use success.
+                    self.update_focus(Focus::Input);
+                    // Pass through the relative event to its component.
+                    self.messages[idx].handle_event(event);
+                    // Add ToolResult message to send execution result to LLM API Server
+                    // TODO: Allow user to retry if tool use fails.
+                    let content =
+                        code_combo::Content::Multiple(vec![code_combo::Block::ToolResult {
+                            tool_use_id: id.clone(),
+                            is_error: Some(*is_error),
+                            content: code_combo::Content::Text(
+                                serde_json::to_string(output).unwrap(),
+                            ),
+                        }]);
+                    tokio::task::spawn(task_chat(self.agent.clone(), content));
                 }
             }
             _ => {
@@ -367,13 +392,21 @@ async fn task_tool_use(mut agent: Agent, tool_use: ToolUse) {
     let tx = global::event_tx();
     let code_combo::ToolUse { id, name, input } = tool_use;
     // It will be executed if permission check pass
-    // TODO: Add ToolResult message to send execution result to LLM API Server
-    // TODO: Allow user to retry if tool use fails.
-    match agent.execute(&id, &name, input).await {
+    let rv = agent.execute(&id, &name, input).await;
+    let is_error = matches!(rv, ExecuteOutput::Failure(_));
+    match rv {
         ExecuteOutput::AskPermission => tx.send(AskEvent::ToolUsePermission(id).into()).unwrap(),
-        ExecuteOutput::Success(output) | ExecuteOutput::Failure(output) => tx
-            .send(AnswerEvent::ToolResult { id, output }.into())
-            .unwrap(),
+        ExecuteOutput::Success(output) | ExecuteOutput::Failure(output) => {
+            tx.send(
+                AnswerEvent::ToolResult {
+                    id,
+                    is_error,
+                    output,
+                }
+                .into(),
+            )
+            .unwrap();
+        }
         ExecuteOutput::Denied => (),
     }
 }
