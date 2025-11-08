@@ -184,7 +184,6 @@ impl Component for Chat<'_> {
         use Focus::*;
         use KeyCode::*;
         use KeyModifiers as KM;
-        debug!(?key, "handling key event");
 
         match (&self.focus, key.modifiers, key.code) {
             (Input, KM::NONE, Enter) => self.on_submit(),
@@ -321,22 +320,26 @@ async fn task_chat(mut agent: Agent, content: code_combo::Content) {
     )
     .unwrap();
 
-    // Parallel execution
-    let handles = to_execute
-        .into_iter()
-        .map(|tool_use| {
-            let agent = agent.clone();
-            tokio::task::spawn(task_tool_use(agent, tool_use))
-        })
-        .collect::<Vec<_>>();
-    futures::future::join_all(handles).await;
+    if !to_execute.is_empty() {
+        debug!("run {} executions parallelly", to_execute.len());
+        // Parallel execution
+        let handles = to_execute
+            .into_iter()
+            .map(|tool_use| {
+                let agent = agent.clone();
+                tokio::task::spawn(task_tool_use(agent, tool_use))
+            })
+            .collect::<Vec<_>>();
+        futures::future::join_all(handles).await;
+    }
 }
 
 async fn task_tool_use(mut agent: Agent, tool_use: ToolUse) {
     let tx = global::event_tx();
     let code_combo::ToolUse { id, name, input } = tool_use;
     // It will be executed if permission check pass
-    // TODO: push ToolResult message
+    // TODO: Move focus to tool use message when permission is required
+    // TODO: Add ToolResult message to send execution result to LLM API Server
     match agent.execute(&id, &name, input).await {
         ExecuteOutput::AskPermission => tx.send(AskEvent::ToolUsePermission(id).into()).unwrap(),
         ExecuteOutput::Granted(output) => tx
