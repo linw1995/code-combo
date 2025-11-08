@@ -173,7 +173,7 @@ impl Content for Tool {
         base_height + self.get_content_text().split('\n').count()
     }
 
-    fn actionable(&self) -> bool {
+    fn is_actionable(&self) -> bool {
         self.state == ToolState::PendingConfirmation
     }
 

@@ -131,7 +131,7 @@ impl Chat<'_> {
                 .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")])),
             Focus::Messages(idx) => {
                 let component = &self.messages[idx].content;
-                if component.actionable() {
+                if component.is_actionable() {
                     block = component.block_bottom_with_shortcuts_desc(block);
                 }
                 block.title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")]))
@@ -196,7 +196,7 @@ impl Component for Chat<'_> {
             (Messages(_) | InputBlur, KM::NONE, Char('k')) => self.move_focus_up(),
             (Messages(_), KM::NONE, Char('j')) => self.move_focus_down(),
 
-            (Messages(idx), _, _) if self.messages[*idx].actionable() => {
+            (Messages(idx), _, _) if self.messages[*idx].is_actionable() => {
                 self.messages[*idx].handle_key_event(key);
             }
             (Messages(_), KM::NONE, Esc) => self.input_blur(),

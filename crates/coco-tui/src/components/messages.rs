@@ -5,9 +5,8 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Paragraph},
 };
-use tracing::debug;
 
-use super::{Action, Component};
+use super::Component;
 
 mod combo;
 mod plain;
@@ -21,13 +20,17 @@ pub enum Role {
     Bot,
 }
 
+/// The content of `Message`;
 pub trait Content {
+    /// the height of content rect.
     fn height(&self) -> usize;
 
-    fn actionable(&self) -> bool {
+    /// Check if the content is actionable.
+    fn is_actionable(&self) -> bool {
         false
     }
 
+    /// Display shortcuts description on the block bottom of the chat window.
     fn block_bottom_with_shortcuts_desc<'a>(&self, block: Block<'a>) -> Block<'a> {
         block
     }
@@ -42,6 +45,7 @@ pub trait ContentComponent: Component + Content {
     }
 }
 
+/// A message component in the Chat component
 pub struct Message {
     pub role: Role,
     pub content: Box<dyn ContentComponent>,
@@ -63,13 +67,14 @@ impl Message {
     }
 }
 
+// Delegate Content trait to its inner content.
 impl Content for Message {
     fn height(&self) -> usize {
         self.content.height()
     }
 
-    fn actionable(&self) -> bool {
-        self.content.actionable()
+    fn is_actionable(&self) -> bool {
+        self.content.is_actionable()
     }
 
     fn block_bottom_with_shortcuts_desc<'a>(&self, block: Block<'a>) -> Block<'a> {
@@ -82,11 +87,8 @@ impl Component for Message {
         Box::new(vec![self.content.as_mut() as &mut dyn Component].into_iter())
     }
 
-    fn update(&mut self, action: &Action) {
-        debug!(?action, "updating");
-    }
-
     fn handle_key_event(&mut self, event: &KeyEvent) {
+        // Delegate the handle_key_event to its inner content.
         self.content.handle_key_event(event);
     }
 
