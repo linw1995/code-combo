@@ -1,9 +1,12 @@
+use code_combo::ToolUse;
+
 #[derive(Debug, Clone)]
 pub enum Action {
     Quit,
     Render,
 
     Combo(ComboAction),
+    Tool(ToolAction),
 
     Blur,
     Focus,
@@ -17,6 +20,17 @@ pub enum ComboAction {
 
 impl From<ComboAction> for Action {
     fn from(value: ComboAction) -> Self {
-        Action::Combo(value)
+        Self::Combo(value)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ToolAction {
+    Grant(ToolUse),
+}
+
+impl From<ToolAction> for Action {
+    fn from(value: ToolAction) -> Self {
+        Self::Tool(value)
     }
 }

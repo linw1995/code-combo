@@ -1,12 +1,13 @@
 use anthropic::Client;
 use serde_json::Value;
-use tracing::{debug, warn};
+use tracing::warn;
 
 use super::Config;
+use executor::PermissionControl;
 
 mod executor;
-pub use anthropic::{Block, Content, Message, Role};
-pub use executor::Executor;
+pub use anthropic::{Block, Content, Message, Role, ToolUse};
+pub use executor::{ExecuteOutput, Executor};
 
 #[derive(Clone)]
 pub struct Agent {
@@ -46,9 +47,16 @@ impl Agent {
         message
     }
 
-    pub async fn execute(&mut self, name: &str, input: Value) {
-        let rv = self.executor.execute("", name, input).await;
-        debug!("[tmp] executed result: {rv:?}")
+    pub fn grant_once(&mut self, id: &str, name: &str) {
+        self.executor
+            .update_pcl(name, PermissionControl::Once(id.to_string()))
+    }
+
+    pub async fn execute(&mut self, id: &str, name: &str, input: Value) -> ExecuteOutput<Value> {
+        self.executor
+            .execute(id, name, input)
+            .await
+            .expect("Failed to execute")
     }
 
     fn pick_provider(&self) -> (&str, Client) {

@@ -14,11 +14,7 @@ pub enum Block {
     Text {
         text: String,
     },
-    ToolUse {
-        id: String,
-        name: String,
-        input: Value,
-    },
+    ToolUse(ToolUse),
     ToolResult {
         tool_use_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -26,6 +22,14 @@ pub enum Block {
         /// Note: Content with limited block types, currently Text blocks only
         content: Content,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ToolUse {
+    pub id: String,
+    pub name: String,
+    pub input: Value,
 }
 
 impl Block {
@@ -36,11 +40,11 @@ impl Block {
     }
 
     pub fn tool_use(id: &str, name: &str, input: Value) -> Self {
-        Self::ToolUse {
+        Self::ToolUse(ToolUse {
             id: id.to_string(),
             name: name.to_string(),
             input,
-        }
+        })
     }
 
     pub fn tool_result(tool_use_id: &str, is_error: Option<bool>, content: Content) -> Self {

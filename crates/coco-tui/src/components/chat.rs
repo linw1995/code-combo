@@ -1,6 +1,6 @@
-use code_combo::{Agent, Config};
+use code_combo::{Agent, Config, ExecuteOutput, ToolUse};
 use color_eyre::Result;
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     layout::{Constraint, Flex, Layout, Rect},
@@ -9,13 +9,17 @@ use ratatui::{
     text::Line,
     widgets::{Block, Borders},
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::{
-    Action, BotMessage, Combo, ComboAction, ComboEvent, Component, Event, Input, Message, Plain,
-    Role,
+    Action, AnswerEvent, AskEvent, BotMessage, Combo, ComboAction, ComboEvent, Component, Event,
+    Input, Message, Plain, Role,
 };
-use crate::global;
+use crate::{
+    actions::ToolAction,
+    components::{Content, ContentComponent, Tool, shortcuts_desc},
+    global,
+};
 
 pub struct Chat<'a> {
     state: State,
@@ -33,11 +37,12 @@ enum State {
     ComboDiscovering,
 }
 
-#[derive(Default, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 enum Focus {
     #[default]
     Input,
-    Messages,
+    InputBlur,
+    Messages(usize),
 }
 
 impl Chat<'_> {
@@ -67,6 +72,72 @@ impl Chat<'_> {
             }
         }
     }
+
+    fn input_focus(&mut self) {
+        self.focus = Focus::Input;
+        self.input.update(&Action::Focus);
+    }
+
+    fn input_blur(&mut self) {
+        if self.focus == Focus::Input {
+            self.input.update(&Action::Blur);
+        }
+        self.focus = Focus::InputBlur;
+    }
+
+    fn move_focus_up(&mut self) {
+        match self.focus {
+            Focus::InputBlur if !self.messages.is_empty() => {
+                self.focus = Focus::Messages(self.messages.len() - 1);
+            }
+            Focus::Messages(idx) if idx > 0 => self.focus = Focus::Messages(idx - 1),
+            _ => (), // ignore
+        }
+    }
+
+    fn move_focus_down(&mut self) {
+        if let Focus::Messages(idx) = self.focus
+            && idx < self.messages.len() - 1
+        {
+            self.focus = Focus::Messages(idx + 1);
+        } else {
+            self.focus = Focus::InputBlur;
+        }
+    }
+
+    fn on_submit(&mut self) {
+        if matches!(self.state, State::Ready) {
+            let value = self.input.clear();
+            debug!(?value, "submiting");
+            self.messages
+                .push(Message::user(Plain::new(value.clone()).boxed()));
+            tokio::task::spawn(task_chat(
+                self.agent.clone(),
+                code_combo::Content::Text(value),
+            ));
+        } else {
+            // TODO: Display an alert when input submission is not available
+        }
+    }
+
+    fn block_bottom_with_shortcuts_desc<'a>(&self, mut block: Block<'a>) -> Block<'a> {
+        block = block.title_bottom(Line::from(""));
+        match self.focus {
+            Focus::Input => block
+                .title_bottom(shortcuts_desc(&[("Blur", "Esc")]))
+                .title_bottom(shortcuts_desc(&[("Submit", "CR")])),
+            Focus::InputBlur => block
+                .title_bottom(shortcuts_desc(&[("Focus", "CR")]))
+                .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")])),
+            Focus::Messages(idx) => {
+                let component = &self.messages[idx].content;
+                if component.actionable() {
+                    block = component.block_bottom_with_shortcuts_desc(block);
+                }
+                block.title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")]))
+            }
+        }
+    }
 }
 
 impl Component for Chat<'_> {
@@ -88,20 +159,19 @@ impl Component for Chat<'_> {
                 // Combo events need to be handled by children components
                 handle_component_event!(self, event);
             }
-            Event::Ask => {
+            Event::Ask(AskEvent::Bot) => {
                 self.state = State::Procesing;
             }
-            Event::Answer(msgs) => {
+            Event::Answer(AnswerEvent::Bot(msgs)) => {
                 self.state = State::Ready;
-                self.messages
-                    .extend(msgs.iter().cloned().map(|msg| Message {
-                        role: Role::Bot,
-                        content: Box::new(match msg {
-                            BotMessage::Plain(text) => Plain::new(text),
-                            #[allow(unreachable_patterns)]
-                            _ => unreachable!("unknown bot message type: {msg:?}"),
-                        }),
-                    }));
+                self.messages.extend(msgs.iter().cloned().map(|msg| {
+                    Message::bot(match msg {
+                        BotMessage::Plain(text) => Plain::new(text).boxed(),
+                        BotMessage::ToolUse { id, name, input } => {
+                            Tool::new_use(id, name, input).boxed()
+                        }
+                    })
+                }));
             }
             _ => {
                 // Handle other kinds of events by default
@@ -111,61 +181,28 @@ impl Component for Chat<'_> {
     }
 
     fn handle_key_event(&mut self, key: &KeyEvent) {
+        use Focus::*;
+        use KeyCode::*;
+        use KeyModifiers as KM;
         debug!(?key, "handling key event");
 
-        match (key.modifiers, key.code) {
-            (_, KeyCode::Tab) => {
-                // TODO: no Tab control.
-                // Esc -> selection mode, Up/Down -> Move Selection, Enter -> focus
-                if self.focus == Focus::Input {
-                    self.focus = Focus::Messages;
-                    self.input.update(&Action::Blur);
-                } else {
-                    self.focus = Focus::Input;
-                    self.input.update(&Action::Focus);
-                }
-            }
-            (_, KeyCode::Enter) => {
-                if matches!(self.state, State::Ready) {
-                    let value = self.input.clear();
-                    debug!(?value, "submiting");
-                    self.messages.push(Message {
-                        role: Role::User,
-                        content: Box::new(Plain::new(value.clone())),
-                    });
+        match (&self.focus, key.modifiers, key.code) {
+            (Input, KM::NONE, Enter) => self.on_submit(),
+            (Input, KM::NONE, Esc) => self.input_blur(),
+            (Input, _, _) => self.input.handle_key_event(key),
 
-                    let tx = global::event_tx();
-                    let mut agent = self.agent.clone();
-                    tokio::task::spawn(async move {
-                        let msg = code_combo::Message::user(code_combo::Content::Text(value));
-                        tx.send(Event::Ask).unwrap();
-                        let msg = agent.chat(msg).await;
-                        tx.send(Event::Answer(match msg.content {
-                            code_combo::Content::Text(text) => vec![BotMessage::Plain(text)],
-                            code_combo::Content::Multiple(blocks) => blocks
-                                .into_iter()
-                                .map(|m| {
-                                    if let code_combo::Block::Text { text } = m {
-                                        BotMessage::Plain(text)
-                                    } else {
-                                        unreachable!("unknown content type: {:?}", m)
-                                    }
-                                })
-                                .collect(),
-                        }))
-                        .unwrap();
-                    });
-                } else {
-                    // TODO: Display an alert when input submission is not available
-                }
+            (InputBlur, KM::NONE, Enter) => self.input_focus(),
+
+            (Messages(_) | InputBlur, KM::NONE, Char('k')) => self.move_focus_up(),
+            (Messages(_), KM::NONE, Char('j')) => self.move_focus_down(),
+
+            (Messages(idx), _, _) if self.messages[*idx].actionable() => {
+                self.messages[*idx].handle_key_event(key);
             }
-            _ => {
-                match self.focus {
-                    Focus::Input => self.input.handle_key_event(key),
-                    Focus::Messages => {
-                        // TODO: handle event
-                    }
-                }
+            (Messages(_), KM::NONE, Esc) => self.input_blur(),
+
+            (InputBlur | Messages(_), _, _) => {
+                warn!(?key, ?self.focus, "unknown key event");
             }
         }
     }
@@ -173,14 +210,22 @@ impl Component for Chat<'_> {
     fn update(&mut self, action: &Action) {
         debug!(?action, "updating");
 
-        if let Action::Combo(ComboAction::Discover | ComboAction::Execute { .. }) = action {
-            let combo = Combo::default();
-            // Add a combo message to handle the current action and any subsequent actions.
-            self.messages.push(Message {
-                role: Role::User,
-                content: Box::new(combo),
-            });
-            debug!("Combo message pushed");
+        match action {
+            Action::Combo(ComboAction::Discover | ComboAction::Execute { .. }) => {
+                let combo = Combo::default();
+                self.messages.push(Message {
+                    role: Role::User,
+                    content: Box::new(combo),
+                });
+                debug!("Combo message pushed");
+            }
+            Action::Tool(action) => match action {
+                ToolAction::Grant(tool_use) => {
+                    self.agent.grant_once(&tool_use.id, &tool_use.name);
+                    tokio::task::spawn(task_tool_use(self.agent.clone(), tool_use.to_owned()));
+                }
+            },
+            _ => (),
         }
     }
 
@@ -194,42 +239,109 @@ impl Component for Chat<'_> {
             .flex(Flex::End)
             .split(area_messages);
         for (idx, message) in self.messages.iter_mut().enumerate() {
-            message.draw(frame, chunks[idx]).unwrap();
+            let mut block = Block::new().borders(Borders::LEFT);
+            block = if self.focus == Focus::Messages(idx) {
+                block.border_set(border::THICK)
+            } else {
+                block
+                    .border_set(border::PLAIN)
+                    .border_style(Style::default().dark_gray())
+            };
+            let rect = chunks[idx];
+            frame.render_widget(&block, rect);
+            message.draw(frame, block.inner(rect)).unwrap();
         }
 
+        let block = Block::new()
+            .borders(Borders::BOTTOM)
+            .border_set(border::THICK);
+        frame.render_widget(self.block_bottom_with_shortcuts_desc(block), divider);
+
+        let mut block = Block::new().borders(Borders::BOTTOM);
+        block = if !matches!(self.focus, Focus::Messages(_)) {
+            block.border_set(border::THICK).border_style(Style::reset())
+        } else {
+            block
+                .border_set(border::PLAIN)
+                .border_style(Style::default().dark_gray())
+        };
         frame.render_widget(
-            Block::new()
-                .borders(Borders::BOTTOM)
-                .border_set(border::THICK)
-                .title_bottom(Line::from(""))
-                .title_bottom(Line::from(vec![
-                    " Toggle Focus ".into(),
-                    " <Tab> ".blue().bold(),
-                ]))
-                .title_bottom(Line::from(vec![
-                    " Submit ".into(),
-                    " <Enter> ".blue().bold(),
-                ])),
-            divider,
-        );
-        frame.render_widget(
-            Block::new()
-                .borders(Borders::BOTTOM)
-                .border_set(border::THICK)
-                .title_bottom(Line::from(""))
-                .title_bottom(
-                    Line::from({
-                        match self.state {
-                            State::Ready => " [Ready] ".green(),
-                            State::Procesing => " [Procesing] ".yellow(),
-                            State::ComboDiscovering => " [Discovering] ".yellow(),
-                        }
-                        .bold()
-                    })
-                    .left_aligned(),
-                ),
+            block.title_bottom(Line::from("")).title_bottom(
+                Line::from({
+                    match self.state {
+                        State::Ready => " [Ready] ".green(),
+                        State::Procesing => " [Procesing] ".yellow(),
+                        State::ComboDiscovering => " [Discovering] ".yellow(),
+                    }
+                    .bold()
+                })
+                .left_aligned(),
+            ),
             bottom,
         );
         self.input.draw(frame, area_input)
+    }
+}
+
+async fn task_chat(mut agent: Agent, content: code_combo::Content) {
+    let tx = global::event_tx();
+
+    let msg = code_combo::Message::user(content);
+    tx.send(Event::Ask(AskEvent::Bot)).unwrap();
+
+    let msg = agent.chat(msg).await;
+
+    let mut to_execute: Vec<code_combo::ToolUse> = vec![];
+    tx.send(
+        AnswerEvent::Bot(match msg.content {
+            code_combo::Content::Text(text) => {
+                vec![BotMessage::Plain(text)]
+            }
+            code_combo::Content::Multiple(blocks) => {
+                to_execute.extend(blocks.iter().filter_map(|b| {
+                    if let code_combo::Block::ToolUse(tool_use) = b {
+                        Some(tool_use.clone())
+                    } else {
+                        None
+                    }
+                }));
+                blocks
+                    .into_iter()
+                    .map(|m| match m {
+                        code_combo::Block::Text { text } => BotMessage::Plain(text),
+                        code_combo::Block::ToolUse(code_combo::ToolUse { id, name, input }) => {
+                            BotMessage::ToolUse { id, name, input }
+                        }
+                        _ => unreachable!("unknown content type: {:?}", m),
+                    })
+                    .collect()
+            }
+        })
+        .into(),
+    )
+    .unwrap();
+
+    // Parallel execution
+    let handles = to_execute
+        .into_iter()
+        .map(|tool_use| {
+            let agent = agent.clone();
+            tokio::task::spawn(task_tool_use(agent, tool_use))
+        })
+        .collect::<Vec<_>>();
+    futures::future::join_all(handles).await;
+}
+
+async fn task_tool_use(mut agent: Agent, tool_use: ToolUse) {
+    let tx = global::event_tx();
+    let code_combo::ToolUse { id, name, input } = tool_use;
+    // It will be executed if permission check pass
+    // TODO: push ToolResult message
+    match agent.execute(&id, &name, input).await {
+        ExecuteOutput::AskPermission => tx.send(AskEvent::ToolUsePermission(id).into()).unwrap(),
+        ExecuteOutput::Granted(output) => tx
+            .send(AnswerEvent::ToolResult { id, output }.into())
+            .unwrap(),
+        ExecuteOutput::Denied => (),
     }
 }
