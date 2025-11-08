@@ -1,3 +1,5 @@
+use std::any::Any;
+
 use color_eyre::Result;
 use crossterm::event::KeyEvent;
 use ratatui::{
@@ -36,12 +38,19 @@ pub trait Content {
     }
 }
 
-pub trait ContentComponent: Component + Content {
+pub trait ContentComponent: Component + Content + Any {
     fn boxed(self) -> Box<dyn ContentComponent>
     where
         Self: Sized + 'static,
     {
         Box::new(self)
+    }
+}
+
+impl dyn ContentComponent {
+    /// Allow downcasting the trait object to its concrete type at runtime
+    pub fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

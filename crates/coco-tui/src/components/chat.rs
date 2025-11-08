@@ -173,6 +173,21 @@ impl Component for Chat<'_> {
                     })
                 }));
             }
+            // Move focus to tool use message when permission is required
+            Event::Ask(AskEvent::ToolUsePermission(id)) => {
+                if let Some((idx, _)) = self.messages.iter().enumerate().find(|(_, m)| {
+                    m.content
+                        .as_any()
+                        .downcast_ref::<Tool>()
+                        .map(|tool| &tool.id == id)
+                        .unwrap_or_default()
+                }) {
+                    self.focus = Focus::Messages(idx);
+                    // Pass through the relative event to its component.
+                    self.messages[idx].handle_event(event);
+                }
+            }
+            // TODO: Move focus back to Input if tool use success.
             _ => {
                 // Handle other kinds of events by default
                 handle_component_event!(self, event);
@@ -338,7 +353,6 @@ async fn task_tool_use(mut agent: Agent, tool_use: ToolUse) {
     let tx = global::event_tx();
     let code_combo::ToolUse { id, name, input } = tool_use;
     // It will be executed if permission check pass
-    // TODO: Move focus to tool use message when permission is required
     // TODO: Add ToolResult message to send execution result to LLM API Server
     match agent.execute(&id, &name, input).await {
         ExecuteOutput::AskPermission => tx.send(AskEvent::ToolUsePermission(id).into()).unwrap(),
