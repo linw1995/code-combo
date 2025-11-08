@@ -73,8 +73,14 @@ impl Chat<'_> {
         }
     }
 
+    #[inline]
+    fn update_focus(&mut self, new_focus: Focus) {
+        debug!(?self.focus, ?new_focus, "update focus");
+        self.focus = new_focus
+    }
+
     fn input_focus(&mut self) {
-        self.focus = Focus::Input;
+        self.update_focus(Focus::Input);
         self.input.update(&Action::Focus);
     }
 
@@ -82,15 +88,17 @@ impl Chat<'_> {
         if self.focus == Focus::Input {
             self.input.update(&Action::Blur);
         }
-        self.focus = Focus::InputBlur;
+        self.update_focus(Focus::InputBlur);
     }
 
     fn move_focus_up(&mut self) {
         match self.focus {
             Focus::InputBlur if !self.messages.is_empty() => {
-                self.focus = Focus::Messages(self.messages.len() - 1);
+                self.update_focus(Focus::Messages(self.messages.len() - 1));
             }
-            Focus::Messages(idx) if idx > 0 => self.focus = Focus::Messages(idx - 1),
+            Focus::Messages(idx) if idx > 0 => {
+                self.update_focus(Focus::Messages(idx - 1));
+            }
             _ => (), // ignore
         }
     }
@@ -99,9 +107,9 @@ impl Chat<'_> {
         if let Focus::Messages(idx) = self.focus
             && idx < self.messages.len() - 1
         {
-            self.focus = Focus::Messages(idx + 1);
+            self.update_focus(Focus::Messages(idx + 1));
         } else {
-            self.focus = Focus::InputBlur;
+            self.update_focus(Focus::InputBlur);
         }
     }
 
@@ -173,8 +181,8 @@ impl Component for Chat<'_> {
                     })
                 }));
             }
-            // Move focus to tool use message when permission is required
-            Event::Ask(AskEvent::ToolUsePermission(id)) => {
+            Event::Ask(AskEvent::ToolUsePermission(id))
+            | Event::Answer(AnswerEvent::ToolResult { id, .. }) => {
                 if let Some((idx, _)) = self.messages.iter().enumerate().find(|(_, m)| {
                     m.content
                         .as_any()
@@ -182,12 +190,18 @@ impl Component for Chat<'_> {
                         .map(|tool| &tool.id == id)
                         .unwrap_or_default()
                 }) {
-                    self.focus = Focus::Messages(idx);
+                    let focus = Focus::Messages(idx);
+                    if matches!(event, Event::Ask(_)) {
+                        // Move focus to tool use message when permission is required
+                        self.update_focus(focus);
+                    } else {
+                        // Move focus back to Input if tool use success.
+                        self.update_focus(Focus::Input);
+                    }
                     // Pass through the relative event to its component.
                     self.messages[idx].handle_event(event);
                 }
             }
-            // TODO: Move focus back to Input if tool use success.
             _ => {
                 // Handle other kinds of events by default
                 handle_component_event!(self, event);
