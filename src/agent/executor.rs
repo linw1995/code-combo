@@ -44,7 +44,8 @@ pub enum ExecuteError {
 
 #[derive(Debug)]
 pub enum ExecuteOutput<T> {
-    Granted(T),
+    Success(T),
+    Failure(T),
     Denied,
     AskPermission,
 }
@@ -92,7 +93,13 @@ impl Executor {
 
         if granted_once {
             // Just execute the tool
-            tool.execute(input).await.map(ExecuteOutput::Granted)
+            tool.execute(input).await.map(|rv| {
+                if rv.is_error {
+                    ExecuteOutput::Failure(rv.output)
+                } else {
+                    ExecuteOutput::Success(rv.output)
+                }
+            })
         } else {
             // Check if the tool has permission control entries for this session
             let Some(_pcl) = self.tools_pcl.get(name) else {

@@ -9,7 +9,7 @@ use tokio::{
     time::{error::Elapsed, timeout as tokio_timeout},
 };
 
-use super::Tool;
+use super::{ExecuteResult, Tool};
 
 #[derive(Default)]
 pub struct BashTool {}
@@ -63,7 +63,7 @@ impl Tool for BashTool {
         })
     }
 
-    async fn execute(&self, input: Value) -> Result<Value, Whatever> {
+    async fn execute(&self, input: Value) -> Result<ExecuteResult, Whatever> {
         let BashInput { command, timeout } = serde_json::from_value(input)
             .context(JsonSnafu)
             .whatever_context("deserialize input of tool error")?;
@@ -93,8 +93,10 @@ impl Tool for BashTool {
             stderr: String::from_utf8_lossy(&stderr).to_string(),
         };
 
-        Ok(serde_json::to_value(output)
+        let is_error = output.exit_code != 0;
+        let output = serde_json::to_value(output)
             .context(JsonSnafu)
-            .whatever_context("serialize output of tool error")?)
+            .whatever_context("serialize output of tool error")?;
+        Ok(ExecuteResult { output, is_error })
     }
 }

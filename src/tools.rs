@@ -22,5 +22,11 @@ pub trait Tool: Send + Sync {
     }
 
     /// Execute the tool with a JSON input, producing JSON output
-    async fn execute(&self, input: Value) -> Result<Value, Whatever>;
+    async fn execute(&self, input: Value) -> Result<ExecuteResult, Whatever>;
+}
+
+#[derive(Debug, Clone)]
+pub struct ExecuteResult {
+    pub output: Value,
+    pub is_error: bool,
 }

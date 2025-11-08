@@ -42,7 +42,8 @@ pub struct Tool {
     pub state: ToolState,
 }
 
-#[allow(dead_code)]
+// TODO: Allow user to edit tool input parameters
+
 impl Tool {
     pub fn new_use(id: String, name: String, input: Value) -> Self {
         Self {

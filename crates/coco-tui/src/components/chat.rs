@@ -368,9 +368,10 @@ async fn task_tool_use(mut agent: Agent, tool_use: ToolUse) {
     let code_combo::ToolUse { id, name, input } = tool_use;
     // It will be executed if permission check pass
     // TODO: Add ToolResult message to send execution result to LLM API Server
+    // TODO: Allow user to retry if tool use fails.
     match agent.execute(&id, &name, input).await {
         ExecuteOutput::AskPermission => tx.send(AskEvent::ToolUsePermission(id).into()).unwrap(),
-        ExecuteOutput::Granted(output) => tx
+        ExecuteOutput::Success(output) | ExecuteOutput::Failure(output) => tx
             .send(AnswerEvent::ToolResult { id, output }.into())
             .unwrap(),
         ExecuteOutput::Denied => (),
