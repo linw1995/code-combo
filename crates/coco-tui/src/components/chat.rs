@@ -1,4 +1,4 @@
-use code_combo::{Agent, Config, ExecuteOutput, ToolUse};
+use code_combo::{Agent, Config, ExecuteOutput, Instruction, ToolUse};
 use color_eyre::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -79,9 +79,27 @@ impl Chat<'_> {
             ComboEvent::Executing { .. } | ComboEvent::Output { .. } => {
                 self.state = State::Procesing;
             }
-            ComboEvent::Discovered { .. }
-            | ComboEvent::Executed { .. }
-            | ComboEvent::NotFound { .. } => {
+            ComboEvent::Executed { starter, .. } => {
+                let combo = starter.combo.as_ref().unwrap();
+                let content = code_combo::Content::Text(
+                    combo
+                        .instructions
+                        .iter()
+                        .map(|instruction| match instruction {
+                            Instruction::Text(text) => text.clone(),
+                            Instruction::Command { command, output } => {
+                                format!(
+                                    "I executed this command:\n```\n{}\n```\nAnd it outputs:\n```\n{}\n```",
+                                    command, output
+                                )
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n\n"),
+                );
+                tokio::task::spawn(task_chat(self.agent.clone(), content));
+            }
+            ComboEvent::Discovered { .. } | ComboEvent::NotFound { .. } => {
                 self.state = State::Ready;
             }
         }
