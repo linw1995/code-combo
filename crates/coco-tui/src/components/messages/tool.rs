@@ -8,7 +8,7 @@ use ratatui::{
     style::Stylize,
     symbols::border,
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
 use serde_json::Value;
 use tracing::debug;
@@ -168,22 +168,25 @@ impl Component for Tool {
         let content_area = block.inner(area);
 
         // Create content paragraph
-        let content_text = self.get_content_text();
-        let content_paragraph = Paragraph::new(content_text);
+        let content = self.get_content_text();
+        let content = Paragraph::new(content).wrap(Wrap { trim: false });
 
         // Render the block and content
         frame.render_widget(&block, area);
-        frame.render_widget(content_paragraph, content_area);
+        frame.render_widget(content, content_area);
 
         Ok(())
     }
 }
 
 impl Content for Tool {
-    fn height(&self) -> usize {
+    fn height(&self, width: u16) -> usize {
         // Base height for title
         let base_height = 1;
-        base_height + self.get_content_text().split('\n').count()
+        base_height
+            + Paragraph::new(self.get_content_text())
+                .wrap(Wrap { trim: false })
+                .line_count(width)
     }
 
     fn is_actionable(&self) -> bool {

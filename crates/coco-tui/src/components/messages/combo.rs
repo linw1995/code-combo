@@ -111,7 +111,7 @@ impl Combo {
 }
 
 impl Content for Combo {
-    fn height(&self) -> usize {
+    fn height(&self, _width: u16) -> usize {
         let border_height = 1;
         match self.state.event {
             Some(ComboEvent::Executing { .. } | ComboEvent::Executed { .. }) => {

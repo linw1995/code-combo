@@ -339,9 +339,13 @@ impl Component for Chat<'_> {
         let vertical = Layout::vertical([Min(0), Length(1), Length(1), Length(1)]);
         let [area_messages, divider, area_input, bottom] = vertical.areas(area);
 
-        let chunks = Layout::vertical(self.messages.iter().map(|m| Length(m.height() as u16)))
-            .flex(Flex::End)
-            .split(area_messages);
+        let chunks = Layout::vertical(
+            self.messages
+                .iter()
+                .map(|m| Length(m.height(area_messages.width) as u16)),
+        )
+        .flex(Flex::End)
+        .split(area_messages);
         for (idx, message) in self.messages.iter_mut().enumerate() {
             let mut block = Block::new().borders(Borders::LEFT);
             block = if self.focus == Focus::Messages(idx) {

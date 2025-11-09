@@ -25,7 +25,7 @@ pub enum Role {
 /// The content of `Message`;
 pub trait Content {
     /// the height of content rect.
-    fn height(&self) -> usize;
+    fn height(&self, width: u16) -> usize;
 
     /// Check if the content is actionable.
     fn is_actionable(&self) -> bool {
@@ -78,8 +78,8 @@ impl Message {
 
 // Delegate Content trait to its inner content.
 impl Content for Message {
-    fn height(&self) -> usize {
-        self.content.height()
+    fn height(&self, width: u16) -> usize {
+        self.content.height(width)
     }
 
     fn is_actionable(&self) -> bool {

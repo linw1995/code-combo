@@ -1,29 +1,36 @@
-use ratatui::{Frame, prelude::Rect, widgets::Paragraph};
+use ratatui::{
+    Frame,
+    prelude::Rect,
+    widgets::{Paragraph, Wrap},
+};
 
 use crate::components::ContentComponent;
 
 use super::{Component, Content};
 
-pub struct Plain(String);
+pub struct Plain<'a> {
+    widget: Paragraph<'a>,
+}
 
-impl Plain {
+impl<'a> Plain<'a> {
     pub fn new(text: String) -> Self {
-        Self(text)
+        Self {
+            widget: Paragraph::new(text).wrap(Wrap { trim: false }),
+        }
     }
 }
 
-impl Component for Plain {
+impl<'a> Component for Plain<'a> {
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> color_eyre::eyre::Result<()> {
-        let p = Paragraph::new(self.0.clone());
-        frame.render_widget(&p, area);
+        frame.render_widget(&self.widget, area);
         Ok(())
     }
 }
 
-impl Content for Plain {
-    fn height(&self) -> usize {
-        self.0.split("\n").count()
+impl<'a> Content for Plain<'a> {
+    fn height(&self, width: u16) -> usize {
+        self.widget.line_count(width)
     }
 }
 
-impl ContentComponent for Plain {}
+impl ContentComponent for Plain<'static> {}
