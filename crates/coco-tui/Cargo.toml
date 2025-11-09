@@ -3,6 +3,10 @@ name = "coco-tui"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "coco"
+path = "src/main.rs"
+
 # Terminal UI dependencies for building console interfaces
 [dependencies]
 # CLI
