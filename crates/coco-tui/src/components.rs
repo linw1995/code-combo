@@ -32,8 +32,11 @@ macro_rules! handle_component_event {
         match $event {
             Event::Key(key_event) => $component.handle_key_event(key_event),
             Event::Mouse(mouse_event) => $component.handle_mouse_event(mouse_event),
-            Event::Tick => $component.on_tick(),
             _ => {
+                // Trigger on_tick and propagate the tick event to all children.
+                if matches!($event, Event::Tick) {
+                    $component.on_tick();
+                }
                 for child in $component.children() {
                     child.handle_event($event);
                 }

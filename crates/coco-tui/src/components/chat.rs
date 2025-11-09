@@ -9,6 +9,7 @@ use ratatui::{
     text::Line,
     widgets::{Block, Borders},
 };
+use throbber_widgets_tui::{Throbber, ThrobberState};
 use tracing::{debug, warn};
 
 use super::{
@@ -25,8 +26,10 @@ pub struct Chat<'a> {
     state: State,
     focus: Focus,
     agent: Agent,
-    pub input: Input<'a>,
-    pub messages: Vec<Message>,
+
+    input: Input<'a>,
+    messages: Vec<Message>,
+    indicator: ThrobberState,
 }
 
 #[derive(Default)]
@@ -35,6 +38,16 @@ enum State {
     Ready,
     Procesing,
     ComboDiscovering,
+}
+
+impl std::fmt::Display for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ready => f.write_str("Ready"),
+            Self::Procesing => f.write_str("Procesing"),
+            Self::ComboDiscovering => f.write_str("Discovering"),
+        }
+    }
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -53,6 +66,7 @@ impl Chat<'_> {
             agent: Agent::new(config),
             input: Input::default(),
             messages: vec![],
+            indicator: ThrobberState::default(),
         }
     }
 
@@ -160,6 +174,21 @@ impl Chat<'_> {
             None
         }
     }
+
+    fn widget_state_indicator(&self) -> Line<'_> {
+        let state = &self.state;
+        (match state {
+            State::Ready => Line::from(format!(" {state} ").green()),
+            State::Procesing | State::ComboDiscovering => Line::from(vec![
+                " ".into(),
+                Throbber::default()
+                    .throbber_set(throbber_widgets_tui::BRAILLE_EIGHT_DOUBLE)
+                    .to_symbol_span(&self.indicator),
+                format!("{state} ").yellow(),
+            ]),
+        })
+        .bold()
+    }
 }
 
 impl Component for Chat<'_> {
@@ -168,6 +197,10 @@ impl Component for Chat<'_> {
         children.push(&mut self.input);
         children.extend(self.messages.iter_mut().map(|m| m as &mut dyn Component));
         Box::new(children.into_iter())
+    }
+
+    fn on_tick(&mut self) {
+        self.indicator.calc_next();
     }
 
     fn handle_event(&mut self, event: &Event) {
@@ -319,17 +352,9 @@ impl Component for Chat<'_> {
                 .border_style(Style::default().dark_gray())
         };
         frame.render_widget(
-            block.title_bottom(Line::from("")).title_bottom(
-                Line::from({
-                    match self.state {
-                        State::Ready => " [Ready] ".green(),
-                        State::Procesing => " [Procesing] ".yellow(),
-                        State::ComboDiscovering => " [Discovering] ".yellow(),
-                    }
-                    .bold()
-                })
-                .left_aligned(),
-            ),
+            block
+                .title_bottom(Line::from(""))
+                .title_bottom(self.widget_state_indicator()),
             bottom,
         );
         self.input.draw(frame, area_input)
