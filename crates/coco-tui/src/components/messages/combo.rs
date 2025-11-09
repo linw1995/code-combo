@@ -3,10 +3,10 @@ use std::collections::VecDeque;
 use color_eyre::Result;
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout},
+    layout::{Alignment, Constraint, Layout},
     prelude::Rect,
-    style::Color,
-    text::Line,
+    style::Stylize,
+    text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
 use tracing::{debug, warn};
@@ -73,6 +73,41 @@ impl Combo {
             }
         }
     }
+
+    fn get_title_spans(&self) -> Vec<Span<'_>> {
+        // Use block title to show progress message and indicator with simple loading character
+        let mut spans = vec![" 󱐋 ".yellow(), " Combo: ".into()];
+        match &self.state.event {
+            Some(ComboEvent::Discovering) => {
+                spans.push("  Discovering combo starters...".yellow())
+            }
+            Some(ComboEvent::Discovered { starters }) => {
+                spans.push(format!("  Discovered {} combo starters", starters.len()).green())
+            }
+            Some(ComboEvent::Executing { name }) => {
+                spans.push(name.as_str().cyan());
+                spans.push("   Executing...".yellow());
+            }
+            Some(ComboEvent::Executed { name, starter }) => {
+                spans.push(name.as_str().cyan());
+                spans.push(if starter.combo.is_ok() {
+                    "   Completed".green()
+                } else {
+                    "   Failed".red()
+                });
+            }
+            Some(ComboEvent::NotFound { name }) => {
+                spans.push(name.as_str().cyan());
+                spans.push("   Not found".red())
+            }
+            None => spans.push("  Null".into()),
+            Some(ComboEvent::Output { .. }) => {
+                unreachable!()
+            }
+        }
+        spans.push(" ".into());
+        spans
+    }
 }
 
 impl Content for Combo {
@@ -125,32 +160,12 @@ impl Component for Combo {
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         use Constraint::Length;
 
-        // Use block title to show progress message and indicator with simple loading character
-        let title = match &self.state.event {
-            Some(ComboEvent::Discovering) => {
-                Line::from("Discovering combo starters...").style(Color::Yellow)
-            }
-            Some(ComboEvent::Discovered { starters }) => {
-                Line::from(format!("Discovered {} combo starters", starters.len()))
-                    .style(Color::Green)
-            }
-            Some(ComboEvent::Executing { name }) => {
-                Line::from(format!("Executing combo starter {name:?}...")).style(Color::Yellow)
-            }
-            Some(ComboEvent::Executed { name, starter }) => Line::from(format!(
-                "Executed combo starter {name:?}, success: {}",
-                starter.combo.is_ok()
-            ))
-            .style(Color::Green),
-            Some(ComboEvent::NotFound { name }) => {
-                Line::from(format!("Combo starter {name:?} is not found")).style(Color::Red)
-            }
-            None => Line::from("No action is executed"),
-            Some(ComboEvent::Output { .. }) => {
-                unreachable!()
-            }
-        };
-        let block = Block::new().borders(Borders::TOP).title(title);
+        let title_spans = self.get_title_spans();
+        let block = Block::new()
+            .borders(Borders::TOP)
+            .title(Line::from("")) // placeholder for border on the left of the actual title
+            .title(Line::from(title_spans))
+            .title_alignment(Alignment::Left);
         let output_area = block.inner(area);
 
         if let Some(ComboEvent::Executing { .. } | ComboEvent::Executed { .. }) = &self.state.event
