@@ -148,6 +148,9 @@ impl Component for Tool {
                 self.update_state(ToolState::Executing);
             }
             (KeyModifiers::NONE, KeyCode::Esc) => {
+                global::action_tx()
+                    .send(ToolAction::Cancel(self.tool()).into())
+                    .unwrap();
                 self.update_state(ToolState::Cancelled);
             }
             _ => (), // ignore

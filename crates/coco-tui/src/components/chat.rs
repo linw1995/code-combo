@@ -105,22 +105,18 @@ impl Chat<'_> {
         }
     }
 
-    #[inline]
     fn update_focus(&mut self, new_focus: Focus) {
+        if self.focus == new_focus {
+            return;
+        }
         debug!(?self.focus, ?new_focus, "update focus");
-        self.focus = new_focus
-    }
-
-    fn input_focus(&mut self) {
-        self.update_focus(Focus::Input);
-        self.input.update(&Action::Focus);
-    }
-
-    fn input_blur(&mut self) {
         if self.focus == Focus::Input {
             self.input.update(&Action::Blur);
         }
-        self.update_focus(Focus::InputBlur);
+        if new_focus == Focus::Input {
+            self.input.update(&Action::Focus);
+        }
+        self.focus = new_focus
     }
 
     fn move_focus_up(&mut self) {
@@ -292,10 +288,10 @@ impl Component for Chat<'_> {
 
         match (&self.focus, key.modifiers, key.code) {
             (Input, KM::NONE, Enter) => self.on_submit(),
-            (Input, KM::NONE, Esc) => self.input_blur(),
+            (Input, KM::NONE, Esc) => self.update_focus(Focus::InputBlur),
             (Input, _, _) => self.input.handle_key_event(key),
 
-            (InputBlur, KM::NONE, Enter) => self.input_focus(),
+            (InputBlur, KM::NONE, Enter) => self.update_focus(Focus::Input),
 
             (Messages(_) | InputBlur, KM::NONE, Char('k')) => self.move_focus_up(),
             (Messages(_), KM::NONE, Char('j')) => self.move_focus_down(),
@@ -303,7 +299,7 @@ impl Component for Chat<'_> {
             (Messages(idx), _, _) if self.messages[*idx].is_actionable() => {
                 self.messages[*idx].handle_key_event(key);
             }
-            (Messages(_), KM::NONE, Esc) => self.input_blur(),
+            (Messages(_), KM::NONE, Esc) => self.update_focus(Focus::InputBlur),
 
             (InputBlur | Messages(_), _, _) => {
                 warn!(?key, ?self.focus, "unknown key event");
@@ -327,6 +323,14 @@ impl Component for Chat<'_> {
                 ToolAction::Grant(tool_use) => {
                     self.agent.grant_once(&tool_use.id, &tool_use.name);
                     tokio::task::spawn(task_tool_use(self.agent.clone(), tool_use.to_owned()));
+                }
+                ToolAction::Cancel(tool_use) => {
+                    // Move focus back to Input when tool use is cancelled.
+                    if let Some(idx) = self.locate_tool_message(&tool_use.id)
+                        && self.focus == Focus::Messages(idx)
+                    {
+                        self.update_focus(Focus::Input);
+                    }
                 }
             },
             _ => (),
