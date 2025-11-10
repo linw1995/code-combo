@@ -101,30 +101,6 @@ impl Chat<'_> {
         self.focus = new_focus
     }
 
-    fn move_focus_up(&mut self) {
-        match self.focus {
-            Focus::InputBlur => {
-                if self.messages.select_last() {
-                    self.update_focus(Focus::Messages);
-                }
-            }
-            Focus::Messages => {
-                self.messages.select_prev();
-            }
-            _ => (), // ignore
-        }
-    }
-
-    fn move_focus_down(&mut self) {
-        if let Focus::Messages = self.focus
-            && self.messages.select_next()
-        {
-            return;
-        }
-        self.messages.blur();
-        self.update_focus(Focus::InputBlur);
-    }
-
     fn on_submit(&mut self) {
         if matches!(self.state, State::Ready) {
             let value = self.input.clear();
@@ -249,19 +225,37 @@ impl Component for Chat<'_> {
         use KeyModifiers as KM;
 
         match (&self.focus, key.modifiers, key.code) {
-            (Input, KM::NONE, Enter) => self.on_submit(),
+            // Focus switching
             (Input, KM::NONE, Esc) => self.update_focus(Focus::InputBlur),
-            (Input, _, _) => self.input.handle_key_event(key),
-
             (InputBlur, KM::NONE, Enter) => self.update_focus(Focus::Input),
-
-            (Messages | InputBlur, KM::NONE, Char('k')) => self.move_focus_up(),
-            (Messages, KM::NONE, Char('j')) => self.move_focus_down(),
-
             (Messages, KM::NONE, Esc) => {
                 self.messages.blur();
                 self.update_focus(Focus::InputBlur);
             }
+
+            // Inputing
+            (Input, KM::NONE, Enter) => self.on_submit(),
+            (Input, _, _) => self.input.handle_key_event(key),
+
+            // Navigation
+            (InputBlur, KM::NONE, Char('k')) => {
+                if self.messages.select_last() {
+                    // Move focus to Messages if selecting the last message succeeds
+                    self.update_focus(Focus::Messages);
+                }
+            }
+            (Messages, KM::NONE, Char('k')) => {
+                self.messages.select_prev();
+            }
+            (Messages, KM::NONE, Char('j')) => {
+                if !self.messages.select_next() {
+                    // Move focus to InputBlur when no more messages are available
+                    self.messages.blur();
+                    self.update_focus(Focus::InputBlur);
+                }
+            }
+
+            // Handle actionable messages
             (Messages, _, _) => self.messages.handle_key_event(key),
 
             (InputBlur, _, _) => {
