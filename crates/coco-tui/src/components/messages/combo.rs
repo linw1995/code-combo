@@ -11,7 +11,7 @@ use ratatui::{
 };
 use tracing::{debug, warn};
 
-use super::{Component, Content, ContentComponent};
+use super::{Component, Content, ContentComponent, Plain};
 use crate::{
     actions::{Action, ComboAction},
     events::{ComboEvent, Event},
@@ -19,8 +19,9 @@ use crate::{
 };
 
 #[derive(Default)]
-pub struct Combo {
+pub struct Combo<'a> {
     state: State,
+    widget: Option<Plain<'a>>,
 }
 
 #[derive(Default, Clone)]
@@ -31,14 +32,34 @@ struct State {
 
 const LIMIT: usize = 10;
 
-impl Combo {
-    fn on_indicator_update(&mut self, event: &ComboEvent) {
-        match &event {
-            ComboEvent::Discovering | ComboEvent::Executing { .. } => (),
-            ComboEvent::Discovered { .. }
-            | ComboEvent::Executed { .. }
-            | ComboEvent::NotFound { .. } => (),
-            _ => {} // ignore
+impl<'a> Combo<'a> {
+    fn update_event_state(&mut self, event: &ComboEvent) {
+        // Skip updating if in final state.
+        if matches!(
+            self.state.event,
+            Some(ComboEvent::NotFound { .. } | ComboEvent::Executed { .. })
+        ) {
+            return;
+        }
+        let new_state = Some(event.to_owned());
+        debug!(?self.state.event, ?new_state, "update event state");
+        self.state.event = new_state;
+    }
+
+    fn on_combo_event(&mut self, event: &ComboEvent) {
+        match event {
+            ComboEvent::Output { name, lines } => self.on_output_event(name, lines),
+            ComboEvent::Discovering
+            | ComboEvent::Executing { .. }
+            | ComboEvent::Discovered { .. }
+            | ComboEvent::NotFound { .. } => {
+                self.update_event_state(event);
+            }
+            ComboEvent::Executed { starter, .. } => {
+                let combo = starter.combo.as_ref().unwrap();
+                self.update_plain_msg(combo);
+                self.update_event_state(event);
+            }
         }
     }
 
@@ -108,36 +129,33 @@ impl Combo {
         spans.push(" ".into());
         spans
     }
+
+    fn update_plain_msg(&mut self, combo: &code_combo::Combo) {
+        let text = combo.to_markdown();
+        self.widget = Some(Plain::new(text))
+    }
 }
 
-impl Content for Combo {
-    fn height(&self, _width: u16) -> usize {
+impl<'a> Content for Combo<'a> {
+    fn height(&self, width: u16) -> usize {
         let border_height = 1;
-        match self.state.event {
-            Some(ComboEvent::Executing { .. } | ComboEvent::Executed { .. }) => {
-                self.state.output.len() + border_height
+        if let Some(plain) = &self.widget {
+            plain.height(width) + border_height
+        } else {
+            match self.state.event {
+                Some(ComboEvent::Executing { .. } | ComboEvent::Executed { .. }) => {
+                    self.state.output.len() + border_height
+                }
+                _ => border_height,
             }
-            _ => border_height,
         }
     }
 }
 
-impl Component for Combo {
+impl<'a> Component for Combo<'a> {
     fn handle_event(&mut self, event: &Event) {
         if let Event::Combo(event) = event {
-            if let ComboEvent::Output { name, lines } = event {
-                self.on_output_event(name, lines);
-            } else {
-                if matches!(
-                    self.state.event,
-                    Some(ComboEvent::NotFound { .. } | ComboEvent::Executed { .. })
-                ) {
-                    // Already in final state, skip updating
-                    return;
-                }
-                self.on_indicator_update(event);
-                self.state.event = Some(event.to_owned());
-            }
+            self.on_combo_event(event);
         } else {
             handle_component_event!(self, event);
         }
@@ -166,9 +184,13 @@ impl Component for Combo {
             .title(Line::from("")) // placeholder for border on the left of the actual title
             .title(Line::from(title_spans))
             .title_alignment(Alignment::Left);
+        frame.render_widget(&block, area);
         let output_area = block.inner(area);
 
-        if let Some(ComboEvent::Executing { .. } | ComboEvent::Executed { .. }) = &self.state.event
+        if let Some(plain) = &mut self.widget {
+            plain.draw(frame, output_area)?;
+        } else if let Some(ComboEvent::Executing { .. } | ComboEvent::Executed { .. }) =
+            &self.state.event
         {
             let chunks =
                 Layout::vertical(self.state.output.iter().map(|_| Length(1))).split(output_area);
@@ -178,12 +200,11 @@ impl Component for Combo {
             }
         }
 
-        frame.render_widget(&block, area);
         Ok(())
     }
 }
 
-impl ContentComponent for Combo {}
+impl ContentComponent for Combo<'static> {}
 
 async fn discover() {
     let tx = global::event_tx();

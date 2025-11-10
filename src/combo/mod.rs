@@ -46,6 +46,29 @@ pub struct Combo {
     pub instructions: Vec<Instruction>,
 }
 
+impl Combo {
+    pub fn to_markdown(&self) -> String {
+        self.instructions
+            .iter()
+            .map(|instruction| match instruction {
+                Instruction::Text(text) => text.clone(),
+                Instruction::Command { command, output } => [
+                    "I executed this command:\n",
+                    "```",
+                    command.as_str(),
+                    "```\n",
+                    "And it outputs:\n",
+                    "```",
+                    output.as_str(),
+                    "```\n",
+                ]
+                .join("\n"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+}
+
 mod parser;
 mod starter;
 
