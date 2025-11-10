@@ -3,7 +3,7 @@ use color_eyre::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
-    layout::{Constraint, Flex, Layout, Rect},
+    layout::{Constraint, Layout, Rect},
     prelude::*,
     symbols::border,
     text::Line,
@@ -13,14 +13,11 @@ use throbber_widgets_tui::{Throbber, ThrobberState};
 use tracing::{debug, warn};
 
 use super::{
-    Action, AnswerEvent, AskEvent, BotMessage, Combo, ComboAction, ComboEvent, Component, Event,
-    Input, Message, Plain, Role,
+    Action, AnswerEvent, AskEvent, BotMessage, Combo, ComboAction, ComboEvent, Component, Content,
+    ContentComponent, Event, Input, Message, Messages, Plain, Role, Tool, ToolAction,
+    shortcuts_desc,
 };
-use crate::{
-    actions::ToolAction,
-    components::{Content, ContentComponent, Tool, shortcuts_desc},
-    global,
-};
+use crate::global;
 
 pub struct Chat<'a> {
     state: State,
@@ -28,7 +25,7 @@ pub struct Chat<'a> {
     agent: Agent,
 
     input: Input<'a>,
-    messages: Vec<Message>,
+    messages: Messages,
     indicator: ThrobberState,
 }
 
@@ -55,7 +52,7 @@ enum Focus {
     #[default]
     Input,
     InputBlur,
-    Messages(usize),
+    Messages,
 }
 
 impl Chat<'_> {
@@ -65,7 +62,7 @@ impl Chat<'_> {
             focus: Focus::default(),
             agent: Agent::new(config),
             input: Input::default(),
-            messages: vec![],
+            messages: Messages::default(),
             indicator: ThrobberState::default(),
         }
     }
@@ -106,24 +103,26 @@ impl Chat<'_> {
 
     fn move_focus_up(&mut self) {
         match self.focus {
-            Focus::InputBlur if !self.messages.is_empty() => {
-                self.update_focus(Focus::Messages(self.messages.len() - 1));
+            Focus::InputBlur => {
+                if self.messages.select_last() {
+                    self.update_focus(Focus::Messages);
+                }
             }
-            Focus::Messages(idx) if idx > 0 => {
-                self.update_focus(Focus::Messages(idx - 1));
+            Focus::Messages => {
+                self.messages.select_prev();
             }
             _ => (), // ignore
         }
     }
 
     fn move_focus_down(&mut self) {
-        if let Focus::Messages(idx) = self.focus
-            && idx < self.messages.len() - 1
+        if let Focus::Messages = self.focus
+            && self.messages.select_next()
         {
-            self.update_focus(Focus::Messages(idx + 1));
-        } else {
-            self.update_focus(Focus::InputBlur);
+            return;
         }
+        self.messages.blur();
+        self.update_focus(Focus::InputBlur);
     }
 
     fn on_submit(&mut self) {
@@ -150,27 +149,10 @@ impl Chat<'_> {
             Focus::InputBlur => block
                 .title_bottom(shortcuts_desc(&[("Focus", "CR")]))
                 .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")])),
-            Focus::Messages(idx) => {
-                let component = &self.messages[idx].content;
-                if component.is_actionable() {
-                    block = component.block_bottom_with_shortcuts_desc(block);
-                }
+            Focus::Messages => {
+                block = self.messages.block_bottom_with_shortcuts_desc(block);
                 block.title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")]))
             }
-        }
-    }
-
-    fn locate_tool_message(&mut self, id: &str) -> Option<usize> {
-        if let Some((idx, _)) = self.messages.iter().enumerate().find(|(_, m)| {
-            m.content
-                .as_any()
-                .downcast_ref::<Tool>()
-                .map(|tool| tool.id == id)
-                .unwrap_or_default()
-        }) {
-            Some(idx)
-        } else {
-            None
         }
     }
 
@@ -192,9 +174,7 @@ impl Chat<'_> {
 
 impl Component for Chat<'_> {
     fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
-        let mut children: Vec<&mut dyn Component> = vec![];
-        children.push(&mut self.input);
-        children.extend(self.messages.iter_mut().map(|m| m as &mut dyn Component));
+        let children: Vec<&mut dyn Component> = vec![&mut self.input, &mut self.messages];
         Box::new(children.into_iter())
     }
 
@@ -227,13 +207,11 @@ impl Component for Chat<'_> {
                     })
                 }));
             }
-            Event::Ask(AskEvent::ToolUsePermission(id)) => {
-                if let Some(idx) = self.locate_tool_message(id) {
-                    let focus = Focus::Messages(idx);
+            Event::Ask(AskEvent::ToolUsePermission(_)) => {
+                if let Some(idx) = self.messages.on_tool_event(event) {
                     // Move focus to tool use message when permission is required
-                    self.update_focus(focus);
-                    // Pass through the relative event to its component.
-                    self.messages[idx].handle_event(event);
+                    self.update_focus(Focus::Messages);
+                    self.messages.focus(idx);
                 }
             }
             Event::Answer(AnswerEvent::ToolResult {
@@ -241,23 +219,22 @@ impl Component for Chat<'_> {
                 is_error,
                 output,
             }) => {
-                if let Some(idx) = self.locate_tool_message(id) {
+                if let Some(idx) = self.messages.on_tool_event(event)
+                    && !is_error
+                    && self.messages.selected_idx() == Some(idx)
+                {
                     // Move focus back to Input if tool use success.
                     self.update_focus(Focus::Input);
-                    // Pass through the relative event to its component.
-                    self.messages[idx].handle_event(event);
-                    // Add ToolResult message to send execution result to LLM API Server
-                    // TODO: Allow user to retry if tool use fails.
-                    let content =
-                        code_combo::Content::Multiple(vec![code_combo::Block::ToolResult {
-                            tool_use_id: id.clone(),
-                            is_error: Some(*is_error),
-                            content: code_combo::Content::Text(
-                                serde_json::to_string(output).unwrap(),
-                            ),
-                        }]);
-                    tokio::task::spawn(task_chat(self.agent.clone(), content));
+                    self.messages.blur();
                 }
+                // Add ToolResult message to send execution result to LLM API Server
+                // TODO: Allow user to retry if tool use fails.
+                let content = code_combo::Content::Multiple(vec![code_combo::Block::ToolResult {
+                    tool_use_id: id.clone(),
+                    is_error: Some(*is_error),
+                    content: code_combo::Content::Text(serde_json::to_string(output).unwrap()),
+                }]);
+                tokio::task::spawn(task_chat(self.agent.clone(), content));
             }
             _ => {
                 // Handle other kinds of events by default
@@ -278,15 +255,16 @@ impl Component for Chat<'_> {
 
             (InputBlur, KM::NONE, Enter) => self.update_focus(Focus::Input),
 
-            (Messages(_) | InputBlur, KM::NONE, Char('k')) => self.move_focus_up(),
-            (Messages(_), KM::NONE, Char('j')) => self.move_focus_down(),
+            (Messages | InputBlur, KM::NONE, Char('k')) => self.move_focus_up(),
+            (Messages, KM::NONE, Char('j')) => self.move_focus_down(),
 
-            (Messages(idx), _, _) if self.messages[*idx].is_actionable() => {
-                self.messages[*idx].handle_key_event(key);
+            (Messages, KM::NONE, Esc) => {
+                self.messages.blur();
+                self.update_focus(Focus::InputBlur);
             }
-            (Messages(_), KM::NONE, Esc) => self.update_focus(Focus::InputBlur),
+            (Messages, _, _) => self.messages.handle_key_event(key),
 
-            (InputBlur | Messages(_), _, _) => {
+            (InputBlur, _, _) => {
                 warn!(?key, ?self.focus, "unknown key event");
             }
         }
@@ -311,10 +289,11 @@ impl Component for Chat<'_> {
                 }
                 ToolAction::Cancel(tool_use) => {
                     // Move focus back to Input when tool use is cancelled.
-                    if let Some(idx) = self.locate_tool_message(&tool_use.id)
-                        && self.focus == Focus::Messages(idx)
+                    if let Some(idx) = self.messages.locate_tool_message(&tool_use.id)
+                        && self.messages.selected_idx() == Some(idx)
                     {
                         self.update_focus(Focus::Input);
+                        self.messages.blur();
                     }
                 }
             },
@@ -328,26 +307,7 @@ impl Component for Chat<'_> {
         let vertical = Layout::vertical([Min(0), Length(1), Length(1), Length(1)]);
         let [area_messages, divider, area_input, bottom] = vertical.areas(area);
 
-        let chunks = Layout::vertical(
-            self.messages
-                .iter()
-                .map(|m| Length(m.height(area_messages.width) as u16)),
-        )
-        .flex(Flex::End)
-        .split(area_messages);
-        for (idx, message) in self.messages.iter_mut().enumerate() {
-            let mut block = Block::new().borders(Borders::LEFT);
-            block = if self.focus == Focus::Messages(idx) {
-                block.border_set(border::THICK)
-            } else {
-                block
-                    .border_set(border::PLAIN)
-                    .border_style(Style::default().dark_gray())
-            };
-            let rect = chunks[idx];
-            frame.render_widget(&block, rect);
-            message.draw(frame, block.inner(rect)).unwrap();
-        }
+        self.messages.draw(frame, area_messages)?;
 
         let block = Block::new()
             .borders(Borders::BOTTOM)
@@ -355,7 +315,7 @@ impl Component for Chat<'_> {
         frame.render_widget(self.block_bottom_with_shortcuts_desc(block), divider);
 
         let mut block = Block::new().borders(Borders::BOTTOM);
-        block = if !matches!(self.focus, Focus::Messages(_)) {
+        block = if !matches!(self.focus, Focus::Messages) {
             block.border_set(border::THICK).border_style(Style::reset())
         } else {
             block
