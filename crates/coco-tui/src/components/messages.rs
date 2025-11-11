@@ -4,6 +4,7 @@ use color_eyre::Result;
 use crossterm::event::KeyEvent;
 use ratatui::{
     Frame,
+    backend::TestBackend,
     layout::Flex,
     prelude::*,
     symbols::border,
@@ -24,6 +25,7 @@ pub use tool::Tool;
 pub struct Messages {
     messages: Vec<Message>,
     focus: Option<usize>,
+    offset: u16,
 }
 
 impl Messages {
@@ -151,26 +153,54 @@ impl Component for Messages {
         use Constraint::Length;
 
         let border_width = 1;
-        let chunks = Layout::vertical(
-            self.messages
-                .iter()
-                .map(|m| Length(m.height(area.width - border_width) as u16)),
-        )
-        .flex(Flex::End)
-        .split(area);
+        let heights: Vec<_> = self
+            .messages
+            .iter()
+            .map(|m| m.height(area.width - border_width))
+            .collect();
+        let total_height = heights.iter().sum::<usize>() as u16;
 
-        for (idx, message) in self.messages.iter_mut().enumerate() {
-            let mut block = Block::new().borders(Borders::LEFT);
-            block = if Some(idx) == self.focus {
-                block.border_set(border::THICK)
-            } else {
-                block
-                    .border_set(border::PLAIN)
-                    .border_style(Style::default().dark_gray())
-            };
-            let rect = chunks[idx];
-            frame.render_widget(&block, rect);
-            message.draw(frame, block.inner(rect)).unwrap();
+        if total_height > area.height {
+            // FIXME: CPU intensive
+
+            let v_area = Rect::new(area.x, area.y, area.width, total_height);
+            let mem = TestBackend::new(v_area.width, v_area.height);
+            let mut vtem = Terminal::new(mem).unwrap();
+
+            let completed_frame = vtem.draw(|frame| self.draw(frame, v_area).unwrap())?;
+
+            let buf = frame.buffer_mut();
+            let visible_content = completed_frame
+                .buffer
+                .content
+                .clone()
+                .into_iter()
+                .skip(area.width as usize * ((total_height - area.height - self.offset) as usize))
+                .take(area.area() as usize);
+
+            for (i, cell) in visible_content.enumerate() {
+                let x = i as u16 % area.width;
+                let y = i as u16 / area.width;
+                buf[(area.x + x, area.y + y)] = cell;
+            }
+        } else {
+            let chunks = Layout::vertical(heights.iter().map(|h| Length(*h as u16)))
+                .flex(Flex::End)
+                .split(area);
+
+            for (idx, message) in self.messages.iter_mut().enumerate() {
+                let mut block = Block::new().borders(Borders::LEFT);
+                block = if Some(idx) == self.focus {
+                    block.border_set(border::THICK)
+                } else {
+                    block
+                        .border_set(border::PLAIN)
+                        .border_style(Style::default().dark_gray())
+                };
+                let rect = chunks[idx];
+                message.draw(frame, block.inner(rect)).unwrap();
+                frame.render_widget(&block, rect);
+            }
         }
 
         Ok(())
@@ -334,6 +364,37 @@ mod tests {
         let role_style = Style::new().green().bold();
         expected.set_style(Rect::new(1, 2, 7, 1), role_style);
         expected.set_style(Rect::new(1, 3, 7, 1), role_style);
+
+        assert_eq!(terminal.backend().buffer(), &expected);
+    }
+
+    #[test]
+    fn vertical_overflow() {
+        let mut app = Messages::default();
+        app.extend(
+            [
+                Message::user(Plain::new("Hello".to_string()).boxed()),
+                Message::user(Plain::new("Lorem ipsum dolor sit amet".to_string()).boxed()),
+            ]
+            .into_iter(),
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(15, 5)).unwrap();
+        terminal
+            .draw(|frame| app.draw(frame, frame.area()).unwrap())
+            .unwrap();
+
+        let mut expected = Buffer::with_lines(vec![
+            "│ User:  Lorem ",
+            "│        ipsum ",
+            "│        dolor ",
+            "│        sit   ",
+            "│        amet  ",
+        ]);
+        let border_style = Style::new().dark_gray();
+        expected.set_style(Rect::new(0, 0, 1, 5), border_style);
+        let role_style = Style::new().green().bold();
+        expected.set_style(Rect::new(1, 0, 7, 1), role_style);
 
         assert_eq!(terminal.backend().buffer(), &expected);
     }
