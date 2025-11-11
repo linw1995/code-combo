@@ -150,10 +150,11 @@ impl Component for Messages {
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         use Constraint::Length;
 
+        let border_width = 1;
         let chunks = Layout::vertical(
             self.messages
                 .iter()
-                .map(|m| Length(m.height(area.width) as u16)),
+                .map(|m| Length(m.height(area.width - border_width) as u16)),
         )
         .flex(Flex::End)
         .split(area);
@@ -238,7 +239,11 @@ impl Message {
 // Delegate Content trait to its inner content.
 impl Content for Message {
     fn height(&self, width: u16) -> usize {
-        self.content.height(width)
+        let role_width = match self.role {
+            Role::User => 7,
+            Role::Bot => 6,
+        };
+        self.content.height(width - role_width)
     }
 
     fn is_actionable(&self) -> bool {
@@ -293,4 +298,43 @@ pub(super) fn shortcuts_desc<'a>(pairs: &[(&str, &str)]) -> Line<'a> {
     }
     spans.push(" ".into());
     Line::from(spans)
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::backend::TestBackend;
+
+    use super::*;
+
+    #[test]
+    fn simple_overflow() {
+        let mut app = Messages::default();
+        app.extend(
+            [
+                Message::user(Plain::new("Hello".to_string()).boxed()),
+                Message::user(Plain::new("Hello world".to_string()).boxed()),
+            ]
+            .into_iter(),
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(15, 5)).unwrap();
+        terminal
+            .draw(|frame| app.draw(frame, frame.area()).unwrap())
+            .unwrap();
+
+        let mut expected = Buffer::with_lines(vec![
+            "               ",
+            "               ",
+            "│ User:  Hello ",
+            "│ User:  Hello ",
+            "│        world ",
+        ]);
+        let border_style = Style::new().dark_gray();
+        expected.set_style(Rect::new(0, 2, 1, 3), border_style);
+        let role_style = Style::new().green().bold();
+        expected.set_style(Rect::new(1, 2, 7, 1), role_style);
+        expected.set_style(Rect::new(1, 3, 7, 1), role_style);
+
+        assert_eq!(terminal.backend().buffer(), &expected);
+    }
 }
