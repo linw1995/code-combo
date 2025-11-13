@@ -18,11 +18,12 @@ use crate::{
     actions::ToolAction,
     components::shortcuts_desc,
     events::{AnswerEvent, AskEvent, Event},
-    global,
+    global::{self, State},
 };
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub enum ToolState {
+    #[default]
     Initing,
     PendingConfirmation,
     Cancelled,
@@ -37,8 +38,8 @@ pub struct Tool {
     pub id: String,
     pub name: String,
     pub input: Value,
-    pub output: Option<Value>,
-    pub state: ToolState,
+    pub state: State<ToolState>,
+    pub output: State<Option<Value>>,
 }
 
 // TODO: Allow user to edit tool input parameters
@@ -49,14 +50,18 @@ impl Tool {
             id,
             name,
             input,
-            state: ToolState::Initing,
-            output: None,
+            state: State::default(),
+            output: State::default(),
         }
     }
 
     pub fn update_state(&mut self, new_state: ToolState) {
-        debug!(?self.state, ?new_state, "update state");
-        self.state = new_state
+        let state = self.state.read();
+        if state == &new_state {
+            return;
+        }
+        debug!(?state, ?new_state, "update state");
+        *self.state.write() = new_state
     }
 
     fn get_title_spans(&self) -> Vec<Span<'_>> {
@@ -66,7 +71,7 @@ impl Tool {
             self.name.as_str().cyan(),
             " ".into(),
         ];
-        match &self.state {
+        match self.state.read() {
             ToolState::Initing => spans.push("  Initing...".yellow()),
             ToolState::PendingConfirmation => {
                 spans.push("  Awaiting confirmation".blue());
@@ -101,7 +106,7 @@ impl Tool {
             Ok(json_str) => format!("Input: {}", json_str),
             Err(_) => "Input: [Invalid JSON]".to_string(),
         };
-        if let Some(output) = &self.output {
+        if let Some(output) = self.output.read() {
             let output = match serde_json::to_string_pretty(output) {
                 Ok(json_str) => format!("Output: {}", json_str),
                 Err(_) => "Output: [Invalid JSON]".to_string(),
@@ -132,7 +137,7 @@ impl Component for Tool {
                     } else {
                         ToolState::Completed
                     });
-                    self.output = Some(output.to_owned());
+                    *self.output.write() = Some(output.to_owned());
                 }
             }
             _ => handle_component_event!(self, event),
@@ -193,7 +198,7 @@ impl Content for Tool {
     }
 
     fn is_actionable(&self) -> bool {
-        self.state == ToolState::PendingConfirmation
+        self.state.read() == &ToolState::PendingConfirmation
     }
 
     fn block_bottom_with_shortcuts_desc<'a>(&self, block: Block<'a>) -> Block<'a> {

@@ -9,6 +9,7 @@ use ratatui::{
     text::Line,
     widgets::{Block, Borders},
 };
+
 use throbber_widgets_tui::{Throbber, ThrobberState};
 use tracing::{debug, warn};
 
@@ -17,11 +18,11 @@ use super::{
     ContentComponent, Event, Input, Message, Messages, Plain, Role, Tool, ToolAction,
     shortcuts_desc,
 };
-use crate::global;
+use crate::global::{self, State};
 
 pub struct Chat<'a> {
-    state: State,
-    focus: Focus,
+    state: State<ChatState>,
+    focus: State<Focus>,
     agent: Agent,
 
     input: Input<'a>,
@@ -29,15 +30,15 @@ pub struct Chat<'a> {
     indicator: ThrobberState,
 }
 
-#[derive(Default)]
-enum State {
+#[derive(Default, Clone)]
+enum ChatState {
     #[default]
     Ready,
     Procesing,
     ComboDiscovering,
 }
 
-impl std::fmt::Display for State {
+impl std::fmt::Display for ChatState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Ready => f.write_str("Ready"),
@@ -47,7 +48,7 @@ impl std::fmt::Display for State {
     }
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 enum Focus {
     #[default]
     Input,
@@ -59,7 +60,7 @@ impl Chat<'_> {
     pub fn new(config: Config) -> Self {
         Self {
             state: State::default(),
-            focus: Focus::default(),
+            focus: State::default(),
             agent: Agent::new(config),
             input: Input::default(),
             messages: Messages::default(),
@@ -71,10 +72,10 @@ impl Chat<'_> {
         debug!(?event, "receive combo event");
         match event {
             ComboEvent::Discovering => {
-                self.state = State::ComboDiscovering;
+                *self.state.write() = ChatState::ComboDiscovering;
             }
             ComboEvent::Executing { .. } | ComboEvent::Output { .. } => {
-                self.state = State::Procesing;
+                *self.state.write() = ChatState::Procesing;
             }
             ComboEvent::Executed { starter, .. } => {
                 let combo = starter.combo.as_ref().unwrap();
@@ -82,27 +83,28 @@ impl Chat<'_> {
                 tokio::task::spawn(task_chat(self.agent.clone(), content));
             }
             ComboEvent::Discovered { .. } | ComboEvent::NotFound { .. } => {
-                self.state = State::Ready;
+                *self.state.write() = ChatState::Ready;
             }
         }
     }
 
     fn update_focus(&mut self, new_focus: Focus) {
-        if self.focus == new_focus {
+        let focus = self.focus.read();
+        if focus == &new_focus {
             return;
         }
-        debug!(?self.focus, ?new_focus, "update focus");
-        if self.focus == Focus::Input {
+        debug!(?focus, ?new_focus, "update focus");
+        if focus == &Focus::Input {
             self.input.update(&Action::Blur);
         }
         if new_focus == Focus::Input {
             self.input.update(&Action::Focus);
         }
-        self.focus = new_focus
+        *self.focus.write() = new_focus
     }
 
     fn on_submit(&mut self) {
-        if matches!(self.state, State::Ready) {
+        if matches!(self.state.read(), ChatState::Ready) {
             let value = self.input.clear();
             debug!(?value, "submiting");
             self.messages
@@ -118,7 +120,7 @@ impl Chat<'_> {
 
     fn block_bottom_with_shortcuts_desc<'a>(&self, mut block: Block<'a>) -> Block<'a> {
         block = block.title_bottom(Line::from(""));
-        match self.focus {
+        match self.focus.read() {
             Focus::Input => block
                 .title_bottom(shortcuts_desc(&[("Blur", "Esc")]))
                 .title_bottom(shortcuts_desc(&[("Submit", "CR")])),
@@ -133,10 +135,10 @@ impl Chat<'_> {
     }
 
     fn widget_state_indicator(&self) -> Line<'_> {
-        let state = &self.state;
+        let state = self.state.read();
         (match state {
-            State::Ready => Line::from(format!(" {state} ").green()),
-            State::Procesing | State::ComboDiscovering => Line::from(vec![
+            ChatState::Ready => Line::from(format!(" {state} ").green()),
+            ChatState::Procesing | ChatState::ComboDiscovering => Line::from(vec![
                 " ".into(),
                 Throbber::default()
                     .throbber_set(throbber_widgets_tui::BRAILLE_EIGHT_DOUBLE)
@@ -156,6 +158,7 @@ impl Component for Chat<'_> {
 
     fn on_tick(&mut self) {
         self.indicator.calc_next();
+        global::signal_ditry();
     }
 
     fn handle_event(&mut self, event: &Event) {
@@ -170,10 +173,10 @@ impl Component for Chat<'_> {
                 handle_component_event!(self, event);
             }
             Event::Ask(AskEvent::Bot) => {
-                self.state = State::Procesing;
+                *self.state.write() = ChatState::Procesing;
             }
             Event::Answer(AnswerEvent::Bot(msgs)) => {
-                self.state = State::Ready;
+                *self.state.write() = ChatState::Ready;
                 self.messages.extend(msgs.iter().cloned().map(|msg| {
                     Message::bot(match msg {
                         BotMessage::Plain(text) => Plain::new(text).boxed(),
@@ -224,10 +227,11 @@ impl Component for Chat<'_> {
         use KeyCode::*;
         use KeyModifiers as KM;
 
-        match (&self.focus, key.modifiers, key.code) {
+        match (self.focus.read(), key.modifiers, key.code) {
             // Focus switching
             (Input, KM::NONE, Esc) => self.update_focus(Focus::InputBlur),
             (InputBlur, KM::NONE, Enter) => self.update_focus(Focus::Input),
+            // TODO: Esc can not be used for cancelling tool use
             (Messages, KM::NONE, Esc) => {
                 self.messages.blur();
                 self.update_focus(Focus::InputBlur);
@@ -309,7 +313,7 @@ impl Component for Chat<'_> {
         frame.render_widget(self.block_bottom_with_shortcuts_desc(block), divider);
 
         let mut block = Block::new().borders(Borders::BOTTOM);
-        block = if !matches!(self.focus, Focus::Messages) {
+        block = if !matches!(self.focus.read(), Focus::Messages) {
             block.border_set(border::THICK).border_style(Style::reset())
         } else {
             block

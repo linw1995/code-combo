@@ -12,6 +12,8 @@ use ratatui::{
 };
 use tracing::warn;
 
+use crate::global::State;
+
 use super::{AnswerEvent, AskEvent, Component, Event};
 
 mod combo;
@@ -23,31 +25,31 @@ pub use tool::Tool;
 
 #[derive(Default)]
 pub struct Messages {
-    messages: Vec<Message>,
-    focus: Option<usize>,
-    offset: u16,
+    messages: State<Vec<Message>>,
+    focus: State<Option<usize>>,
+    offset: State<u16>,
 }
 
 impl Messages {
     pub fn extend(&mut self, iter: impl Iterator<Item = Message>) {
-        self.messages.extend(iter);
+        self.messages.write().extend(iter);
     }
 
     pub fn push(&mut self, message: Message) {
-        self.messages.push(message);
+        self.messages.write().push(message);
     }
 
     pub fn selected_idx(&self) -> Option<usize> {
-        self.focus
+        self.focus.get()
     }
 
     pub fn blur(&mut self) {
-        self.focus = None
+        *self.focus.write() = None
     }
 
     pub fn focus(&mut self, idx: usize) -> bool {
         if idx < self.messages.len() {
-            self.focus = Some(idx);
+            *self.focus.write() = Some(idx);
             true
         } else {
             false
@@ -58,20 +60,20 @@ impl Messages {
         if self.messages.is_empty() {
             return false;
         }
-        if let Some(idx) = self.focus
+        if let Some(idx) = self.focus.get()
             && idx > 0
         {
-            self.focus = Some(idx - 1);
+            *self.focus.write() = Some(idx - 1);
             return true;
         }
         false
     }
 
     pub fn select_next(&mut self) -> bool {
-        if let Some(idx) = self.focus
+        if let Some(idx) = self.focus.get()
             && idx < self.messages.len() - 1
         {
-            self.focus = Some(idx + 1);
+            *self.focus.write() = Some(idx + 1);
             return true;
         }
         false
@@ -81,7 +83,7 @@ impl Messages {
         if self.messages.is_empty() {
             false
         } else {
-            self.focus = Some(self.messages.len() - 1);
+            *self.focus.write() = Some(self.messages.len() - 1);
             true
         }
     }
@@ -107,13 +109,42 @@ impl Messages {
             | Event::Answer(AnswerEvent::ToolResult { id, .. }) => {
                 if let Some(idx) = self.locate_tool_message(id) {
                     // Pass through the relative event to its component.
-                    self.messages[idx].handle_event(event);
+                    self.messages.write_untracked()[idx].handle_event(event);
                     return Some(idx);
                 }
             }
             _ => (),
         }
         None
+    }
+
+    fn draw_viewport(&mut self, frame: &mut Frame, area: Rect, heights: &[usize]) -> Result<()> {
+        // FIXME: CPU intensive
+
+        let total_height = heights.iter().sum::<usize>() as u16;
+        let v_area = Rect::new(area.x, area.y, area.width, total_height);
+        let mem = TestBackend::new(v_area.width, v_area.height);
+        let mut vtem = Terminal::new(mem).unwrap();
+
+        let completed_frame = vtem.draw(|frame| self.draw(frame, v_area).unwrap())?;
+
+        let buf = frame.buffer_mut();
+        let visible_content = completed_frame
+            .buffer
+            .content
+            .clone()
+            .into_iter()
+            .skip(
+                area.width as usize * ((total_height - area.height - self.offset.read()) as usize),
+            )
+            .take(area.area() as usize);
+
+        for (i, cell) in visible_content.enumerate() {
+            let x = i as u16 % area.width;
+            let y = i as u16 / area.width;
+            buf[(area.x + x, area.y + y)] = cell;
+        }
+        Ok(())
     }
 }
 
@@ -123,8 +154,8 @@ impl Content for Messages {
     }
 
     fn block_bottom_with_shortcuts_desc<'a>(&self, mut block: Block<'a>) -> Block<'a> {
-        if let Some(idx) = self.focus {
-            let component = &self.messages[idx];
+        if let Some(idx) = self.focus.get() {
+            let component = &self.messages.read()[idx];
             if component.is_actionable() {
                 block = component.block_bottom_with_shortcuts_desc(block);
             }
@@ -135,13 +166,18 @@ impl Content for Messages {
 
 impl Component for Messages {
     fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
-        Box::new(self.messages.iter_mut().map(|m| m as &mut dyn Component))
+        Box::new(
+            self.messages
+                .write_untracked()
+                .iter_mut()
+                .map(|m| m as &mut dyn Component),
+        )
     }
 
     fn handle_key_event(&mut self, key: &KeyEvent) {
-        match (&self.focus, key.modifiers, key.code) {
+        match (self.focus.read(), key.modifiers, key.code) {
             (Some(idx), _, _) if self.messages[*idx].is_actionable() => {
-                self.messages[*idx].handle_key_event(key);
+                self.messages.write_untracked()[*idx].handle_key_event(key);
             }
             (_, _, _) => {
                 warn!(?key, ?self.focus, "unknown key event")
@@ -161,36 +197,15 @@ impl Component for Messages {
         let total_height = heights.iter().sum::<usize>() as u16;
 
         if total_height > area.height {
-            // FIXME: CPU intensive
-
-            let v_area = Rect::new(area.x, area.y, area.width, total_height);
-            let mem = TestBackend::new(v_area.width, v_area.height);
-            let mut vtem = Terminal::new(mem).unwrap();
-
-            let completed_frame = vtem.draw(|frame| self.draw(frame, v_area).unwrap())?;
-
-            let buf = frame.buffer_mut();
-            let visible_content = completed_frame
-                .buffer
-                .content
-                .clone()
-                .into_iter()
-                .skip(area.width as usize * ((total_height - area.height - self.offset) as usize))
-                .take(area.area() as usize);
-
-            for (i, cell) in visible_content.enumerate() {
-                let x = i as u16 % area.width;
-                let y = i as u16 / area.width;
-                buf[(area.x + x, area.y + y)] = cell;
-            }
+            self.draw_viewport(frame, area, &heights)?;
         } else {
             let chunks = Layout::vertical(heights.iter().map(|h| Length(*h as u16)))
                 .flex(Flex::End)
                 .split(area);
 
-            for (idx, message) in self.messages.iter_mut().enumerate() {
+            for (idx, message) in self.messages.write_untracked().iter_mut().enumerate() {
                 let mut block = Block::new().borders(Borders::LEFT);
-                block = if Some(idx) == self.focus {
+                block = if &Some(idx) == self.focus.read() {
                     block.border_set(border::THICK)
                 } else {
                     block

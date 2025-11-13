@@ -13,6 +13,7 @@ pub enum Event {
 
     Init,
     Tick,
+    Dirty,
     Render,
 }
 

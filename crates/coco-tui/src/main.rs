@@ -4,15 +4,7 @@ use clap::{Parser, Subcommand};
 use code_combo::Config;
 use color_eyre::eyre::eyre;
 
-use crate::actions::ComboAction;
-
-mod actions;
-mod app;
-mod global;
-#[macro_use]
-mod components;
-mod events;
-mod logging;
+use coco_tui::{actions::ComboAction, app, global};
 
 /// Code Combo
 #[derive(Parser)]
@@ -53,7 +45,7 @@ enum ComboCommands {
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
-    crate::logging::init()?;
+    coco_tui::logging::init()?;
 
     let mut args = Args::parse();
     let config_dir: PathBuf = args.config_dir.parse().expect("Invalid config dir");
@@ -67,7 +59,7 @@ async fn main() -> color_eyre::Result<()> {
     config.config_dir = config_dir;
     global::set_config(config.clone()).await;
 
-    let mut app = crate::app::App::new(config)?;
+    let mut app = app::App::new(config)?;
     match args.command {
         Some(Commands::Combo(combo_cmd)) => match combo_cmd {
             ComboCommands::List => {
@@ -79,7 +71,9 @@ async fn main() -> color_eyre::Result<()> {
         },
         None => {}
     }
+
     let result = app.run().await;
+
     ratatui::restore();
 
     result

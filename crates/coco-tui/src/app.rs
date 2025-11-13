@@ -38,6 +38,7 @@ pub struct App {
     action_rx: UnboundedReceiver<Action>,
     action_tx: UnboundedSender<Action>,
 
+    dirty: bool,
     root: Box<dyn Component>,
 
     // Config
@@ -62,6 +63,7 @@ impl App {
             event_tx,
             action_tx,
             action_rx,
+            dirty: true,
             root: Box::new(Chat::new(config)),
             frame_rate: 60.0,
             tick_rate: 4.0,
@@ -186,7 +188,12 @@ impl App {
         if let Some(event) = self.event_rx.recv().await {
             match event {
                 Event::Key(key) => self.on_key_event(key),
-                Event::Render => self.send_action(Action::Render),
+                Event::Render => {
+                    if self.dirty {
+                        self.send_action(Action::Render);
+                    }
+                }
+                Event::Dirty => self.dirty = true,
                 _ => {
                     self.root.handle_event(&event);
                 }
@@ -230,6 +237,7 @@ impl App {
                 error!(?err, "terminal draw error");
             }
         })?;
+        self.dirty = false;
         Ok(())
     }
 }

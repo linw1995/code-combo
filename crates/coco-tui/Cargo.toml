@@ -39,3 +39,6 @@ serde_json.workspace = true
 
 # #Widgets
 tui-textarea = "0.7.0"
+
+[dev-dependencies]
+ctor.workspace = true

@@ -283,6 +283,7 @@ dependencies = [
  "code-combo",
  "color-eyre",
  "crossterm",
+ "ctor",
  "futures",
  "ratatui",
  "serde",
