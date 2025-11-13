@@ -231,8 +231,7 @@ impl Component for Chat<'_> {
             // Focus switching
             (Input, KM::NONE, Esc) => self.update_focus(Focus::InputBlur),
             (InputBlur, KM::NONE, Enter) => self.update_focus(Focus::Input),
-            // TODO: Esc can not be used for cancelling tool use
-            (Messages, KM::NONE, Esc) => {
+            (Messages, KM::NONE, Esc) if !self.messages.is_actionable() => {
                 self.messages.blur();
                 self.update_focus(Focus::InputBlur);
             }

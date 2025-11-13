@@ -153,6 +153,14 @@ impl Content for Messages {
         0
     }
 
+    fn is_actionable(&self) -> bool {
+        let Some(idx) = self.focus.get() else {
+            return false;
+        };
+        let component = &self.messages.read()[idx];
+        component.is_actionable()
+    }
+
     fn block_bottom_with_shortcuts_desc<'a>(&self, mut block: Block<'a>) -> Block<'a> {
         if let Some(idx) = self.focus.get() {
             let component = &self.messages.read()[idx];
