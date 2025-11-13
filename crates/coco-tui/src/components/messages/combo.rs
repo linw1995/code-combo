@@ -96,13 +96,13 @@ impl<'a> Combo<'a> {
 
     fn get_title_spans(&self) -> Vec<Span<'_>> {
         // Use block title to show progress message and indicator with simple loading character
-        let mut spans = vec![" 󱐋 ".yellow(), " Combo: ".into()];
+        let mut spans = vec![" 󱐋 ".yellow(), " Combo:".into()];
         match self.event.read() {
             Some(ComboEvent::Discovering) => {
-                spans.push("  Discovering combo starters...".yellow())
+                spans.push("   Discovering combo starters...".yellow())
             }
             Some(ComboEvent::Discovered { starters }) => {
-                spans.push(format!("  Discovered {} combo starters", starters.len()).green())
+                spans.push(format!("   Discovered {} combo starters", starters.len()).green())
             }
             Some(ComboEvent::Executing { name }) => {
                 spans.push(name.as_str().cyan());
@@ -120,7 +120,7 @@ impl<'a> Combo<'a> {
                 spans.push(name.as_str().cyan());
                 spans.push("   Not found".red())
             }
-            None => spans.push("  Null".into()),
+            None => spans.push("   Null".into()),
             Some(ComboEvent::Output { .. }) => {
                 unreachable!()
             }

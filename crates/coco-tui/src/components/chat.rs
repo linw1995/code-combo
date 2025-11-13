@@ -129,7 +129,10 @@ impl Chat<'_> {
                 .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")])),
             Focus::Messages => {
                 block = self.messages.block_bottom_with_shortcuts_desc(block);
-                block.title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")]))
+                block
+                    .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")]))
+                    .title_bottom(shortcuts_desc(&[("Scroll Up", "C-y"), ("Down", "C-e")]))
+                    .title_bottom(shortcuts_desc(&[("Scroll+ Up", "C-u"), ("Down", "C-d")]))
             }
         }
     }
@@ -256,6 +259,19 @@ impl Component for Chat<'_> {
                     self.messages.blur();
                     self.update_focus(Focus::InputBlur);
                 }
+            }
+            // Scrolling
+            (Messages, KM::CONTROL, Char('y')) => {
+                self.messages.scroll_up(1);
+            }
+            (Messages, KM::CONTROL, Char('e')) => {
+                self.messages.scroll_down(1);
+            }
+            (Messages, KM::CONTROL, Char('u')) => {
+                self.messages.scroll_half_up();
+            }
+            (Messages, KM::CONTROL, Char('d')) => {
+                self.messages.scroll_half_down();
             }
 
             // Handle actionable messages

@@ -1,4 +1,4 @@
-use std::any::Any;
+use std::{any::Any, cmp::min};
 
 use color_eyre::Result;
 use crossterm::event::KeyEvent;
@@ -7,10 +7,10 @@ use ratatui::{
     backend::TestBackend,
     layout::Flex,
     prelude::*,
-    symbols::border,
-    widgets::{Block, Borders, Paragraph},
+    symbols::{border, line},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
-use tracing::warn;
+use tracing::{trace, warn};
 
 use crate::global::State;
 
@@ -27,6 +27,11 @@ pub use tool::Tool;
 pub struct Messages {
     messages: State<Vec<Message>>,
     focus: State<Option<usize>>,
+
+    // scrolling
+    viewport_height: u16,
+    /// Updated during rendering because it depends on viewport width
+    total_height: u16,
     offset: State<u16>,
 }
 
@@ -37,6 +42,39 @@ impl Messages {
 
     pub fn push(&mut self, message: Message) {
         self.messages.write().push(message);
+    }
+
+    fn new_scrollstate(&self) -> ScrollbarState {
+        // N is the viewport sliding range on the whole content.
+        // It has double end, so we need to add 1 to fit with position design.
+        // position = N - 1: thumb at bottom
+        // position = 0: thumb at top
+        let hiden_range = self.total_height - self.viewport_height;
+        let position_range = hiden_range + 1;
+        let position = (position_range - 1) - self.offset.get();
+        trace!(?position_range, position, "print scroll state");
+        ScrollbarState::new(position_range as usize).position(position as usize)
+    }
+
+    // TODO: Update focus if it's hidden while viewport changing
+    pub fn scroll_half_up(&mut self) {
+        self.scroll_up(self.viewport_height / 2);
+    }
+
+    pub fn scroll_half_down(&mut self) {
+        self.scroll_down(self.viewport_height / 2);
+    }
+
+    pub fn scroll_up(&mut self, offset: u16) {
+        *self.offset.write() = min(
+            self.offset.get() + offset,
+            self.total_height.saturating_sub(self.viewport_height),
+        );
+    }
+
+    pub fn scroll_down(&mut self, offset: u16) {
+        let mut value = self.offset.write();
+        *value = value.saturating_sub(offset);
     }
 
     pub fn selected_idx(&self) -> Option<usize> {
@@ -118,39 +156,77 @@ impl Messages {
         None
     }
 
-    fn draw_viewport(&mut self, frame: &mut Frame, area: Rect, heights: &[usize]) -> Result<()> {
-        // FIXME: CPU intensive
+    fn draw_scrollbar(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        let bar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some(line::VERTICAL))
+            .track_style(Style::default().dark_gray())
+            .thumb_symbol(line::THICK_VERTICAL);
+        let mut state = self.new_scrollstate();
+        frame.render_stateful_widget(bar, area, &mut state);
+        Ok(())
+    }
 
-        let total_height = heights.iter().sum::<usize>() as u16;
-        let v_area = Rect::new(area.x, area.y, area.width, total_height);
+    fn virtual_draw(&mut self, frame: &mut Frame, area: Rect, heights: &[usize]) -> Result<()> {
+        // FIXME: CPU intensive, try caching the virtual range result
+        trace!(?self.viewport_height, ?self.total_height, ?self.offset, "virtual draw");
+
+        let v_area = Rect::new(0, 0, area.width, self.total_height);
         let mem = TestBackend::new(v_area.width, v_area.height);
         let mut vtem = Terminal::new(mem).unwrap();
 
-        let completed_frame = vtem.draw(|frame| self.draw(frame, v_area).unwrap())?;
+        let completed_frame =
+            vtem.draw(|frame| self.actual_draw(frame, v_area, heights).unwrap())?;
 
         let buf = frame.buffer_mut();
         let visible_content = completed_frame
             .buffer
             .content
-            .clone()
-            .into_iter()
+            .iter()
             .skip(
-                area.width as usize * ((total_height - area.height - self.offset.read()) as usize),
+                v_area.width as usize
+                    * ((self.total_height - self.viewport_height - self.offset.get()) as usize),
             )
             .take(area.area() as usize);
 
         for (i, cell) in visible_content.enumerate() {
-            let x = i as u16 % area.width;
-            let y = i as u16 / area.width;
-            buf[(area.x + x, area.y + y)] = cell;
+            let x = i as u16 % v_area.width;
+            let y = i as u16 / v_area.width;
+            buf[(area.x + x, area.y + y)] = cell.clone();
         }
+        Ok(())
+    }
+
+    fn actual_draw(&mut self, frame: &mut Frame, area: Rect, heights: &[usize]) -> Result<()> {
+        use Constraint::Length;
+
+        let chunks = Layout::vertical(heights.iter().map(|h| Length(*h as u16)))
+            .flex(Flex::End)
+            .split(area);
+
+        for (idx, message) in self.messages.write_untracked().iter_mut().enumerate() {
+            let mut block = Block::new().borders(Borders::LEFT);
+            block = if &Some(idx) == self.focus.read() {
+                block.border_set(border::THICK)
+            } else {
+                block
+                    .border_set(border::PLAIN)
+                    .border_style(Style::default().dark_gray())
+            };
+            let rect = chunks[idx];
+            message.draw(frame, block.inner(rect)).unwrap();
+            frame.render_widget(&block, rect);
+        }
+
         Ok(())
     }
 }
 
 impl Content for Messages {
     fn height(&self, _width: u16) -> usize {
-        0
+        // Use the cached result
+        self.total_height as usize
     }
 
     fn is_actionable(&self) -> bool {
@@ -194,36 +270,28 @@ impl Component for Messages {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        use Constraint::Length;
+        use Constraint::{Length, Min};
 
         let border_width = 1;
+        let scrollbar_width = 2;
         let heights: Vec<_> = self
             .messages
             .iter()
-            .map(|m| m.height(area.width - border_width))
+            .map(|m| m.height(area.width - border_width - scrollbar_width))
             .collect();
-        let total_height = heights.iter().sum::<usize>() as u16;
+        self.total_height = heights.iter().sum::<usize>() as u16;
 
-        if total_height > area.height {
-            self.draw_viewport(frame, area, &heights)?;
+        if self.total_height > area.height {
+            let [area_list, area_bar] =
+                Layout::horizontal([Min(10), Length(scrollbar_width)]).areas(area);
+            trace!(?area_list, ?area_bar, "print messages area");
+
+            // Store the actual height of viewport
+            self.viewport_height = area.height;
+            self.virtual_draw(frame, area_list, &heights)?;
+            self.draw_scrollbar(frame, area_bar)?;
         } else {
-            let chunks = Layout::vertical(heights.iter().map(|h| Length(*h as u16)))
-                .flex(Flex::End)
-                .split(area);
-
-            for (idx, message) in self.messages.write_untracked().iter_mut().enumerate() {
-                let mut block = Block::new().borders(Borders::LEFT);
-                block = if &Some(idx) == self.focus.read() {
-                    block.border_set(border::THICK)
-                } else {
-                    block
-                        .border_set(border::PLAIN)
-                        .border_style(Style::default().dark_gray())
-                };
-                let rect = chunks[idx];
-                message.draw(frame, block.inner(rect)).unwrap();
-                frame.render_widget(&block, rect);
-            }
+            self.actual_draw(frame, area, &heights)?;
         }
 
         Ok(())
@@ -296,7 +364,7 @@ impl Content for Message {
             Role::User => 7,
             Role::Bot => 6,
         };
-        self.content.height(width - role_width)
+        self.content.height(width.saturating_sub(role_width))
     }
 
     fn is_actionable(&self) -> bool {
@@ -370,17 +438,17 @@ mod tests {
             .into_iter(),
         );
 
-        let mut terminal = Terminal::new(TestBackend::new(15, 5)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(17, 5)).unwrap();
         terminal
             .draw(|frame| app.draw(frame, frame.area()).unwrap())
             .unwrap();
 
         let mut expected = Buffer::with_lines(vec![
-            "               ",
-            "               ",
-            "│ User:  Hello ",
-            "│ User:  Hello ",
-            "│        world ",
+            "                 ",
+            "                 ",
+            "│ User:  Hello   ",
+            "│ User:  Hello   ",
+            "│        world   ",
         ]);
         let border_style = Style::new().dark_gray();
         expected.set_style(Rect::new(0, 2, 1, 3), border_style);
@@ -402,23 +470,111 @@ mod tests {
             .into_iter(),
         );
 
-        let mut terminal = Terminal::new(TestBackend::new(15, 5)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(17, 5)).unwrap();
         terminal
             .draw(|frame| app.draw(frame, frame.area()).unwrap())
             .unwrap();
-
         let mut expected = Buffer::with_lines(vec![
-            "│ User:  Lorem ",
-            "│        ipsum ",
-            "│        dolor ",
-            "│        sit   ",
-            "│        amet  ",
+            "│ User:  Lorem  │",
+            "│        ipsum  ┃",
+            "│        dolor  ┃",
+            "│        sit    ┃",
+            "│        amet   ┃",
         ]);
         let border_style = Style::new().dark_gray();
         expected.set_style(Rect::new(0, 0, 1, 5), border_style);
+        let scrollbar_style = Style::new().dark_gray();
+        expected.set_style(Rect::new(16, 0, 1, 1), scrollbar_style);
         let role_style = Style::new().green().bold();
         expected.set_style(Rect::new(1, 0, 7, 1), role_style);
+        assert_eq!(terminal.backend().buffer(), &expected);
 
+        app.scroll_up(1);
+
+        terminal
+            .draw(|frame| app.draw(frame, frame.area()).unwrap())
+            .unwrap();
+        let mut expected = Buffer::with_lines(vec![
+            "│ User:  Hello  ┃",
+            "│ User:  Lorem  ┃",
+            "│        ipsum  ┃",
+            "│        dolor  ┃",
+            "│        sit    │",
+        ]);
+        let border_style = Style::new().dark_gray();
+        expected.set_style(Rect::new(0, 0, 1, 5), border_style);
+        let scrollbar_style = Style::new().dark_gray();
+        expected.set_style(Rect::new(16, 4, 1, 1), scrollbar_style);
+        let role_style = Style::new().green().bold();
+        expected.set_style(Rect::new(1, 0, 7, 2), role_style);
+        assert_eq!(terminal.backend().buffer(), &expected);
+
+        app.scroll_up(1);
+
+        terminal
+            .draw(|frame| app.draw(frame, frame.area()).unwrap())
+            .unwrap();
+        assert_eq!(terminal.backend().buffer(), &expected);
+    }
+
+    #[test]
+    fn vertical_overflow_with_offset() {
+        let mut app = Messages::default();
+        app.extend(
+            [
+                Message::user(Plain::new("Hello".to_string()).boxed()),
+                Message::user(Plain::new("Lorem ipsum dolor sit amet".to_string()).boxed()),
+            ]
+            .into_iter(),
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(18, 6)).unwrap();
+        let offset_area = Rect::new(1, 1, 17, 5);
+        terminal
+            .draw(|frame| app.draw(frame, offset_area).unwrap())
+            .unwrap();
+        let mut expected = Buffer::with_lines(vec![
+            "                  ",
+            " │ User:  Lorem  │",
+            " │        ipsum  ┃",
+            " │        dolor  ┃",
+            " │        sit    ┃",
+            " │        amet   ┃",
+        ]);
+        let border_style = Style::new().dark_gray();
+        expected.set_style(Rect::new(1, 1, 1, 5), border_style);
+        let scrollbar_style = Style::new().dark_gray();
+        expected.set_style(Rect::new(17, 1, 1, 1), scrollbar_style);
+        let role_style = Style::new().green().bold();
+        expected.set_style(Rect::new(2, 1, 7, 1), role_style);
+        assert_eq!(terminal.backend().buffer(), &expected);
+
+        app.scroll_up(1);
+
+        terminal
+            .draw(|frame| app.draw(frame, offset_area).unwrap())
+            .unwrap();
+        let mut expected = Buffer::with_lines(vec![
+            "                  ",
+            " │ User:  Hello  ┃",
+            " │ User:  Lorem  ┃",
+            " │        ipsum  ┃",
+            " │        dolor  ┃",
+            " │        sit    │",
+        ]);
+        let border_style = Style::new().dark_gray();
+        expected.set_style(Rect::new(1, 1, 1, 5), border_style);
+        let scrollbar_style = Style::new().dark_gray();
+        expected.set_style(Rect::new(17, 5, 1, 1), scrollbar_style);
+        let role_style = Style::new().green().bold();
+        expected.set_style(Rect::new(2, 1, 7, 2), role_style);
+        assert_eq!(terminal.backend().buffer(), &expected);
+
+        app.scroll_up(1);
+
+        terminal
+            .draw(|frame| app.draw(frame, offset_area).unwrap())
+            .unwrap();
         assert_eq!(terminal.backend().buffer(), &expected);
     }
 }

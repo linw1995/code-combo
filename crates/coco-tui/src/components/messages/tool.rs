@@ -65,28 +65,23 @@ impl Tool {
     }
 
     fn get_title_spans(&self) -> Vec<Span<'_>> {
-        let mut spans = vec![
-            " 󱁤  ".blue(),
-            "Tool: ".into(),
-            self.name.as_str().cyan(),
-            " ".into(),
-        ];
+        let mut spans = vec![" 󱁤  ".blue(), "Tool: ".into(), self.name.as_str().cyan()];
         match self.state.read() {
-            ToolState::Initing => spans.push("  Initing...".yellow()),
+            ToolState::Initing => spans.push("   Initing...".yellow()),
             ToolState::PendingConfirmation => {
-                spans.push("  Awaiting confirmation".blue());
+                spans.push("   Awaiting confirmation".blue());
             }
             ToolState::Executing => {
-                spans.push("  Executing...".yellow());
+                spans.push("   Executing...".yellow());
             }
             ToolState::Completed => {
-                spans.push("  Completed".green());
+                spans.push("   Completed".green());
             }
             ToolState::Failed => {
-                spans.push("  Failed".red());
+                spans.push("   Failed".red());
             }
             ToolState::Cancelled => {
-                spans.push("  Cancelled".red());
+                spans.push("   Cancelled".red());
             }
         }
         spans.push(" ".into());
