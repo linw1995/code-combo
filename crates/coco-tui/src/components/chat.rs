@@ -160,8 +160,13 @@ impl Component for Chat<'_> {
     }
 
     fn on_tick(&mut self) {
-        self.indicator.calc_next();
-        global::signal_ditry();
+        if matches!(
+            self.state.get(),
+            ChatState::Procesing | ChatState::ComboDiscovering
+        ) {
+            self.indicator.calc_next();
+            global::signal_ditry();
+        }
     }
 
     fn handle_event(&mut self, event: &Event) {
