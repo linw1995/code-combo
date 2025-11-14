@@ -130,7 +130,9 @@ impl<'a> Combo<'a> {
     }
 
     fn update_plain_msg(&mut self, combo: &code_combo::Combo) {
-        let text = combo.to_markdown();
+        // '\t' rendering doesn't work well in ratatui.
+        // It causes the screen to retain the previous render result in the area of `\t` during scrolling.
+        let text = combo.to_markdown().replace("\t", "  ");
         self.widget = Some(Plain::new(text))
     }
 }
