@@ -333,6 +333,10 @@ impl dyn ContentComponent {
     pub fn as_any(&self) -> &dyn Any {
         self
     }
+
+    pub fn as_mut_any(&mut self) -> &mut dyn Any {
+        self
+    }
 }
 
 /// A message component in the Chat component

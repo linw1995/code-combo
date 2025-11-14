@@ -21,6 +21,7 @@ serde_json = "1.0.143"
 serde_yaml = "0.9.34"
 snafu = "0.8.9"
 ctor = "0.5.0"
+bon = "3.8.1"
 
 # Core dependencies for CLI and application functionality
 [dependencies]

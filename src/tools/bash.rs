@@ -42,10 +42,12 @@ fn default_timeout_ms() -> u64 {
     600_000
 }
 
+pub const BASH_TOOL_NAME: &str = "bash";
+
 #[async_trait]
 impl Tool for BashTool {
     fn name(&self) -> &'static str {
-        "bash"
+        BASH_TOOL_NAME
     }
 
     fn description(&self) -> &'static str {

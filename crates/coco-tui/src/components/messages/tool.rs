@@ -1,4 +1,4 @@
-use code_combo::ToolUse;
+use code_combo::{BASH_TOOL_NAME, ToolUse};
 use color_eyre::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -11,7 +11,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 use serde_json::Value;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::{Component, Content, ContentComponent};
 use crate::{
@@ -20,6 +20,9 @@ use crate::{
     events::{AnswerEvent, AskEvent, Event},
     global::{self, State},
 };
+
+mod bash;
+use bash::Bash;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum ToolState {
@@ -40,18 +43,36 @@ pub struct Tool {
     pub input: Value,
     pub state: State<ToolState>,
     pub output: State<Option<Value>>,
+
+    widget: Option<Box<dyn ContentComponent>>,
 }
 
 // TODO: Allow user to edit tool input parameters
 
 impl Tool {
     pub fn new_use(id: String, name: String, input: Value) -> Self {
+        #[allow(clippy::single_match)]
+        let widget = match name.as_str() {
+            BASH_TOOL_NAME => match Bash::try_new().input(input.clone()).call() {
+                Ok(widget) => Some(widget.boxed()),
+                Err(err) => {
+                    warn!(
+                        ?err,
+                        "failed to create Bash component, falling back to default"
+                    );
+                    None
+                }
+            },
+            _ => None,
+        };
+
         Self {
             id,
             name,
             input,
             state: State::default(),
             output: State::default(),
+            widget,
         }
     }
 
@@ -96,7 +117,7 @@ impl Tool {
         }
     }
 
-    fn get_content_text(&self) -> String {
+    fn generate_default(&self) -> Paragraph<'_> {
         let mut text = match serde_json::to_string_pretty(&self.input) {
             Ok(json_str) => format!("Input: {}", json_str),
             Err(_) => "Input: [Invalid JSON]".to_string(),
@@ -109,7 +130,7 @@ impl Tool {
             text.push('\n');
             text.push_str(&output);
         }
-        text
+        Paragraph::new(text).wrap(Wrap { trim: false })
     }
 }
 
@@ -133,6 +154,13 @@ impl Component for Tool {
                         ToolState::Completed
                     });
                     *self.output.write() = Some(output.to_owned());
+                    // TODO: Make update_output a trait method
+                    if let Some(widget) = &mut self.widget
+                        && let Some(widget) = widget.as_mut_any().downcast_mut::<Bash>()
+                        && let Err(err) = widget.update_output(Some(output.clone()))
+                    {
+                        warn!(?err, "failed to update tool output");
+                    };
                 }
             }
             _ => handle_component_event!(self, event),
@@ -168,15 +196,17 @@ impl Component for Tool {
             .title_alignment(Alignment::Left);
 
         // Get content area inside the block
+        frame.render_widget(&block, area);
         let content_area = block.inner(area);
 
         // Create content paragraph
-        let content = self.get_content_text();
-        let content = Paragraph::new(content).wrap(Wrap { trim: false });
 
-        // Render the block and content
-        frame.render_widget(&block, area);
-        frame.render_widget(content, content_area);
+        if let Some(widget) = &mut self.widget {
+            widget.draw(frame, content_area)?;
+        } else {
+            let content = self.generate_default();
+            frame.render_widget(content, content_area);
+        }
 
         Ok(())
     }
@@ -187,9 +217,11 @@ impl Content for Tool {
         // Base height for title
         let base_height = 1;
         base_height
-            + Paragraph::new(self.get_content_text())
-                .wrap(Wrap { trim: false })
-                .line_count(width)
+            + if let Some(widget) = &self.widget {
+                widget.height(width)
+            } else {
+                self.generate_default().line_count(width)
+            }
     }
 
     fn is_actionable(&self) -> bool {

@@ -5,7 +5,7 @@ edition.workspace = true
 
 [dependencies]
 # Builder
-bon = "3.8.1"
+bon.workspace = true
 
 # HTTP
 reqwest = { version = "0.12", features = ["json"] }
