@@ -1,4 +1,7 @@
-use code_combo::{Agent, Config, ExecuteOutput, ToolUse};
+use code_combo::{
+    Agent, Block as ChatBlock, Config, Content as ChatContent, ExecuteOutput,
+    Message as ChatMessage, ToolUse,
+};
 use color_eyre::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -27,6 +30,7 @@ pub struct Chat<'a> {
 
     input: Input<'a>,
     messages: Messages,
+    pending_chats: Vec<ChatBlock>,
     indicator: ThrobberState,
 }
 
@@ -64,6 +68,7 @@ impl Chat<'_> {
             agent: Agent::new(config),
             input: Input::default(),
             messages: Messages::default(),
+            pending_chats: vec![],
             indicator: ThrobberState::default(),
         }
     }
@@ -79,7 +84,7 @@ impl Chat<'_> {
             }
             ComboEvent::Executed { starter, .. } => {
                 let combo = starter.combo.as_ref().unwrap();
-                let content = code_combo::Content::Text(combo.to_markdown());
+                let content = self.build_user_content(ChatContent::Text(combo.to_markdown()));
                 tokio::task::spawn(task_chat(self.agent.clone(), content));
             }
             ComboEvent::Discovered { .. } | ComboEvent::NotFound { .. } => {
@@ -103,16 +108,36 @@ impl Chat<'_> {
         *self.focus.write() = new_focus
     }
 
+    /// Combines pending ToolResults (e.g., User Cancelled) with user instructions.
+    ///
+    /// This ensures the LLM doesn't react to tool results without explicit user instructions.
+    /// Tool results are queued and combined with the next user message to provide context.
+    fn build_user_content(&mut self, content: ChatContent) -> ChatContent {
+        if self.pending_chats.is_empty() {
+            content
+        } else {
+            let mut blocks = std::mem::take(&mut self.pending_chats);
+            ChatContent::Multiple(match content {
+                ChatContent::Text(text) => {
+                    blocks.push(ChatBlock::Text { text });
+                    blocks
+                }
+                ChatContent::Multiple(parts) => {
+                    blocks.extend(parts);
+                    blocks
+                }
+            })
+        }
+    }
+
     fn on_submit(&mut self) {
         if matches!(self.state.read(), ChatState::Ready) {
             let value = self.input.clear();
             debug!(?value, "submiting");
             self.messages
                 .push(Message::user(Plain::new(value.clone()).boxed()));
-            tokio::task::spawn(task_chat(
-                self.agent.clone(),
-                code_combo::Content::Text(value),
-            ));
+            let content = self.build_user_content(ChatContent::Text(value));
+            tokio::task::spawn(task_chat(self.agent.clone(), content));
         } else {
             // TODO: Display an alert when input submission is not available
         }
@@ -216,11 +241,12 @@ impl Component for Chat<'_> {
                 }
                 // Add ToolResult message to send execution result to LLM API Server
                 // TODO: Allow user to retry if tool use fails.
-                let content = code_combo::Content::Multiple(vec![code_combo::Block::ToolResult {
+                let content = ChatContent::Multiple(vec![code_combo::Block::ToolResult {
                     tool_use_id: id.clone(),
                     is_error: Some(*is_error),
                     content: code_combo::Content::Text(serde_json::to_string(output).unwrap()),
                 }]);
+                let content = self.build_user_content(content);
                 tokio::task::spawn(task_chat(self.agent.clone(), content));
             }
             _ => {
@@ -313,6 +339,13 @@ impl Component for Chat<'_> {
                         self.update_focus(Focus::Input);
                         self.messages.blur();
                     }
+                    // Await the next user message to avoid the LLM reacting without further user
+                    // instructions
+                    self.pending_chats.push(code_combo::Block::ToolResult {
+                        tool_use_id: tool_use.id.clone(),
+                        is_error: Some(true),
+                        content: code_combo::Content::Text("User cancelled".to_string()),
+                    });
                 }
             },
             _ => (),
@@ -350,10 +383,10 @@ impl Component for Chat<'_> {
     }
 }
 
-async fn task_chat(mut agent: Agent, content: code_combo::Content) {
+async fn task_chat(mut agent: Agent, content: ChatContent) {
     let tx = global::event_tx();
 
-    let msg = code_combo::Message::user(content);
+    let msg = ChatMessage::user(content);
     tx.send(Event::Ask(AskEvent::Bot)).unwrap();
 
     let msg = agent.chat(msg).await;
@@ -361,10 +394,10 @@ async fn task_chat(mut agent: Agent, content: code_combo::Content) {
     let mut to_execute: Vec<code_combo::ToolUse> = vec![];
     tx.send(
         AnswerEvent::Bot(match msg.content {
-            code_combo::Content::Text(text) => {
+            ChatContent::Text(text) => {
                 vec![BotMessage::Plain(text)]
             }
-            code_combo::Content::Multiple(blocks) => {
+            ChatContent::Multiple(blocks) => {
                 to_execute.extend(blocks.iter().filter_map(|b| {
                     if let code_combo::Block::ToolUse(tool_use) = b {
                         Some(tool_use.clone())
