@@ -19,18 +19,18 @@ use crate::{
 };
 
 #[derive(Default)]
-pub struct Combo<'a> {
+pub struct Combo {
     // executing
     event: State<Option<ComboEvent>>,
     output: State<VecDeque<code_combo::Line>>,
 
     // finalized
-    widget: Option<Plain<'a>>,
+    widget: Option<Plain>,
 }
 
 const LIMIT: usize = 10;
 
-impl<'a> Combo<'a> {
+impl Combo {
     fn update_event_state(&mut self, new_event: &ComboEvent) {
         let event = self.event.read();
         // Skip updating if in final state.
@@ -137,7 +137,7 @@ impl<'a> Combo<'a> {
     }
 }
 
-impl<'a> Content for Combo<'a> {
+impl Content for Combo {
     fn height(&self, width: u16) -> usize {
         let border_height = 1;
         if let Some(plain) = &self.widget {
@@ -153,7 +153,16 @@ impl<'a> Content for Combo<'a> {
     }
 }
 
-impl<'a> Component for Combo<'a> {
+impl Component for Combo {
+    fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
+        Box::new(
+            self.widget
+                .as_mut()
+                .map(|m| m as &mut dyn Component)
+                .into_iter(),
+        )
+    }
+
     fn handle_event(&mut self, event: &Event) {
         if let Event::Combo(event) = event {
             self.on_combo_event(event);
@@ -204,7 +213,7 @@ impl<'a> Component for Combo<'a> {
     }
 }
 
-impl ContentComponent for Combo<'static> {}
+impl ContentComponent for Combo {}
 
 async fn discover() {
     let tx = global::event_tx();

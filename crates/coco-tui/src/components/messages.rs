@@ -319,10 +319,10 @@ pub trait Content {
     }
 }
 
-pub trait ContentComponent: Component + Content + Any {
+pub trait ContentComponent: Component + Content + Any + Send {
     fn boxed(self) -> Box<dyn ContentComponent>
     where
-        Self: Sized + 'static,
+        Self: Sized + Send + 'static,
     {
         Box::new(self)
     }

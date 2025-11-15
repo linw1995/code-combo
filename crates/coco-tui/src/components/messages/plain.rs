@@ -1,36 +1,76 @@
-use ratatui::{
-    Frame,
-    prelude::Rect,
-    widgets::{Paragraph, Wrap},
-};
+use ratatui::{Frame, prelude::Rect};
+use tokio::sync::oneshot;
+use tracing::{trace, warn};
 
-use crate::components::ContentComponent;
+use crate::{components::ContentComponent, global};
 
 use super::{Component, Content};
 
-pub struct Plain<'a> {
-    widget: Paragraph<'a>,
+mod external_viewer;
+mod raw;
+use external_viewer::ExternalMarkdownViewer;
+use raw::RawTextViewer;
+
+/// Plain text render widget.
+///
+/// TODO: Support Markdown syntax with multiple approaches:
+/// - Use a built-in Markdown parser and renderer. (Streaming)
+/// - Use an external CLI tool to render Markdown
+/// - Save content to a temporary file and open with external viewer
+pub struct Plain {
+    widget: Box<dyn ContentComponent>,
+    rx: Option<oneshot::Receiver<Box<dyn ContentComponent>>>,
 }
 
-impl<'a> Plain<'a> {
+impl Plain {
     pub fn new(text: String) -> Self {
+        let (tx, rx) = oneshot::channel();
+
+        tokio::task::spawn({
+            let text = text.clone();
+            async move {
+                match ExternalMarkdownViewer::try_new(&text).await {
+                    Ok(widget) => {
+                        trace!("using an external CLI tool to render Markdown success");
+                        tx.send(widget.boxed()).ok();
+                    }
+                    Err(err) => {
+                        warn!(?err, "failed using an external CLI tool to render Markdown");
+                    }
+                };
+            }
+        });
+
+        let widget = RawTextViewer::new(text).boxed();
         Self {
-            widget: Paragraph::new(text).wrap(Wrap { trim: false }),
+            widget,
+            rx: Some(rx),
         }
     }
 }
 
-impl<'a> Component for Plain<'a> {
+impl Component for Plain {
+    fn on_tick(&mut self) {
+        if let Some(rx) = &mut self.rx {
+            let Ok(widget) = rx.try_recv() else {
+                return;
+            };
+            self.widget = widget;
+            self.rx = None;
+            global::signal_ditry();
+            trace!("replaced inner widget of Plain Message");
+        }
+    }
+
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> color_eyre::eyre::Result<()> {
-        frame.render_widget(&self.widget, area);
-        Ok(())
+        self.widget.draw(frame, area)
     }
 }
 
-impl<'a> Content for Plain<'a> {
+impl Content for Plain {
     fn height(&self, width: u16) -> usize {
-        self.widget.line_count(width)
+        self.widget.height(width)
     }
 }
 
-impl ContentComponent for Plain<'static> {}
+impl ContentComponent for Plain {}
