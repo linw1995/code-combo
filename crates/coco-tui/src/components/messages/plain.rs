@@ -1,3 +1,4 @@
+use code_combo::MarkdownRenderEngine;
 use ratatui::{Frame, prelude::Rect};
 use tokio::sync::oneshot;
 use tracing::{trace, warn};
@@ -24,28 +25,34 @@ pub struct Plain {
 
 impl Plain {
     pub fn new(text: String) -> Self {
-        let (tx, rx) = oneshot::channel();
+        let cfg = global::config_sync();
 
-        tokio::task::spawn({
-            let text = text.clone();
-            async move {
-                match ExternalMarkdownViewer::try_new(&text).await {
-                    Ok(widget) => {
-                        trace!("using an external CLI tool to render Markdown success");
-                        tx.send(widget.boxed()).ok();
+        let rx = match cfg.ui.markdown_render_engine {
+            MarkdownRenderEngine::ExternalCommand { executable, args } => {
+                let (tx, rx) = oneshot::channel();
+
+                tokio::task::spawn({
+                    let text = text.clone();
+                    async move {
+                        match ExternalMarkdownViewer::try_new(&text, &executable, &args).await {
+                            Ok(widget) => {
+                                trace!("using an external CLI tool to render Markdown success");
+                                tx.send(widget.boxed()).ok();
+                            }
+                            Err(err) => {
+                                warn!(?err, "failed using an external CLI tool to render Markdown");
+                            }
+                        };
                     }
-                    Err(err) => {
-                        warn!(?err, "failed using an external CLI tool to render Markdown");
-                    }
-                };
+                });
+
+                Some(rx)
             }
-        });
+            MarkdownRenderEngine::Native => None,
+        };
 
         let widget = RawTextViewer::new(text).boxed();
-        Self {
-            widget,
-            rx: Some(rx),
-        }
+        Self { widget, rx }
     }
 }
 

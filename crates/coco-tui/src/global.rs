@@ -50,6 +50,12 @@ pub async fn config() -> code_combo::Config {
     config.lock().await.to_owned()
 }
 
+pub fn config_sync() -> code_combo::Config {
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async { config().await })
+    })
+}
+
 pub async fn set_config(config: code_combo::Config) {
     let cell = CONFIG.get_or_init(Default::default);
     let mut cell = cell.lock().await;

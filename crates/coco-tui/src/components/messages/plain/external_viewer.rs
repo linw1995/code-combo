@@ -16,14 +16,9 @@ pub struct ExternalMarkdownViewer<'a> {
 }
 
 impl<'a> ExternalMarkdownViewer<'a> {
-    pub async fn try_new(text: &String) -> Result<Self> {
-        // let mut builder = tokio::process::Command::new("glow")
-        // builder.args(["-s", "dark", "-w", "0"]);
-
-        let mut builder = tokio::process::Command::new("bat");
-        builder.args(["-l", "markdown", "-p", "--color", "always"]);
-
-        let output = match builder
+    pub async fn try_new(text: &str, cmd: &str, args: &[String]) -> Result<Self> {
+        let output = match tokio::process::Command::new(cmd)
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
