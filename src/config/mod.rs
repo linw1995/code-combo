@@ -1,11 +1,14 @@
 mod provider;
+mod ui;
 
 use std::path::PathBuf;
 
 pub use provider::{ProviderConfig, ProviderKind};
+pub use ui::{MarkdownRenderEngine, UI};
 
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct Config {
+    pub ui: UI,
     pub providers: Vec<ProviderConfig>,
 
     #[serde(skip)]

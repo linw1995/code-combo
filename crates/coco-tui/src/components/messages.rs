@@ -431,8 +431,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn simple_overflow() {
+    #[tokio::test]
+    async fn simple_overflow() {
         let mut app = Messages::default();
         app.extend(
             [
@@ -463,8 +463,8 @@ mod tests {
         assert_eq!(terminal.backend().buffer(), &expected);
     }
 
-    #[test]
-    fn vertical_overflow() {
+    #[tokio::test]
+    async fn vertical_overflow() {
         let mut app = Messages::default();
         app.extend(
             [
@@ -521,8 +521,8 @@ mod tests {
         assert_eq!(terminal.backend().buffer(), &expected);
     }
 
-    #[test]
-    fn vertical_overflow_with_offset() {
+    #[tokio::test]
+    async fn vertical_overflow_with_offset() {
         let mut app = Messages::default();
         app.extend(
             [
