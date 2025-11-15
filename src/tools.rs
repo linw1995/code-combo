@@ -4,7 +4,7 @@ use snafu::Whatever;
 
 mod bash;
 
-pub use bash::BashTool;
+pub use bash::{BASH_TOOL_NAME, BashInput, BashOutput, BashTool};
 
 #[async_trait]
 pub trait Tool: Send + Sync {

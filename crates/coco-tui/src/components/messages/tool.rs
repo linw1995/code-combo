@@ -1,4 +1,4 @@
-use code_combo::ToolUse;
+use code_combo::{BASH_TOOL_NAME, ToolUse};
 use color_eyre::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -11,18 +11,22 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 use serde_json::Value;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::{Component, Content, ContentComponent};
 use crate::{
     actions::ToolAction,
     components::shortcuts_desc,
     events::{AnswerEvent, AskEvent, Event},
-    global,
+    global::{self, State},
 };
 
-#[derive(Debug, Clone, PartialEq)]
+mod bash;
+use bash::Bash;
+
+#[derive(Debug, Clone, Default, PartialEq)]
 pub enum ToolState {
+    #[default]
     Initing,
     PendingConfirmation,
     Cancelled,
@@ -37,51 +41,68 @@ pub struct Tool {
     pub id: String,
     pub name: String,
     pub input: Value,
-    pub output: Option<Value>,
-    pub state: ToolState,
+    pub state: State<ToolState>,
+    pub output: State<Option<Value>>,
+
+    widget: Option<Box<dyn ContentComponent>>,
 }
 
 // TODO: Allow user to edit tool input parameters
 
 impl Tool {
     pub fn new_use(id: String, name: String, input: Value) -> Self {
+        #[allow(clippy::single_match)]
+        let widget = match name.as_str() {
+            BASH_TOOL_NAME => match Bash::try_new().input(input.clone()).call() {
+                Ok(widget) => Some(widget.boxed()),
+                Err(err) => {
+                    warn!(
+                        ?err,
+                        "failed to create Bash component, falling back to default"
+                    );
+                    None
+                }
+            },
+            _ => None,
+        };
+
         Self {
             id,
             name,
             input,
-            state: ToolState::Initing,
-            output: None,
+            state: State::default(),
+            output: State::default(),
+            widget,
         }
     }
 
     pub fn update_state(&mut self, new_state: ToolState) {
-        debug!(?self.state, ?new_state, "update state");
-        self.state = new_state
+        let state = self.state.read();
+        if state == &new_state {
+            return;
+        }
+        debug!(?state, ?new_state, "update state");
+        *self.state.write() = new_state
     }
 
     fn get_title_spans(&self) -> Vec<Span<'_>> {
-        let mut spans = vec![
-            " 󱁤  ".blue(),
-            "Tool: ".into(),
-            self.name.as_str().cyan(),
-            " ".into(),
-        ];
-        match &self.state {
-            ToolState::Initing => spans.push("  Initing...".yellow()),
+        let mut spans = vec![" 󱁤  ".blue(), "Tool: ".into(), self.name.as_str().cyan()];
+        match self.state.read() {
+            ToolState::Initing => spans.push("   Initing...".yellow()),
             ToolState::PendingConfirmation => {
-                spans.push("  Awaiting confirmation".blue());
+                spans.push("   Awaiting confirmation".blue());
             }
             ToolState::Executing => {
-                spans.push("  Executing...".yellow());
+                spans.push("   Executing...".yellow());
             }
             ToolState::Completed => {
-                spans.push("  Completed".green());
+                spans.push("   Completed".green());
             }
             ToolState::Failed => {
-                spans.push("  Failed".red());
+                spans.push("   Failed".red());
             }
             ToolState::Cancelled => {
-                spans.push("  Cancelled".red());
+                spans.push("   Cancelled".red());
             }
         }
         spans.push(" ".into());
@@ -96,12 +117,12 @@ impl Tool {
         }
     }
 
-    fn get_content_text(&self) -> String {
+    fn generate_default(&self) -> Paragraph<'_> {
         let mut text = match serde_json::to_string_pretty(&self.input) {
             Ok(json_str) => format!("Input: {}", json_str),
             Err(_) => "Input: [Invalid JSON]".to_string(),
         };
-        if let Some(output) = &self.output {
+        if let Some(output) = self.output.read() {
             let output = match serde_json::to_string_pretty(output) {
                 Ok(json_str) => format!("Output: {}", json_str),
                 Err(_) => "Output: [Invalid JSON]".to_string(),
@@ -109,7 +130,7 @@ impl Tool {
             text.push('\n');
             text.push_str(&output);
         }
-        text
+        Paragraph::new(text).wrap(Wrap { trim: false })
     }
 }
 
@@ -132,7 +153,14 @@ impl Component for Tool {
                     } else {
                         ToolState::Completed
                     });
-                    self.output = Some(output.to_owned());
+                    *self.output.write() = Some(output.to_owned());
+                    // TODO: Make update_output a trait method
+                    if let Some(widget) = &mut self.widget
+                        && let Some(widget) = widget.as_mut_any().downcast_mut::<Bash>()
+                        && let Err(err) = widget.update_output(Some(output.clone()))
+                    {
+                        warn!(?err, "failed to update tool output");
+                    };
                 }
             }
             _ => handle_component_event!(self, event),
@@ -148,6 +176,9 @@ impl Component for Tool {
                 self.update_state(ToolState::Executing);
             }
             (KeyModifiers::NONE, KeyCode::Esc) => {
+                global::action_tx()
+                    .send(ToolAction::Cancel(self.tool()).into())
+                    .unwrap();
                 self.update_state(ToolState::Cancelled);
             }
             _ => (), // ignore
@@ -165,15 +196,17 @@ impl Component for Tool {
             .title_alignment(Alignment::Left);
 
         // Get content area inside the block
+        frame.render_widget(&block, area);
         let content_area = block.inner(area);
 
         // Create content paragraph
-        let content = self.get_content_text();
-        let content = Paragraph::new(content).wrap(Wrap { trim: false });
 
-        // Render the block and content
-        frame.render_widget(&block, area);
-        frame.render_widget(content, content_area);
+        if let Some(widget) = &mut self.widget {
+            widget.draw(frame, content_area)?;
+        } else {
+            let content = self.generate_default();
+            frame.render_widget(content, content_area);
+        }
 
         Ok(())
     }
@@ -184,13 +217,15 @@ impl Content for Tool {
         // Base height for title
         let base_height = 1;
         base_height
-            + Paragraph::new(self.get_content_text())
-                .wrap(Wrap { trim: false })
-                .line_count(width)
+            + if let Some(widget) = &self.widget {
+                widget.height(width)
+            } else {
+                self.generate_default().line_count(width)
+            }
     }
 
     fn is_actionable(&self) -> bool {
-        self.state == ToolState::PendingConfirmation
+        self.state.read() == &ToolState::PendingConfirmation
     }
 
     fn block_bottom_with_shortcuts_desc<'a>(&self, block: Block<'a>) -> Block<'a> {

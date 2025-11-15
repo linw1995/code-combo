@@ -1,4 +1,7 @@
-use std::sync::{Arc, OnceLock};
+use std::{
+    ops::{Deref, DerefMut},
+    sync::{Arc, OnceLock},
+};
 
 use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
@@ -24,6 +27,7 @@ pub fn initialize(event_tx: UnboundedSender<Event>, action_tx: UnboundedSender<A
         .expect("Action sender has already been initialized");
 }
 
+#[inline]
 pub fn event_tx() -> UnboundedSender<Event> {
     EVENT_TX
         .get()
@@ -31,7 +35,7 @@ pub fn event_tx() -> UnboundedSender<Event> {
         .expect("Event sender must be initialized")
 }
 
-#[allow(dead_code)]
+#[inline]
 pub fn action_tx() -> UnboundedSender<Action> {
     ACTION_TX
         .get()
@@ -50,4 +54,98 @@ pub async fn set_config(config: code_combo::Config) {
     let cell = CONFIG.get_or_init(Default::default);
     let mut cell = cell.lock().await;
     *cell = config;
+}
+
+/// Signal dirty for re-rendering.
+///
+/// This function sends a `Dirty` event to trigger a re-render of the UI.
+/// It's typically called automatically when state is modified through a `WriteGuard`.
+#[inline]
+pub fn signal_ditry() {
+    event_tx().send(Event::Dirty).ok();
+}
+
+/// `State` is modify-aware to signal the Dirty event for re-rendering.
+///
+/// This struct wraps any type `T` and provides a mechanism to automatically
+/// trigger a `Dirty` event when the inner value is modified through a write guard.
+/// This is useful for tracking state changes that require UI re-rendering.
+///
+/// The `write()` method returns a `WriteGuard` that implements `DerefMut` for
+/// mutable access to the inner value. When the `WriteGuard` is dropped, it
+/// automatically sends a `Dirty` event to notify the system that the state
+/// has been modified.
+#[derive(Debug)]
+pub struct State<T> {
+    inner: T,
+}
+
+impl<T> State<T> {
+    pub fn new(inner: T) -> Self {
+        Self { inner }
+    }
+
+    pub fn write(&mut self) -> WriteGuard<&mut T> {
+        WriteGuard {
+            inner: &mut self.inner,
+        }
+    }
+
+    pub fn write_untracked(&mut self) -> &mut T {
+        &mut self.inner
+    }
+
+    pub fn get(&self) -> T
+    where
+        T: Clone,
+    {
+        self.inner.to_owned()
+    }
+
+    pub fn read(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl<T> Deref for State<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<T> Default for State<T>
+where
+    T: Default,
+{
+    fn default() -> Self {
+        Self {
+            inner: T::default(),
+        }
+    }
+}
+
+pub struct WriteGuard<T> {
+    inner: T,
+}
+
+impl<T> Drop for WriteGuard<T> {
+    fn drop(&mut self) {
+        signal_ditry();
+    }
+}
+
+impl<T> Deref for WriteGuard<&mut T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner
+    }
+}
+
+impl<T> DerefMut for WriteGuard<&mut T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.inner
+    }
 }

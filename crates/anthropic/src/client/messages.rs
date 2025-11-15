@@ -197,8 +197,9 @@ pub async fn messages(
         .await
         .whatever_context("send request error")?;
 
+    let status = resp.status();
     let resp = resp.text().await.whatever_context("read response error")?;
-    trace!(?req, resp, "messages API invoked");
+    trace!(?req, resp, ?status, "messages API invoked");
 
     serde_json::from_str(&resp).whatever_context("decode response error")
 }

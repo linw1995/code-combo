@@ -3,6 +3,7 @@ use crossterm::event::KeyEvent;
 use ratatui::{Frame, prelude::*};
 
 use super::{Action, Component};
+use crate::global;
 
 pub struct Input<'a> {
     pub textarea: tui_textarea::TextArea<'a>,
@@ -45,8 +46,11 @@ impl Component for Input<'_> {
             _ => (), // ignore
         }
     }
+
     fn handle_key_event(&mut self, key: &KeyEvent) {
-        self.textarea.input(key.to_owned());
+        if self.textarea.input(key.to_owned()) {
+            global::signal_ditry();
+        }
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {

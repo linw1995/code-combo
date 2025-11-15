@@ -1,46 +1,48 @@
-use code_combo::{Agent, Config, ExecuteOutput, Instruction, ToolUse};
+use code_combo::{
+    Agent, Block as ChatBlock, Config, Content as ChatContent, ExecuteOutput,
+    Message as ChatMessage, ToolUse,
+};
 use color_eyre::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
-    layout::{Constraint, Flex, Layout, Rect},
+    layout::{Constraint, Layout, Rect},
     prelude::*,
     symbols::border,
     text::Line,
     widgets::{Block, Borders},
 };
+
 use throbber_widgets_tui::{Throbber, ThrobberState};
 use tracing::{debug, warn};
 
 use super::{
-    Action, AnswerEvent, AskEvent, BotMessage, Combo, ComboAction, ComboEvent, Component, Event,
-    Input, Message, Plain, Role,
+    Action, AnswerEvent, AskEvent, BotMessage, Combo, ComboAction, ComboEvent, Component, Content,
+    ContentComponent, Event, Input, Message, Messages, Plain, Role, Tool, ToolAction,
+    shortcuts_desc,
 };
-use crate::{
-    actions::ToolAction,
-    components::{Content, ContentComponent, Tool, shortcuts_desc},
-    global,
-};
+use crate::global::{self, State};
 
 pub struct Chat<'a> {
-    state: State,
-    focus: Focus,
+    state: State<ChatState>,
+    focus: State<Focus>,
     agent: Agent,
 
     input: Input<'a>,
-    messages: Vec<Message>,
+    messages: Messages,
+    pending_chats: Vec<ChatBlock>,
     indicator: ThrobberState,
 }
 
-#[derive(Default)]
-enum State {
+#[derive(Default, Clone)]
+enum ChatState {
     #[default]
     Ready,
     Procesing,
     ComboDiscovering,
 }
 
-impl std::fmt::Display for State {
+impl std::fmt::Display for ChatState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Ready => f.write_str("Ready"),
@@ -50,22 +52,23 @@ impl std::fmt::Display for State {
     }
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 enum Focus {
     #[default]
     Input,
     InputBlur,
-    Messages(usize),
+    Messages,
 }
 
 impl Chat<'_> {
     pub fn new(config: Config) -> Self {
         Self {
             state: State::default(),
-            focus: Focus::default(),
+            focus: State::default(),
             agent: Agent::new(config),
             input: Input::default(),
-            messages: vec![],
+            messages: Messages::default(),
+            pending_chats: vec![],
             indicator: ThrobberState::default(),
         }
     }
@@ -74,87 +77,67 @@ impl Chat<'_> {
         debug!(?event, "receive combo event");
         match event {
             ComboEvent::Discovering => {
-                self.state = State::ComboDiscovering;
+                *self.state.write() = ChatState::ComboDiscovering;
             }
             ComboEvent::Executing { .. } | ComboEvent::Output { .. } => {
-                self.state = State::Procesing;
+                *self.state.write() = ChatState::Procesing;
             }
             ComboEvent::Executed { starter, .. } => {
                 let combo = starter.combo.as_ref().unwrap();
-                let content = code_combo::Content::Text(
-                    combo
-                        .instructions
-                        .iter()
-                        .map(|instruction| match instruction {
-                            Instruction::Text(text) => text.clone(),
-                            Instruction::Command { command, output } => {
-                                format!(
-                                    "I executed this command:\n```\n{}\n```\nAnd it outputs:\n```\n{}\n```",
-                                    command, output
-                                )
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n\n"),
-                );
+                let content = self.build_user_content(ChatContent::Text(combo.to_markdown()));
                 tokio::task::spawn(task_chat(self.agent.clone(), content));
             }
             ComboEvent::Discovered { .. } | ComboEvent::NotFound { .. } => {
-                self.state = State::Ready;
+                *self.state.write() = ChatState::Ready;
             }
         }
     }
 
-    #[inline]
     fn update_focus(&mut self, new_focus: Focus) {
-        debug!(?self.focus, ?new_focus, "update focus");
-        self.focus = new_focus
-    }
-
-    fn input_focus(&mut self) {
-        self.update_focus(Focus::Input);
-        self.input.update(&Action::Focus);
-    }
-
-    fn input_blur(&mut self) {
-        if self.focus == Focus::Input {
+        let focus = self.focus.read();
+        if focus == &new_focus {
+            return;
+        }
+        debug!(?focus, ?new_focus, "update focus");
+        if focus == &Focus::Input {
             self.input.update(&Action::Blur);
         }
-        self.update_focus(Focus::InputBlur);
-    }
-
-    fn move_focus_up(&mut self) {
-        match self.focus {
-            Focus::InputBlur if !self.messages.is_empty() => {
-                self.update_focus(Focus::Messages(self.messages.len() - 1));
-            }
-            Focus::Messages(idx) if idx > 0 => {
-                self.update_focus(Focus::Messages(idx - 1));
-            }
-            _ => (), // ignore
+        if new_focus == Focus::Input {
+            self.input.update(&Action::Focus);
         }
+        *self.focus.write() = new_focus
     }
 
-    fn move_focus_down(&mut self) {
-        if let Focus::Messages(idx) = self.focus
-            && idx < self.messages.len() - 1
-        {
-            self.update_focus(Focus::Messages(idx + 1));
+    /// Combines pending ToolResults (e.g., User Cancelled) with user instructions.
+    ///
+    /// This ensures the LLM doesn't react to tool results without explicit user instructions.
+    /// Tool results are queued and combined with the next user message to provide context.
+    fn build_user_content(&mut self, content: ChatContent) -> ChatContent {
+        if self.pending_chats.is_empty() {
+            content
         } else {
-            self.update_focus(Focus::InputBlur);
+            let mut blocks = std::mem::take(&mut self.pending_chats);
+            ChatContent::Multiple(match content {
+                ChatContent::Text(text) => {
+                    blocks.push(ChatBlock::Text { text });
+                    blocks
+                }
+                ChatContent::Multiple(parts) => {
+                    blocks.extend(parts);
+                    blocks
+                }
+            })
         }
     }
 
     fn on_submit(&mut self) {
-        if matches!(self.state, State::Ready) {
+        if matches!(self.state.read(), ChatState::Ready) {
             let value = self.input.clear();
             debug!(?value, "submiting");
             self.messages
                 .push(Message::user(Plain::new(value.clone()).boxed()));
-            tokio::task::spawn(task_chat(
-                self.agent.clone(),
-                code_combo::Content::Text(value),
-            ));
+            let content = self.build_user_content(ChatContent::Text(value));
+            tokio::task::spawn(task_chat(self.agent.clone(), content));
         } else {
             // TODO: Display an alert when input submission is not available
         }
@@ -162,42 +145,28 @@ impl Chat<'_> {
 
     fn block_bottom_with_shortcuts_desc<'a>(&self, mut block: Block<'a>) -> Block<'a> {
         block = block.title_bottom(Line::from(""));
-        match self.focus {
+        match self.focus.read() {
             Focus::Input => block
                 .title_bottom(shortcuts_desc(&[("Blur", "Esc")]))
                 .title_bottom(shortcuts_desc(&[("Submit", "CR")])),
             Focus::InputBlur => block
                 .title_bottom(shortcuts_desc(&[("Focus", "CR")]))
                 .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")])),
-            Focus::Messages(idx) => {
-                let component = &self.messages[idx].content;
-                if component.is_actionable() {
-                    block = component.block_bottom_with_shortcuts_desc(block);
-                }
-                block.title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")]))
+            Focus::Messages => {
+                block = self.messages.block_bottom_with_shortcuts_desc(block);
+                block
+                    .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")]))
+                    .title_bottom(shortcuts_desc(&[("Scroll Up", "C-y"), ("Down", "C-e")]))
+                    .title_bottom(shortcuts_desc(&[("Scroll+ Up", "C-u"), ("Down", "C-d")]))
             }
         }
     }
 
-    fn locate_tool_message(&mut self, id: &str) -> Option<usize> {
-        if let Some((idx, _)) = self.messages.iter().enumerate().find(|(_, m)| {
-            m.content
-                .as_any()
-                .downcast_ref::<Tool>()
-                .map(|tool| tool.id == id)
-                .unwrap_or_default()
-        }) {
-            Some(idx)
-        } else {
-            None
-        }
-    }
-
     fn widget_state_indicator(&self) -> Line<'_> {
-        let state = &self.state;
+        let state = self.state.read();
         (match state {
-            State::Ready => Line::from(format!(" {state} ").green()),
-            State::Procesing | State::ComboDiscovering => Line::from(vec![
+            ChatState::Ready => Line::from(format!(" {state} ").green()),
+            ChatState::Procesing | ChatState::ComboDiscovering => Line::from(vec![
                 " ".into(),
                 Throbber::default()
                     .throbber_set(throbber_widgets_tui::BRAILLE_EIGHT_DOUBLE)
@@ -211,14 +180,18 @@ impl Chat<'_> {
 
 impl Component for Chat<'_> {
     fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
-        let mut children: Vec<&mut dyn Component> = vec![];
-        children.push(&mut self.input);
-        children.extend(self.messages.iter_mut().map(|m| m as &mut dyn Component));
+        let children: Vec<&mut dyn Component> = vec![&mut self.input, &mut self.messages];
         Box::new(children.into_iter())
     }
 
     fn on_tick(&mut self) {
-        self.indicator.calc_next();
+        if matches!(
+            self.state.get(),
+            ChatState::Procesing | ChatState::ComboDiscovering
+        ) {
+            self.indicator.calc_next();
+            global::signal_ditry();
+        }
     }
 
     fn handle_event(&mut self, event: &Event) {
@@ -233,10 +206,10 @@ impl Component for Chat<'_> {
                 handle_component_event!(self, event);
             }
             Event::Ask(AskEvent::Bot) => {
-                self.state = State::Procesing;
+                *self.state.write() = ChatState::Procesing;
             }
             Event::Answer(AnswerEvent::Bot(msgs)) => {
-                self.state = State::Ready;
+                *self.state.write() = ChatState::Ready;
                 self.messages.extend(msgs.iter().cloned().map(|msg| {
                     Message::bot(match msg {
                         BotMessage::Plain(text) => Plain::new(text).boxed(),
@@ -246,13 +219,11 @@ impl Component for Chat<'_> {
                     })
                 }));
             }
-            Event::Ask(AskEvent::ToolUsePermission(id)) => {
-                if let Some(idx) = self.locate_tool_message(id) {
-                    let focus = Focus::Messages(idx);
+            Event::Ask(AskEvent::ToolUsePermission(_)) => {
+                if let Some(idx) = self.messages.on_tool_event(event) {
                     // Move focus to tool use message when permission is required
-                    self.update_focus(focus);
-                    // Pass through the relative event to its component.
-                    self.messages[idx].handle_event(event);
+                    self.update_focus(Focus::Messages);
+                    self.messages.focus(idx);
                 }
             }
             Event::Answer(AnswerEvent::ToolResult {
@@ -260,23 +231,23 @@ impl Component for Chat<'_> {
                 is_error,
                 output,
             }) => {
-                if let Some(idx) = self.locate_tool_message(id) {
+                if let Some(idx) = self.messages.on_tool_event(event)
+                    && !is_error
+                    && self.messages.selected_idx() == Some(idx)
+                {
                     // Move focus back to Input if tool use success.
                     self.update_focus(Focus::Input);
-                    // Pass through the relative event to its component.
-                    self.messages[idx].handle_event(event);
-                    // Add ToolResult message to send execution result to LLM API Server
-                    // TODO: Allow user to retry if tool use fails.
-                    let content =
-                        code_combo::Content::Multiple(vec![code_combo::Block::ToolResult {
-                            tool_use_id: id.clone(),
-                            is_error: Some(*is_error),
-                            content: code_combo::Content::Text(
-                                serde_json::to_string(output).unwrap(),
-                            ),
-                        }]);
-                    tokio::task::spawn(task_chat(self.agent.clone(), content));
+                    self.messages.blur();
                 }
+                // Add ToolResult message to send execution result to LLM API Server
+                // TODO: Allow user to retry if tool use fails.
+                let content = ChatContent::Multiple(vec![code_combo::Block::ToolResult {
+                    tool_use_id: id.clone(),
+                    is_error: Some(*is_error),
+                    content: code_combo::Content::Text(serde_json::to_string(output).unwrap()),
+                }]);
+                let content = self.build_user_content(content);
+                tokio::task::spawn(task_chat(self.agent.clone(), content));
             }
             _ => {
                 // Handle other kinds of events by default
@@ -290,22 +261,54 @@ impl Component for Chat<'_> {
         use KeyCode::*;
         use KeyModifiers as KM;
 
-        match (&self.focus, key.modifiers, key.code) {
+        match (self.focus.read(), key.modifiers, key.code) {
+            // Focus switching
+            (Input, KM::NONE, Esc) => self.update_focus(Focus::InputBlur),
+            (InputBlur, KM::NONE, Enter) => self.update_focus(Focus::Input),
+            (Messages, KM::NONE, Esc) if !self.messages.is_actionable() => {
+                self.messages.blur();
+                self.update_focus(Focus::InputBlur);
+            }
+
+            // Inputing
             (Input, KM::NONE, Enter) => self.on_submit(),
-            (Input, KM::NONE, Esc) => self.input_blur(),
             (Input, _, _) => self.input.handle_key_event(key),
 
-            (InputBlur, KM::NONE, Enter) => self.input_focus(),
-
-            (Messages(_) | InputBlur, KM::NONE, Char('k')) => self.move_focus_up(),
-            (Messages(_), KM::NONE, Char('j')) => self.move_focus_down(),
-
-            (Messages(idx), _, _) if self.messages[*idx].is_actionable() => {
-                self.messages[*idx].handle_key_event(key);
+            // Navigation
+            (InputBlur, KM::NONE, Char('k')) => {
+                if self.messages.select_last() {
+                    // Move focus to Messages if selecting the last message succeeds
+                    self.update_focus(Focus::Messages);
+                }
             }
-            (Messages(_), KM::NONE, Esc) => self.input_blur(),
+            (Messages, KM::NONE, Char('k')) => {
+                self.messages.select_prev();
+            }
+            (Messages, KM::NONE, Char('j')) => {
+                if !self.messages.select_next() {
+                    // Move focus to InputBlur when no more messages are available
+                    self.messages.blur();
+                    self.update_focus(Focus::InputBlur);
+                }
+            }
+            // Scrolling
+            (Messages, KM::CONTROL, Char('y')) => {
+                self.messages.scroll_up(1);
+            }
+            (Messages, KM::CONTROL, Char('e')) => {
+                self.messages.scroll_down(1);
+            }
+            (Messages, KM::CONTROL, Char('u')) => {
+                self.messages.scroll_half_up();
+            }
+            (Messages, KM::CONTROL, Char('d')) => {
+                self.messages.scroll_half_down();
+            }
 
-            (InputBlur | Messages(_), _, _) => {
+            // Handle actionable messages
+            (Messages, _, _) => self.messages.handle_key_event(key),
+
+            (InputBlur, _, _) => {
                 warn!(?key, ?self.focus, "unknown key event");
             }
         }
@@ -328,6 +331,22 @@ impl Component for Chat<'_> {
                     self.agent.grant_once(&tool_use.id, &tool_use.name);
                     tokio::task::spawn(task_tool_use(self.agent.clone(), tool_use.to_owned()));
                 }
+                ToolAction::Cancel(tool_use) => {
+                    // Move focus back to Input when tool use is cancelled.
+                    if let Some(idx) = self.messages.locate_tool_message(&tool_use.id)
+                        && self.messages.selected_idx() == Some(idx)
+                    {
+                        self.update_focus(Focus::Input);
+                        self.messages.blur();
+                    }
+                    // Await the next user message to avoid the LLM reacting without further user
+                    // instructions
+                    self.pending_chats.push(code_combo::Block::ToolResult {
+                        tool_use_id: tool_use.id.clone(),
+                        is_error: Some(true),
+                        content: code_combo::Content::Text("User cancelled".to_string()),
+                    });
+                }
             },
             _ => (),
         }
@@ -339,26 +358,7 @@ impl Component for Chat<'_> {
         let vertical = Layout::vertical([Min(0), Length(1), Length(1), Length(1)]);
         let [area_messages, divider, area_input, bottom] = vertical.areas(area);
 
-        let chunks = Layout::vertical(
-            self.messages
-                .iter()
-                .map(|m| Length(m.height(area_messages.width) as u16)),
-        )
-        .flex(Flex::End)
-        .split(area_messages);
-        for (idx, message) in self.messages.iter_mut().enumerate() {
-            let mut block = Block::new().borders(Borders::LEFT);
-            block = if self.focus == Focus::Messages(idx) {
-                block.border_set(border::THICK)
-            } else {
-                block
-                    .border_set(border::PLAIN)
-                    .border_style(Style::default().dark_gray())
-            };
-            let rect = chunks[idx];
-            frame.render_widget(&block, rect);
-            message.draw(frame, block.inner(rect)).unwrap();
-        }
+        self.messages.draw(frame, area_messages)?;
 
         let block = Block::new()
             .borders(Borders::BOTTOM)
@@ -366,7 +366,7 @@ impl Component for Chat<'_> {
         frame.render_widget(self.block_bottom_with_shortcuts_desc(block), divider);
 
         let mut block = Block::new().borders(Borders::BOTTOM);
-        block = if !matches!(self.focus, Focus::Messages(_)) {
+        block = if !matches!(self.focus.read(), Focus::Messages) {
             block.border_set(border::THICK).border_style(Style::reset())
         } else {
             block
@@ -383,10 +383,10 @@ impl Component for Chat<'_> {
     }
 }
 
-async fn task_chat(mut agent: Agent, content: code_combo::Content) {
+async fn task_chat(mut agent: Agent, content: ChatContent) {
     let tx = global::event_tx();
 
-    let msg = code_combo::Message::user(content);
+    let msg = ChatMessage::user(content);
     tx.send(Event::Ask(AskEvent::Bot)).unwrap();
 
     let msg = agent.chat(msg).await;
@@ -394,10 +394,10 @@ async fn task_chat(mut agent: Agent, content: code_combo::Content) {
     let mut to_execute: Vec<code_combo::ToolUse> = vec![];
     tx.send(
         AnswerEvent::Bot(match msg.content {
-            code_combo::Content::Text(text) => {
+            ChatContent::Text(text) => {
                 vec![BotMessage::Plain(text)]
             }
-            code_combo::Content::Multiple(blocks) => {
+            ChatContent::Multiple(blocks) => {
                 to_execute.extend(blocks.iter().filter_map(|b| {
                     if let code_combo::Block::ToolUse(tool_use) = b {
                         Some(tool_use.clone())

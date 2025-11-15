@@ -27,6 +27,7 @@ impl From<ComboAction> for Action {
 #[derive(Debug, Clone)]
 pub enum ToolAction {
     Grant(ToolUse),
+    Cancel(ToolUse),
 }
 
 impl From<ToolAction> for Action {

@@ -1,7 +1,6 @@
 use color_eyre::Result;
 use crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::{Frame, layout::Rect};
-use tracing::trace;
 
 use crate::{actions::*, events::*};
 
@@ -107,10 +106,8 @@ pub trait Component {
     ///
     /// * `action` - An action to be processed.
     fn handle_action(&mut self, action: &Action) {
-        trace!("update self");
         self.update(action);
         for child in self.children() {
-            trace!("update child");
             child.handle_action(action);
         }
     }

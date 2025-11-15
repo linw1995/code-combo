@@ -11,43 +11,63 @@ use ratatui::{
 };
 use tracing::{debug, warn};
 
-use super::{Component, Content, ContentComponent};
+use super::{Component, Content, ContentComponent, Plain};
 use crate::{
     actions::{Action, ComboAction},
     events::{ComboEvent, Event},
-    global,
+    global::{self, State},
 };
 
 #[derive(Default)]
 pub struct Combo {
-    state: State,
-}
+    // executing
+    event: State<Option<ComboEvent>>,
+    output: State<VecDeque<code_combo::Line>>,
 
-#[derive(Default, Clone)]
-struct State {
-    event: Option<ComboEvent>,
-    output: VecDeque<code_combo::Line>,
+    // finalized
+    widget: Option<Plain>,
 }
 
 const LIMIT: usize = 10;
 
 impl Combo {
-    fn on_indicator_update(&mut self, event: &ComboEvent) {
-        match &event {
-            ComboEvent::Discovering | ComboEvent::Executing { .. } => (),
-            ComboEvent::Discovered { .. }
-            | ComboEvent::Executed { .. }
-            | ComboEvent::NotFound { .. } => (),
-            _ => {} // ignore
+    fn update_event_state(&mut self, new_event: &ComboEvent) {
+        let event = self.event.read();
+        // Skip updating if in final state.
+        if matches!(
+            event,
+            Some(ComboEvent::NotFound { .. } | ComboEvent::Executed { .. })
+        ) {
+            return;
+        }
+        let new_event = Some(new_event.to_owned());
+        debug!(?event, ?new_event, "update event state");
+        *self.event.write() = new_event;
+    }
+
+    fn on_combo_event(&mut self, event: &ComboEvent) {
+        match event {
+            ComboEvent::Output { name, lines } => self.on_output_event(name, lines),
+            ComboEvent::Discovering
+            | ComboEvent::Executing { .. }
+            | ComboEvent::Discovered { .. }
+            | ComboEvent::NotFound { .. } => {
+                self.update_event_state(event);
+            }
+            ComboEvent::Executed { starter, .. } => {
+                let combo = starter.combo.as_ref().unwrap();
+                self.update_plain_msg(combo);
+                self.update_event_state(event);
+            }
         }
     }
 
     fn on_output_event(&mut self, target: &String, batch: &Vec<code_combo::Line>) {
-        match &self.state.event {
+        match self.event.read() {
             Some(ComboEvent::Executing { name } | ComboEvent::Executed { name, .. })
                 if name == target =>
             {
-                let lines = &mut self.state.output;
+                let mut lines = self.output.write();
                 let batch_size = batch.len();
                 let line_count = lines.len();
                 if batch_size > LIMIT {
@@ -76,13 +96,13 @@ impl Combo {
 
     fn get_title_spans(&self) -> Vec<Span<'_>> {
         // Use block title to show progress message and indicator with simple loading character
-        let mut spans = vec![" 󱐋 ".yellow(), " Combo: ".into()];
-        match &self.state.event {
+        let mut spans = vec![" 󱐋 ".yellow(), " Combo:".into()];
+        match self.event.read() {
             Some(ComboEvent::Discovering) => {
-                spans.push("  Discovering combo starters...".yellow())
+                spans.push("   Discovering combo starters...".yellow())
             }
             Some(ComboEvent::Discovered { starters }) => {
-                spans.push(format!("  Discovered {} combo starters", starters.len()).green())
+                spans.push(format!("   Discovered {} combo starters", starters.len()).green())
             }
             Some(ComboEvent::Executing { name }) => {
                 spans.push(name.as_str().cyan());
@@ -100,7 +120,7 @@ impl Combo {
                 spans.push(name.as_str().cyan());
                 spans.push("   Not found".red())
             }
-            None => spans.push("  Null".into()),
+            None => spans.push("   Null".into()),
             Some(ComboEvent::Output { .. }) => {
                 unreachable!()
             }
@@ -108,36 +128,44 @@ impl Combo {
         spans.push(" ".into());
         spans
     }
+
+    fn update_plain_msg(&mut self, combo: &code_combo::Combo) {
+        // '\t' rendering doesn't work well in ratatui.
+        // It causes the screen to retain the previous render result in the area of `\t` during scrolling.
+        let text = combo.to_markdown().replace("\t", "  ");
+        self.widget = Some(Plain::new(text))
+    }
 }
 
 impl Content for Combo {
-    fn height(&self, _width: u16) -> usize {
+    fn height(&self, width: u16) -> usize {
         let border_height = 1;
-        match self.state.event {
-            Some(ComboEvent::Executing { .. } | ComboEvent::Executed { .. }) => {
-                self.state.output.len() + border_height
+        if let Some(plain) = &self.widget {
+            plain.height(width) + border_height
+        } else {
+            match self.event.read() {
+                Some(ComboEvent::Executing { .. } | ComboEvent::Executed { .. }) => {
+                    self.output.len() + border_height
+                }
+                _ => border_height,
             }
-            _ => border_height,
         }
     }
 }
 
 impl Component for Combo {
+    fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
+        Box::new(
+            self.widget
+                .as_mut()
+                .map(|m| m as &mut dyn Component)
+                .into_iter(),
+        )
+    }
+
     fn handle_event(&mut self, event: &Event) {
         if let Event::Combo(event) = event {
-            if let ComboEvent::Output { name, lines } = event {
-                self.on_output_event(name, lines);
-            } else {
-                if matches!(
-                    self.state.event,
-                    Some(ComboEvent::NotFound { .. } | ComboEvent::Executed { .. })
-                ) {
-                    // Already in final state, skip updating
-                    return;
-                }
-                self.on_indicator_update(event);
-                self.state.event = Some(event.to_owned());
-            }
+            self.on_combo_event(event);
         } else {
             handle_component_event!(self, event);
         }
@@ -151,7 +179,7 @@ impl Component for Combo {
                     tokio::task::spawn(discover());
                 }
                 ComboAction::Execute { name } => {
-                    tokio::task::spawn(execute(name.to_owned(), self.state.clone()));
+                    tokio::task::spawn(execute(name.to_owned(), self.event.get()));
                 }
             }
         }
@@ -166,19 +194,21 @@ impl Component for Combo {
             .title(Line::from("")) // placeholder for border on the left of the actual title
             .title(Line::from(title_spans))
             .title_alignment(Alignment::Left);
+        frame.render_widget(&block, area);
         let output_area = block.inner(area);
 
-        if let Some(ComboEvent::Executing { .. } | ComboEvent::Executed { .. }) = &self.state.event
+        if let Some(plain) = &mut self.widget {
+            plain.draw(frame, output_area)?;
+        } else if let Some(ComboEvent::Executing { .. } | ComboEvent::Executed { .. }) =
+            self.event.read()
         {
-            let chunks =
-                Layout::vertical(self.state.output.iter().map(|_| Length(1))).split(output_area);
-            for (idx, line) in self.state.output.iter().enumerate() {
+            let chunks = Layout::vertical(self.output.iter().map(|_| Length(1))).split(output_area);
+            for (idx, line) in self.output.iter().enumerate() {
                 let p = Paragraph::new(line.content.to_string());
                 frame.render_widget(&p, chunks[idx]);
             }
         }
 
-        frame.render_widget(&block, area);
         Ok(())
     }
 }
@@ -195,11 +225,11 @@ async fn discover() {
     tx.send(ComboEvent::Discovered { starters }.into()).unwrap();
 }
 
-async fn execute(name: String, state: State) {
+async fn execute(name: String, event: Option<ComboEvent>) {
     let tx = global::event_tx();
     let config = global::config().await;
     let combo_dir = config.combo_dir();
-    let starters = match state.event {
+    let starters = match event {
         Some(ComboEvent::Discovered { starters }) => starters,
         _ => {
             tx.send(ComboEvent::Discovering.into()).unwrap();
