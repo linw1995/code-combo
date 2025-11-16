@@ -27,6 +27,10 @@ impl Plain {
     pub fn new(text: String) -> Self {
         let cfg = global::config_sync();
 
+        // '\t' rendering doesn't work well in ratatui.
+        // It causes the screen to retain the previous render result in the area of `\t` during scrolling.
+        let text = text.replace("\t", "  ");
+
         let rx = match cfg.ui.markdown_render_engine {
             MarkdownRenderEngine::ExternalCommand { executable, args } => {
                 let (tx, rx) = oneshot::channel();
