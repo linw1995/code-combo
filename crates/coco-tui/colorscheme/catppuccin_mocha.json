@@ -9,5 +9,15 @@
     },
     "number": "#fab387",
     "operator": "#89dceb",
-    "constant": "#fab387"
+    "constant": "#fab387",
+    "text.title": "#89b4fa",
+    "punctuation.special": "#f5c2e7",
+    "text.literal": "#a6e3a1",
+    "punctuation.delimiter": "#9399b2",
+    "text.reference": "#b4befe",
+    "text.uri": {
+        "fg": "#89b4fa",
+        "add_modifier": "ITALIC|UNDERLINED"
+    },
+    "string.escape": "#f5c2e7"
 }
