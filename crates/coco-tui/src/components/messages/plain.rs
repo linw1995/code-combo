@@ -3,7 +3,10 @@ use ratatui::{Frame, prelude::Rect};
 use tokio::sync::oneshot;
 use tracing::{trace, warn};
 
-use crate::{components::ContentComponent, global};
+use crate::{
+    components::{CodeHighlight, ContentComponent},
+    global,
+};
 
 use super::{Component, Content};
 
@@ -26,6 +29,10 @@ pub struct Plain {
 impl Plain {
     pub fn new(text: String) -> Self {
         let cfg = global::config_sync();
+
+        // '\t' rendering doesn't work well in ratatui.
+        // It causes the screen to retain the previous render result in the area of `\t` during scrolling.
+        let text = text.replace("\t", "  ");
 
         let rx = match cfg.ui.markdown_render_engine {
             MarkdownRenderEngine::ExternalCommand { executable, args } => {
@@ -51,7 +58,17 @@ impl Plain {
             MarkdownRenderEngine::Native => None,
         };
 
-        let widget = RawTextViewer::new(text).boxed();
+        let config = global::config_sync();
+        let widget = CodeHighlight::try_new(
+            &text,
+            code_highlight::Lang::Markdown,
+            &config.ui.colorschema,
+        )
+        .map(|x| x.boxed())
+        .unwrap_or_else(|err| {
+            warn!(?err, "failed to new CodeHighlight Component");
+            RawTextViewer::new(text).boxed()
+        });
         Self { widget, rx }
     }
 }

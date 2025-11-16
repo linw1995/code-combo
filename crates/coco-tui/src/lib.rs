@@ -9,6 +9,7 @@ pub mod logging;
 #[cfg(test)]
 #[ctor::ctor]
 fn init() {
+    use code_combo::Config;
     use std::io;
     use tracing_subscriber::{EnvFilter, prelude::*};
 
@@ -27,4 +28,8 @@ fn init() {
     let (event_tx, _) = mpsc::unbounded_channel();
     let (action_tx, _) = mpsc::unbounded_channel();
     global::initialize(event_tx, action_tx);
+
+    // Initialize the runtime temporarily to set the default configuration
+    let rt = tokio::runtime::Runtime::new().expect("create a new runtime should succeed");
+    rt.block_on(global::set_config(Config::default()));
 }

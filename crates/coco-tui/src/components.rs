@@ -45,10 +45,12 @@ macro_rules! handle_component_event {
 }
 
 mod chat;
+mod code_highlight;
 mod input;
 mod messages;
 
 pub use chat::Chat;
+pub use code_highlight::CodeHighlight;
 pub use input::Input;
 pub use messages::*;
 

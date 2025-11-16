@@ -1,0 +1,28 @@
+[package]
+name = "code-highlight"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Core
+tree-sitter.workspace = true
+tree-sitter-highlight = "0.25.10"
+
+# Support Languages
+tree-sitter-bash = "0.25.0"
+tree-sitter-md.workspace = true
+
+# Serialization and data handling
+serde.workspace = true
+serde_json.workspace = true
+
+# Error Handling
+snafu = { workspace = true, features = ["backtrace"] }
+
+# Logging and tracing
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+ctor.workspace = true
+indoc.workspace = true
