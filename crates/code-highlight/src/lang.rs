@@ -27,15 +27,15 @@ impl std::fmt::Display for Lang {
     }
 }
 
-pub fn new_config(lang: &Lang) -> Result<(HighlightConfiguration, Vec<&'static str>)> {
+pub fn new_config(lang: &Lang, names: &[&str]) -> Result<HighlightConfiguration> {
     use Lang::*;
     match lang {
-        Bash => bash_config(),
+        Bash => bash_config(names),
         _ => unimplemented!(),
     }
 }
 
-fn bash_config() -> Result<(HighlightConfiguration, Vec<&'static str>)> {
+fn bash_config(names: &[&str]) -> Result<HighlightConfiguration> {
     let mut config = HighlightConfiguration::new(
         tree_sitter_bash::LANGUAGE.into(),
         "bash",
@@ -45,11 +45,7 @@ fn bash_config() -> Result<(HighlightConfiguration, Vec<&'static str>)> {
     )
     .whatever_context("failed to create bash highlight configuration")?;
 
-    let names = [
-        "string", "function", "property", "keyword", "comment", "number", "embedded", "operator",
-        "constant",
-    ];
-    config.configure(&names);
+    config.configure(names);
 
-    Ok((config, Vec::from(names)))
+    Ok(config)
 }

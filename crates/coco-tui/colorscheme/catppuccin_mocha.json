@@ -1,0 +1,13 @@
+{
+    "string": "#a6e3a1",
+    "function": "#89b4fa",
+    "property": "#b4befe",
+    "keyword": "#cba6f7",
+    "comment": {
+        "fg": "#9399b2",
+        "add_modifier": "ITALIC"
+    },
+    "number": "#fab387",
+    "operator": "#89dceb",
+    "constant": "#fab387"
+}

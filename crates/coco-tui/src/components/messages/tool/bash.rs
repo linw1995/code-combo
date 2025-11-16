@@ -12,7 +12,7 @@ use ratatui::{
 };
 use serde_json::Value;
 
-use crate::components::CodeHighlight;
+use crate::{components::CodeHighlight, global};
 
 use super::{Component, Content, ContentComponent};
 pub struct Bash<'a> {
@@ -44,10 +44,13 @@ impl<'a> Bash<'a> {
     #[builder]
     pub fn try_new(input: Value, output: Option<Value>) -> Result<Self> {
         let input: BashInput = serde_json::from_value(input)?;
-        let input = CodeHighlight::try_new(&input.command, Lang::Bash)?;
+
+        let config = global::config_sync();
+        let input = CodeHighlight::try_new(&input.command, Lang::Bash, &config.ui.colorschema)?;
 
         let output = output.map(serde_json::from_value).transpose()?;
         let output = generate_output(output);
+
         Ok(Self { input, output })
     }
 

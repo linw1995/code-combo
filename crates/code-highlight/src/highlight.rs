@@ -6,13 +6,13 @@ use tree_sitter_highlight::{Highlight, Highlighter};
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum Event<'a> {
-    Start(&'static str),
+    Start(&'a str),
     Source(&'a str),
     End,
 }
 
-pub fn highlight<'a>(lang: &'_ Lang, source: &'a str) -> Result<Vec<Event<'a>>> {
-    let (config, names) = new_config(lang)?;
+pub fn highlight<'a>(lang: &'_ Lang, names: &'a [&str], source: &'a str) -> Result<Vec<Event<'a>>> {
+    let config = new_config(lang, names)?;
 
     let mut highlighter = Highlighter::new();
     let highlights = highlighter
@@ -51,7 +51,7 @@ mod tests {
         "#}
         .trim();
 
-        let events = highlight(&Lang::Bash, source)?;
+        let events = highlight(&Lang::Bash, &["function", "string"], source)?;
         assert_eq!(
             events,
             vec![
@@ -75,7 +75,7 @@ mod tests {
             set -euo pipefail
         "#}
         .trim();
-        let events = highlight(&Lang::Bash, source)?;
+        let events = highlight(&Lang::Bash, &["function", "constant"], source)?;
         assert_eq!(
             events,
             vec![
@@ -107,7 +107,11 @@ mod tests {
             echo "Assoc foo: ${assoc[foo]}"
         "#}
         .trim();
-        let events = highlight(&Lang::Bash, source)?;
+        let events = highlight(
+            &Lang::Bash,
+            &["property", "string", "function", "operator", "embedded"],
+            source,
+        )?;
         assert_eq!(
             events,
             vec![
@@ -286,7 +290,7 @@ mod tests {
             echo "Done."
             "#};
 
-        let events = highlight(&Lang::Bash, source)?;
+        let events = highlight(&Lang::Bash, &[], source)?;
         debug!(?events, "highlight success");
 
         Ok(())
