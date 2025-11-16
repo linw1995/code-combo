@@ -5,7 +5,7 @@ edition.workspace = true
 
 [workspace]
 resolver = "2"
-members = ["crates/anthropic", "crates/coco-tui"]
+members = ["crates/*"]
 
 [workspace.package]
 version = "0.1.0"
@@ -22,6 +22,9 @@ serde_yaml = "0.9.34"
 snafu = "0.8.9"
 ctor = "0.5.0"
 bon = "3.8.1"
+tree-sitter = { version = "0.25" }
+tree-sitter-md = { version = "0.3.2" }
+indoc = "2.0.6"
 
 # Core dependencies for CLI and application functionality
 [dependencies]
@@ -53,10 +56,10 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 # Code parsing and analysis
-tree-sitter = { version = "0.25" }
-tree-sitter-md = { version = "0.3.2" }
+tree-sitter.workspace = true
+tree-sitter-md.workspace = true
 
 [dev-dependencies]
 ctor.workspace = true
-indoc = "2.0.6"
+indoc.workspace = true
 tempfile = "3.22.0"
