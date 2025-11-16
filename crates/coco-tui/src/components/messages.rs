@@ -431,7 +431,7 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn simple_overflow() {
         let mut app = Messages::default();
         app.extend(
@@ -463,7 +463,7 @@ mod tests {
         assert_eq!(terminal.backend().buffer(), &expected);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn vertical_overflow() {
         let mut app = Messages::default();
         app.extend(
@@ -521,7 +521,7 @@ mod tests {
         assert_eq!(terminal.backend().buffer(), &expected);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn vertical_overflow_with_offset() {
         let mut app = Messages::default();
         app.extend(
