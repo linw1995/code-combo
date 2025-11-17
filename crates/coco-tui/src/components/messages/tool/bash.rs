@@ -26,7 +26,12 @@ fn generate_output<'a>(output: Option<BashOutput>) -> Paragraph<'a> {
         .map(|output| (output.stderr, output.stdout))
         .unwrap_or_default();
 
-    for (prompt, output) in [("2> ".red(), &stderr), ("1> ".blue(), &stdout)] {
+    // '\t' rendering doesn't work well in ratatui.
+    // It causes the screen to retain the previous render result in the area of `\t` during scrolling.
+    for (prompt, output) in [
+        ("2> ".red(), &stderr.replace("\t", "  ")),
+        ("1> ".blue(), &stdout.replace("\t", "  ")),
+    ] {
         if output.is_empty() {
             continue;
         }
