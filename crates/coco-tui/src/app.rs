@@ -4,7 +4,6 @@ use std::{
 };
 
 use code_combo::Config;
-use color_eyre::Result;
 use crossterm::{
     cursor,
     event::{Event as CrosstermEvent, EventStream, KeyCode, KeyEvent, KeyModifiers},
@@ -12,6 +11,7 @@ use crossterm::{
 };
 use futures::{FutureExt, StreamExt};
 use ratatui::backend::CrosstermBackend as Backend;
+use snafu::prelude::*;
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
     task::JoinHandle,
@@ -23,6 +23,7 @@ use tracing::{debug, error, trace, warn};
 use crate::{
     actions::Action,
     components::{Chat, Component},
+    error::Result,
     events::Event,
     global,
 };
@@ -55,7 +56,8 @@ impl App {
         global::initialize(event_tx.clone(), action_tx.clone());
 
         Ok(Self {
-            terminal: ratatui::Terminal::new(Backend::new(stdout()))?,
+            terminal: ratatui::Terminal::new(Backend::new(stdout()))
+                .whatever_context("failed to new Terminal")?,
             task: tokio::spawn(async {}),
             cancellation_token: CancellationToken::new(),
             should_quit: false,
@@ -100,8 +102,9 @@ impl App {
     }
 
     pub fn enter(&mut self) -> Result<()> {
-        crossterm::terminal::enable_raw_mode()?;
-        crossterm::execute!(stdout(), EnterAlternateScreen, cursor::Hide)?;
+        crossterm::terminal::enable_raw_mode().whatever_context("failed to enable raw mode")?;
+        crossterm::execute!(stdout(), EnterAlternateScreen, cursor::Hide)
+            .whatever_context("failed to enter alter screen")?;
         self.start();
         Ok(())
     }
@@ -125,10 +128,16 @@ impl App {
 
     pub fn exit(&mut self) -> Result<()> {
         self.stop()?;
-        if crossterm::terminal::is_raw_mode_enabled()? {
-            self.terminal.flush()?;
-            crossterm::execute!(stdout(), LeaveAlternateScreen, cursor::Show)?;
-            crossterm::terminal::disable_raw_mode()?;
+        if crossterm::terminal::is_raw_mode_enabled()
+            .whatever_context("failed to check raw mode enabled")?
+        {
+            self.terminal
+                .flush()
+                .whatever_context("failed to flush terminal")?;
+            crossterm::execute!(stdout(), LeaveAlternateScreen, cursor::Show)
+                .whatever_context("faile to leave alter screen")?;
+            crossterm::terminal::disable_raw_mode()
+                .whatever_context("failed to disable raw mode")?;
         }
         Ok(())
     }
@@ -232,11 +241,13 @@ impl App {
     }
 
     fn render(&mut self) -> Result<()> {
-        self.terminal.draw(|frame| {
-            if let Err(err) = self.root.draw(frame, frame.area()) {
-                error!(?err, "terminal draw error");
-            }
-        })?;
+        self.terminal
+            .draw(|frame| {
+                if let Err(err) = self.root.draw(frame, frame.area()) {
+                    error!(?err, "terminal draw error");
+                }
+            })
+            .whatever_context("failed to draw terminal")?;
         self.dirty = false;
         Ok(())
     }

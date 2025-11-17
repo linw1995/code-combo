@@ -1,7 +1,6 @@
 use bon::bon;
 use code_combo::{BashInput, BashOutput};
 use code_highlight::Lang;
-use color_eyre::Result;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout},
@@ -11,10 +10,11 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
 };
 use serde_json::Value;
-
-use crate::{components::CodeHighlight, global};
+use snafu::ResultExt;
 
 use super::{Component, Content, ContentComponent};
+use crate::{components::CodeHighlight, error::*, global};
+
 pub struct Bash<'a> {
     input: CodeHighlight<'a>,
     output: Paragraph<'a>,
@@ -43,19 +43,26 @@ fn generate_output<'a>(output: Option<BashOutput>) -> Paragraph<'a> {
 impl<'a> Bash<'a> {
     #[builder]
     pub fn try_new(input: Value, output: Option<Value>) -> Result<Self> {
-        let input: BashInput = serde_json::from_value(input)?;
+        let input: BashInput =
+            serde_json::from_value(input).whatever_context("failed to parse BashInput")?;
 
         let config = global::config_sync();
         let input = CodeHighlight::try_new(&input.command, Lang::Bash, &config.ui.colorschema)?;
 
-        let output = output.map(serde_json::from_value).transpose()?;
+        let output = output
+            .map(serde_json::from_value)
+            .transpose()
+            .whatever_context("failed to parse BashOutput")?;
         let output = generate_output(output);
 
         Ok(Self { input, output })
     }
 
     pub fn update_output(&mut self, output: Option<Value>) -> Result<()> {
-        let output = output.map(serde_json::from_value).transpose()?;
+        let output = output
+            .map(serde_json::from_value)
+            .transpose()
+            .whatever_context("failed to parse BashOutput")?;
         self.output = generate_output(output);
         Ok(())
     }

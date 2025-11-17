@@ -1,11 +1,13 @@
-use color_eyre::Result;
 use ratatui::{
     Frame,
     prelude::Rect,
     widgets::{Paragraph, Wrap},
 };
 
-use crate::components::{Component, Content, ContentComponent};
+use crate::{
+    components::{Component, Content, ContentComponent},
+    error::*,
+};
 
 pub struct RawTextViewer<'a> {
     widget: Paragraph<'a>,

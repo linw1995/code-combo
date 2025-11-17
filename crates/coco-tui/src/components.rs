@@ -1,8 +1,7 @@
-use color_eyre::Result;
 use crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::{Frame, layout::Rect};
 
-use crate::{actions::*, events::*};
+use crate::{actions::*, error::*, events::*};
 
 /// A macro to handle component events in a standardized way.
 ///

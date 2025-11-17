@@ -2,7 +2,6 @@ use code_combo::{
     Agent, Block as ChatBlock, Config, Content as ChatContent, ExecuteOutput,
     Message as ChatMessage, ToolUse,
 };
-use color_eyre::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
@@ -21,7 +20,10 @@ use super::{
     ContentComponent, Event, Input, Message, Messages, Plain, Role, Tool, ToolAction,
     shortcuts_desc,
 };
-use crate::global::{self, State};
+use crate::{
+    error::*,
+    global::{self, State},
+};
 
 pub struct Chat<'a> {
     state: State<ChatState>,

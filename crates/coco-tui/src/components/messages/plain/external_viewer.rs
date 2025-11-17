@@ -1,15 +1,18 @@
 use std::process::Stdio;
 
 use ansi_to_tui::IntoText;
-use color_eyre::Result;
 use ratatui::{
     Frame,
     layout::Rect,
     widgets::{Paragraph, Wrap},
 };
+use snafu::prelude::*;
 use tokio::io::AsyncWriteExt;
 
-use crate::components::{Component, Content, ContentComponent};
+use crate::{
+    components::{Component, Content, ContentComponent},
+    error::*,
+};
 
 pub struct ExternalMarkdownViewer<'a> {
     widget: Paragraph<'a>,
@@ -35,9 +38,13 @@ impl<'a> ExternalMarkdownViewer<'a> {
                 }
             }
             Err(e) => Err(e),
-        }?;
+        }
+        .whatever_context("failed to run external markdown viewer")?;
 
-        let text = output.stdout.into_text()?;
+        let text = output
+            .stdout
+            .into_text()
+            .whatever_context("failed to convert the external markdown viewer result")?;
         let widget = Paragraph::new(text).wrap(Wrap { trim: false });
         Ok(Self { widget })
     }

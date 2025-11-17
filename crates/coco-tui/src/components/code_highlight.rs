@@ -1,5 +1,4 @@
 use code_highlight::{Event, Lang, highlight};
-use color_eyre::Result;
 use ratatui::{
     Frame,
     prelude::Rect,
@@ -7,9 +6,11 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Paragraph, Wrap},
 };
+use snafu::ResultExt;
 use tracing::trace;
 
 use super::{Component, Content, ContentComponent};
+use crate::error::*;
 
 pub struct CodeHighlight<'a> {
     widget: Paragraph<'a>,
@@ -24,7 +25,7 @@ impl<'a> CodeHighlight<'a> {
 
         let names = colorscheme.keys().map(|x| x.as_str()).collect::<Vec<_>>();
         trace!(?names, "highlighting with color scheme");
-        let events = highlight(&lang, &names, source)?;
+        let events = highlight(&lang, &names, source).whatever_context("failed to highlight")?;
 
         let mut line = vec![];
         let mut lines = vec![];

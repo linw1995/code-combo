@@ -16,7 +16,7 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn parse_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn parse_file(path: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let content = std::fs::read_to_string(path)?;
         if path.ends_with(".toml") {
             let config: Config = toml::from_str(&content)?;

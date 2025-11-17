@@ -1,12 +1,16 @@
-use color_eyre::Result;
+use snafu::prelude::*;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
+use crate::error::*;
+
 pub fn init() -> Result<()> {
     let log_path = "coco-tui.log";
-    let log_file = std::fs::File::create(log_path)?;
+    let log_file = std::fs::File::create(log_path).whatever_context("failed to create log file")?;
     let env_filter = EnvFilter::builder().with_default_directive(tracing::Level::INFO.into());
-    let env_filter = env_filter.from_env()?;
+    let env_filter = env_filter
+        .from_env()
+        .whatever_context("failed to load filter from env")?;
     let file_subscriber = fmt::layer()
         .with_file(true)
         .with_line_number(true)
@@ -17,6 +21,7 @@ pub fn init() -> Result<()> {
     tracing_subscriber::registry()
         .with(file_subscriber)
         .with(ErrorLayer::default())
-        .try_init()?;
+        .try_init()
+        .whatever_context("failed to init traceing subscriber")?;
     Ok(())
 }

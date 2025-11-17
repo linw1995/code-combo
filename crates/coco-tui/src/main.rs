@@ -2,9 +2,9 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use code_combo::Config;
-use color_eyre::eyre::eyre;
+use snafu::prelude::*;
 
-use coco_tui::{actions::ComboAction, app, global};
+use coco_tui::{actions::ComboAction, app, error::Result, global};
 
 /// Code Combo
 #[derive(Parser)]
@@ -42,9 +42,9 @@ enum ComboCommands {
     Run { name: String },
 }
 
+#[snafu::report]
 #[tokio::main]
-async fn main() -> color_eyre::Result<()> {
-    color_eyre::install()?;
+async fn main() -> Result<()> {
     coco_tui::logging::init()?;
 
     let mut args = Args::parse();
@@ -55,7 +55,7 @@ async fn main() -> color_eyre::Result<()> {
             .replace(config_dir.join("config.toml").to_string_lossy().to_string());
     }
     let mut config = Config::parse_file(&args.config_path.unwrap())
-        .map_err(|err| eyre!("parse file error: {err}"))?;
+        .whatever_context("failed to parse config file")?;
     config.config_dir = config_dir;
     global::set_config(config.clone()).await;
 

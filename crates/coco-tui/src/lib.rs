@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod app;
+pub mod error;
 pub mod global;
 #[macro_use]
 pub mod components;

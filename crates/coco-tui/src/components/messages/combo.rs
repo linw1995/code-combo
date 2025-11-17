@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
 
-use color_eyre::Result;
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout},
@@ -14,6 +13,7 @@ use tracing::{debug, warn};
 use super::{Component, Content, ContentComponent, Plain};
 use crate::{
     actions::{Action, ComboAction},
+    error::*,
     events::{ComboEvent, Event},
     global::{self, State},
 };

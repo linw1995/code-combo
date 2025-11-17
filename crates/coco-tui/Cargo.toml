@@ -15,8 +15,8 @@ code-combo = { path = "../.." }
 # CLI
 clap = "4.5.49"
 
-# Error handling with better reports
-color-eyre = "0.6.3"
+# Error handling
+snafu = { workspace = true, features = ["backtrace"] }
 
 # Terminal backend and input handling
 crossterm = { version = "0.28.1", features = ["event-stream"] }

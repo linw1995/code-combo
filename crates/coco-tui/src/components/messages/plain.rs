@@ -3,12 +3,12 @@ use ratatui::{Frame, prelude::Rect};
 use tokio::sync::oneshot;
 use tracing::{trace, warn};
 
+use super::{Component, Content};
 use crate::{
     components::{CodeHighlight, ContentComponent},
+    error::*,
     global,
 };
-
-use super::{Component, Content};
 
 mod external_viewer;
 mod raw;
@@ -86,7 +86,7 @@ impl Component for Plain {
         }
     }
 
-    fn draw(&mut self, frame: &mut Frame, area: Rect) -> color_eyre::eyre::Result<()> {
+    fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         self.widget.draw(frame, area)
     }
 }

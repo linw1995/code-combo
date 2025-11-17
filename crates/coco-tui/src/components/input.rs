@@ -1,9 +1,8 @@
-use color_eyre::Result;
 use crossterm::event::KeyEvent;
 use ratatui::{Frame, prelude::*};
 
 use super::{Action, Component};
-use crate::global;
+use crate::{error::*, global};
 
 pub struct Input<'a> {
     pub textarea: tui_textarea::TextArea<'a>,

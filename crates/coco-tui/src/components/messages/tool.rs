@@ -1,5 +1,4 @@
 use code_combo::{BASH_TOOL_NAME, ToolUse};
-use color_eyre::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
@@ -17,6 +16,7 @@ use super::{Component, Content, ContentComponent};
 use crate::{
     actions::ToolAction,
     components::shortcuts_desc,
+    error::*,
     events::{AnswerEvent, AskEvent, Event},
     global::{self, State},
 };

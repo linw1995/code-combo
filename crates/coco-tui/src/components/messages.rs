@@ -1,6 +1,5 @@
 use std::{any::Any, cmp::min};
 
-use color_eyre::Result;
 use crossterm::event::KeyEvent;
 use ratatui::{
     Frame,
@@ -10,9 +9,10 @@ use ratatui::{
     symbols::{border, line},
     widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
+use snafu::ResultExt;
 use tracing::{trace, warn};
 
-use crate::global::State;
+use crate::{error::*, global::State};
 
 use super::{AnswerEvent, AskEvent, Component, Event};
 
@@ -174,10 +174,11 @@ impl Messages {
 
         let v_area = Rect::new(0, 0, area.width, self.total_height);
         let mem = TestBackend::new(v_area.width, v_area.height);
-        let mut vtem = Terminal::new(mem).unwrap();
+        let mut vtem = Terminal::new(mem).whatever_context("failed to new terminal")?;
 
-        let completed_frame =
-            vtem.draw(|frame| self.actual_draw(frame, v_area, heights).unwrap())?;
+        let completed_frame = vtem
+            .draw(|frame| self.actual_draw(frame, v_area, heights).unwrap())
+            .whatever_context("failed to draw terminal")?;
 
         let buf = frame.buffer_mut();
         let visible_content = completed_frame
