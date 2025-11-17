@@ -1,5 +1,5 @@
 use bon::bon;
-use code_combo::{BashInput, BashOutput};
+use code_combo::{BashInput, BashOutput, Output};
 use code_highlight::Lang;
 use ratatui::{
     Frame,
@@ -10,7 +10,7 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
 };
 use serde_json::Value;
-use snafu::ResultExt;
+use snafu::prelude::*;
 
 use super::{Component, Content, ContentComponent};
 use crate::{components::CodeHighlight, error::*, global};
@@ -58,12 +58,12 @@ impl<'a> Bash<'a> {
         Ok(Self { input, output })
     }
 
-    pub fn update_output(&mut self, output: Option<Value>) -> Result<()> {
-        let output = output
-            .map(serde_json::from_value)
-            .transpose()
-            .whatever_context("failed to parse BashOutput")?;
-        self.output = generate_output(output);
+    pub fn update_output(&mut self, output: Option<Output>) -> Result<()> {
+        if let Some(Output::Json(value)) = output {
+            let output =
+                serde_json::from_value(value).whatever_context("failed to parse BashOutput")?;
+            self.output = generate_output(output);
+        }
         Ok(())
     }
 }

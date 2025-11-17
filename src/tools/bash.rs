@@ -1,15 +1,11 @@
-use std::{process::Output, time::Duration};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use snafu::{Whatever, prelude::*};
-use tokio::{
-    process::Command,
-    time::{error::Elapsed, timeout as tokio_timeout},
-};
+use tokio::{process::Command, time::timeout as tokio_timeout};
 
-use super::{ExecuteResult, Tool};
+use super::{ExecuteResult, Output, Tool};
 
 #[derive(Default)]
 pub struct BashTool {}
@@ -26,16 +22,6 @@ pub struct BashOutput {
     pub exit_code: u8,
     pub stdout: String,
     pub stderr: String,
-}
-
-#[derive(Snafu, Debug)]
-pub enum BashError {
-    #[snafu(display("{source}"))]
-    Json { source: serde_json::Error },
-    #[snafu(display("{source}"))]
-    Execute { source: std::io::Error },
-    #[snafu(display("{source}"))]
-    Timeout { source: Elapsed },
 }
 
 fn default_timeout_ms() -> u64 {
@@ -65,10 +51,9 @@ impl Tool for BashTool {
         })
     }
 
-    async fn execute(&self, input: Value) -> Result<ExecuteResult, Whatever> {
+    async fn execute(&self, input: Value) -> ExecuteResult {
         let BashInput { command, timeout } = serde_json::from_value(input)
-            .context(JsonSnafu)
-            .whatever_context("deserialize input of tool error")?;
+            .map_err(|err| Output::from(format!("failed to deserialize tool input: {err}")))?;
 
         let result = tokio_timeout(
             Duration::from_millis(timeout),
@@ -79,26 +64,28 @@ impl Tool for BashTool {
                 .output(),
         )
         .await
-        .context(TimeoutSnafu)
-        .whatever_context("executing command timeout")?;
+        .map_err(|err| Output::from(format!("execeed command executing timeout: {err}")))?;
 
-        let Output {
+        let std::process::Output {
             status,
             stdout,
             stderr,
-        } = result
-            .context(ExecuteSnafu)
-            .whatever_context("executing command error")?;
+        } = result.map_err(|err| Output::from(format!("failed to execute command: {err}")))?;
+
         let output = BashOutput {
             exit_code: status.code().unwrap_or(255) as u8,
             stdout: String::from_utf8_lossy(&stdout).to_string(),
             stderr: String::from_utf8_lossy(&stderr).to_string(),
         };
 
-        let is_error = output.exit_code != 0;
+        let exit_code = output.exit_code;
         let output = serde_json::to_value(output)
-            .context(JsonSnafu)
-            .whatever_context("serialize output of tool error")?;
-        Ok(ExecuteResult { output, is_error })
+            .map_err(|err| Output::from(format!("failed to serialize tool output: {err}")))?;
+        let output = Output::from(output);
+        if exit_code == 0 {
+            output.ok()
+        } else {
+            output.err()
+        }
     }
 }

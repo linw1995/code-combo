@@ -246,7 +246,7 @@ impl Component for Chat<'_> {
                 let content = ChatContent::Multiple(vec![code_combo::Block::ToolResult {
                     tool_use_id: id.clone(),
                     is_error: Some(*is_error),
-                    content: code_combo::Content::Text(serde_json::to_string(output).unwrap()),
+                    content: output.try_into().unwrap(),
                 }]);
                 let content = self.build_user_content(content);
                 tokio::task::spawn(task_chat(self.agent.clone(), content));

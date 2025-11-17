@@ -1,11 +1,13 @@
 mod agent;
 mod combo;
 mod config;
+mod error;
 mod tools;
 
 pub use agent::*;
 pub use combo::*;
 pub use config::*;
+pub use error::*;
 pub use tools::*;
 
 #[cfg(test)]

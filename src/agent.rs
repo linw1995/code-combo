@@ -56,7 +56,7 @@ impl Agent {
             .update_pcl(name, PermissionControl::Once(id.to_string()))
     }
 
-    pub async fn execute(&mut self, id: &str, name: &str, input: Value) -> ExecuteOutput<Value> {
+    pub async fn execute(&mut self, id: &str, name: &str, input: Value) -> ExecuteOutput {
         self.executor
             .execute(id, name, input)
             .await

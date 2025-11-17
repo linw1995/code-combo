@@ -1,4 +1,4 @@
-use code_combo::{Line, Starter};
+use code_combo::{Line, Output, Starter};
 use crossterm::event::{KeyEvent, MouseEvent};
 use serde_json::Value;
 
@@ -37,7 +37,7 @@ pub enum AnswerEvent {
     ToolResult {
         id: String,
         is_error: bool,
-        output: Value,
+        output: Output,
     },
 }
 

@@ -1,4 +1,4 @@
-use code_combo::{BASH_TOOL_NAME, ToolUse};
+use code_combo::{BASH_TOOL_NAME, Output, ToolUse};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
@@ -42,7 +42,7 @@ pub struct Tool {
     pub name: String,
     pub input: Value,
     pub state: State<ToolState>,
-    pub output: State<Option<Value>>,
+    pub output: State<Option<Output>>,
 
     widget: Option<Box<dyn ContentComponent>>,
 }
@@ -123,9 +123,12 @@ impl Tool {
             Err(_) => "Input: [Invalid JSON]".to_string(),
         };
         if let Some(output) = self.output.read() {
-            let output = match serde_json::to_string_pretty(output) {
-                Ok(json_str) => format!("Output: {}", json_str),
-                Err(_) => "Output: [Invalid JSON]".to_string(),
+            let output = match output {
+                Output::Json(output) => match serde_json::to_string_pretty(output) {
+                    Ok(json_str) => format!("Output: {}", json_str),
+                    Err(_) => "Output: [Invalid JSON]".to_string(),
+                },
+                Output::Message(text) => text.to_owned(),
             };
             text.push('\n');
             text.push_str(&output);

@@ -61,8 +61,8 @@ tree-sitter-md.workspace = true
 
 # Other
 lazy_static.workspace = true
+indoc.workspace = true
 
 [dev-dependencies]
 ctor.workspace = true
-indoc.workspace = true
 tempfile = "3.22.0"

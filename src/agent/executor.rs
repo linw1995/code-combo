@@ -2,9 +2,9 @@ use std::{collections::HashMap, sync::Arc};
 
 use lazy_static::lazy_static;
 use serde_json::Value;
-use snafu::{Whatever, prelude::*};
+use snafu::prelude::*;
 
-use crate::{BashTool, Tool};
+use crate::{BashTool, Output, ReadTool, Tool, error};
 
 #[derive(Clone)]
 pub struct Executor {
@@ -15,10 +15,11 @@ pub struct Executor {
 
 lazy_static! {
     static ref BASH_TOOL: Arc<(dyn Tool + 'static)> = Arc::new(BashTool::default());
+    static ref READ_TOOL: Arc<(dyn Tool + 'static)> = Arc::new(ReadTool::default());
     static ref DEFAULT_TOOLS: HashMap<String, Arc<(dyn Tool + 'static)>> = {
         let mut m = HashMap::<String, Arc<(dyn Tool + 'static)>>::new();
         m.extend(
-            [BASH_TOOL.clone()]
+            [BASH_TOOL.clone(), READ_TOOL.clone()]
                 .into_iter()
                 .map(|t| (t.name().to_string(), t)),
         );
@@ -43,9 +44,9 @@ pub enum ExecuteError {
 }
 
 #[derive(Debug)]
-pub enum ExecuteOutput<T> {
-    Success(T),
-    Failure(T),
+pub enum ExecuteOutput {
+    Success(Output),
+    Failure(Output),
     Denied,
     AskPermission,
 }
@@ -63,7 +64,7 @@ impl Executor {
         id: &str,
         name: &str,
         input: Value,
-    ) -> Result<ExecuteOutput<Value>, Whatever> {
+    ) -> error::Result<ExecuteOutput> {
         // Check tool
         let Some(tool) = self.tools.get(name) else {
             return Err(NotFoundSnafu {
@@ -93,12 +94,9 @@ impl Executor {
 
         if granted_once {
             // Just execute the tool
-            tool.execute(input).await.map(|rv| {
-                if rv.is_error {
-                    ExecuteOutput::Failure(rv.output)
-                } else {
-                    ExecuteOutput::Success(rv.output)
-                }
+            Ok(match tool.execute(input).await {
+                Err(output) => ExecuteOutput::Failure(output),
+                Ok(output) => ExecuteOutput::Success(output),
             })
         } else {
             // Check if the tool has permission control entries for this session
