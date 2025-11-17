@@ -47,7 +47,9 @@ impl Component for Input<'_> {
     }
 
     fn handle_key_event(&mut self, key: &KeyEvent) {
-        if self.textarea.input(key.to_owned()) {
+        let cursor = self.textarea.cursor();
+        // Signal dirty if text changed or cursor position changed
+        if self.textarea.input(key.to_owned()) || self.textarea.cursor() != cursor {
             global::signal_ditry();
         }
     }
