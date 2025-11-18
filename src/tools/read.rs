@@ -44,7 +44,10 @@ impl Tool for ReadTool {
         json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "The absolute path to the file to read"},
+                "path": {
+                    "type": "string",
+                    "description": "The relative path from the working directory to the file to read"
+                },
                 "line_offset": {
                     "type": "number",
                     "description": indoc! {"
@@ -84,7 +87,14 @@ impl Tool for ReadTool {
             return err_msg!("exceeded maximum line limit for reading file");
         }
 
-        // FIXME: Check if the path is absolute
+        // Check if the path is absolute
+        let path = path
+            .parse::<std::path::PathBuf>()
+            .map_err(|err| Output::from(format!("failed to parse path: {err}")))?;
+        if path.is_absolute() {
+            return err_msg!("path must be relative to the working directory");
+        }
+
         let fh = tokio::fs::File::open(path)
             .await
             .map_err(|err| Output::from(format!("failed to open file: {err}")))?;
