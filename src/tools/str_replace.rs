@@ -82,15 +82,14 @@ impl Tool for StrReplaceTool {
             old_str,
             new_str,
             expected_replacements,
-        } = serde_json::from_value(input)
-            .map_err(|err| format!("failed to deserialize tool input: {err}"))?;
+        } = serde_json::from_value(input).map_err(|err| format!("Invalid input format: {err}"))?;
 
         // Check if the path is absolute
         let path = path
             .parse::<std::path::PathBuf>()
-            .map_err(|err| format!("failed to parse path: {err}"))?;
+            .map_err(|err| format!("Invalid path format: {err}"))?;
         if path.is_absolute() {
-            return err_msg!("path must be relative to the working directory");
+            return err_msg!("Path must be relative to the working directory, not absolute");
         }
 
         if old_str.is_empty() {
@@ -101,7 +100,7 @@ impl Tool for StrReplaceTool {
                     .truncate(true)
                     .open(&path)
                     .await
-                    .map_err(|err| format!("failed to open and truncate file for writing: {err}"))
+                    .map_err(|err| format!("Failed to open file for writing: {err}"))
             } else {
                 // Create a new file
                 OpenOptions::new()
@@ -109,28 +108,28 @@ impl Tool for StrReplaceTool {
                     .write(true)
                     .open(&path)
                     .await
-                    .map_err(|err| format!("failed to create file for writing: {err}"))
+                    .map_err(|err| format!("Failed to create file: {err}"))
             }?;
             fh.write_all(new_str.as_bytes())
                 .await
-                .map_err(|err| format!("failed to write file: {err}"))?;
+                .map_err(|err| format!("Failed to write content to file: {err}"))?;
             fh.flush()
                 .await
-                .map_err(|err| format!("failed to flush file: {err}"))?;
+                .map_err(|err| format!("Failed to flush file changes: {err}"))?;
 
             Ok("success".into())
         } else {
             // open file
             let fh = tokio::fs::File::open(&path)
                 .await
-                .map_err(|err| format!("failed to open file: {err}"))?;
+                .map_err(|err| format!("Failed to open file: {err}"))?;
             let mut rdr = BufReader::new(fh);
 
             // read whole file
             let mut text = String::new();
             rdr.read_to_string(&mut text)
                 .await
-                .map_err(|err| format!("failed to read file: {err}"))?;
+                .map_err(|err| format!("Failed to read file: {err}"))?;
 
             // replace and diff
             let mut new_text = String::with_capacity(
@@ -160,13 +159,13 @@ impl Tool for StrReplaceTool {
                 .truncate(true)
                 .open(&path)
                 .await
-                .map_err(|err| format!("failed to open and truncate file for writing: {err}"))?;
+                .map_err(|err| format!("Failed to open file for writing: {err}"))?;
             fh.write_all(new_text.as_bytes())
                 .await
-                .map_err(|err| format!("failed to write file: {err}"))?;
+                .map_err(|err| format!("Failed to write file content: {err}"))?;
             fh.flush()
                 .await
-                .map_err(|err| format!("failed to flush file: {err}"))?;
+                .map_err(|err| format!("Failed to flush file changes: {err}"))?;
 
             Ok("success".into())
         }

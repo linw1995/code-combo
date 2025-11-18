@@ -80,24 +80,23 @@ impl Tool for ReadTool {
             path,
             line_offset,
             line_limit,
-        } = serde_json::from_value(input)
-            .map_err(|err| format!("failed to deserialize tool input: {err}"))?;
+        } = serde_json::from_value(input).map_err(|err| format!("Invalid input format: {err}"))?;
 
         if line_limit > MAX_LINE_LIMIT {
-            return err_msg!("exceeded maximum line limit for reading file");
+            return err_msg!("Exceeded maximum line limit for reading file");
         }
 
         // Check if the path is absolute
         let path = path
             .parse::<std::path::PathBuf>()
-            .map_err(|err| format!("failed to parse path: {err}"))?;
+            .map_err(|err| format!("Invalid path format: {err}"))?;
         if path.is_absolute() {
-            return err_msg!("path must be relative to the working directory");
+            return err_msg!("Path must be relative to the working directory, not absolute");
         }
 
         let fh = tokio::fs::File::open(path)
             .await
-            .map_err(|err| format!("failed to open file: {err}"))?;
+            .map_err(|err| format!("Failed to open file: {err}"))?;
 
         let mut rdr = BufReader::new(fh).lines();
 
@@ -111,7 +110,7 @@ impl Tool for ReadTool {
         while let Some(line) = rdr
             .next_line()
             .await
-            .map_err(|err| format!("failed to read line: {err}"))?
+            .map_err(|err| format!("Failed to read line: {err}"))?
         {
             if no >= end {
                 break;
@@ -122,7 +121,7 @@ impl Tool for ReadTool {
 
                 bytes += line.len() + 1;
                 if bytes > MAX_BYTES_LIMIT {
-                    return err_msg!("exceeded max bytes limit of reading file: {bytes}");
+                    return err_msg!("Exceeded maximum bytes limit for reading file: {bytes}");
                 }
             }
             no += 1;

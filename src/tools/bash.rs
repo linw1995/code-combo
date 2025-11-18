@@ -52,8 +52,8 @@ impl Tool for BashTool {
     }
 
     async fn execute(&self, input: Value) -> ExecuteResult {
-        let BashInput { command, timeout } = serde_json::from_value(input)
-            .map_err(|err| format!("failed to deserialize tool input: {err}"))?;
+        let BashInput { command, timeout } =
+            serde_json::from_value(input).map_err(|err| format!("Invalid input format: {err}"))?;
 
         let result = tokio_timeout(
             Duration::from_millis(timeout),
@@ -64,13 +64,13 @@ impl Tool for BashTool {
                 .output(),
         )
         .await
-        .map_err(|err| format!("execeed command executing timeout: {err}"))?;
+        .map_err(|err| format!("Exceeded command execution timeout: {err}"))?;
 
         let std::process::Output {
             status,
             stdout,
             stderr,
-        } = result.map_err(|err| format!("failed to execute command: {err}"))?;
+        } = result.map_err(|err| format!("Failed to execute command: {err}"))?;
 
         let output = BashOutput {
             exit_code: status.code().unwrap_or(255) as u8,
@@ -80,7 +80,7 @@ impl Tool for BashTool {
 
         let exit_code = output.exit_code;
         let output = serde_json::to_value(output)
-            .map_err(|err| format!("failed to serialize tool output: {err}"))?;
+            .map_err(|err| format!("Failed to serialize tool output: {err}"))?;
         let output = Output::from(output);
         if exit_code == 0 {
             output.ok()
