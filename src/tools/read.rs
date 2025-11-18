@@ -66,7 +66,7 @@ impl Tool for ReadTool {
                         By default read up to {MAX_LINE_LIMIT} lines, which is the max allowed value.
                         Set this value when the file is too large to read at once.
                     "}.trim(),
-                    "max": MAX_LINE_LIMIT,
+                    "maximum": MAX_LINE_LIMIT,
                     "default": MAX_LINE_LIMIT,
                     "ge": 1,
                 }

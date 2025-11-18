@@ -4,7 +4,7 @@ use lazy_static::lazy_static;
 use serde_json::Value;
 use snafu::prelude::*;
 
-use crate::{BashTool, Output, ReadTool, Tool, error};
+use crate::{BashTool, Output, ReadTool, StrReplaceTool, Tool, error};
 
 #[derive(Clone)]
 pub struct Executor {
@@ -16,12 +16,17 @@ pub struct Executor {
 lazy_static! {
     static ref BASH_TOOL: Arc<(dyn Tool + 'static)> = Arc::new(BashTool::default());
     static ref READ_TOOL: Arc<(dyn Tool + 'static)> = Arc::new(ReadTool::default());
+    static ref STR_REPLACE_TOOL: Arc<(dyn Tool + 'static)> = Arc::new(StrReplaceTool::default());
     static ref DEFAULT_TOOLS: HashMap<String, Arc<(dyn Tool + 'static)>> = {
         let mut m = HashMap::<String, Arc<(dyn Tool + 'static)>>::new();
         m.extend(
-            [BASH_TOOL.clone(), READ_TOOL.clone()]
-                .into_iter()
-                .map(|t| (t.name().to_string(), t)),
+            [
+                BASH_TOOL.clone(),
+                READ_TOOL.clone(),
+                STR_REPLACE_TOOL.clone(),
+            ]
+            .into_iter()
+            .map(|t| (t.name().to_string(), t)),
         );
         m
     };

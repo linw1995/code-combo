@@ -40,6 +40,12 @@ impl TryFrom<&Output> for anthropic::Content {
     }
 }
 
+impl From<&str> for Output {
+    fn from(value: &str) -> Self {
+        Self::Message(value.to_string())
+    }
+}
+
 impl From<String> for Output {
     fn from(value: String) -> Self {
         Self::Message(value)
@@ -64,18 +70,20 @@ impl Output {
 
 macro_rules! err_msg {
     ($template:literal) => {
-        Output::from(format!($template)).err()
+        crate::tools::Output::from(format!($template)).err()
     };
     ($template:literal, $expression:expr) => {
-        Output::from(format!($template, $expression)).err()
+        crate::tools::Output::from(format!($template, $expression)).err()
     };
     ($template:literal, $($expression:expr),* ) => {
-        Output::from(format!($template, $($expression),*)).err()
+        crate::tools::Output::from(format!($template, $($expression),*)).err()
     };
 }
 
 mod bash;
 mod read;
+mod str_replace;
 
 pub use bash::{BASH_TOOL_NAME, BashInput, BashOutput, BashTool};
 pub use read::{READ_TOOL_NAME, ReadInput, ReadTool};
+pub use str_replace::{STR_REPLACE_TOOL_NAME, StrReplaceInput, StrReplaceTool};
