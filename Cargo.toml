@@ -62,6 +62,7 @@ tree-sitter-md.workspace = true
 # Other
 lazy_static.workspace = true
 indoc.workspace = true
+similar = "2.7.0"
 
 [dev-dependencies]
 ctor.workspace = true

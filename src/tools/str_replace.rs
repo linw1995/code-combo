@@ -7,7 +7,9 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufReader},
 };
 
-use super::{ExecuteResult, Tool};
+use crate::{AppliedTextEdit, Output};
+
+use super::{ExecuteResult, Final, Input, TextEdit, Tool};
 
 #[derive(Default)]
 pub struct StrReplaceTool {}
@@ -76,7 +78,16 @@ impl Tool for StrReplaceTool {
             "required": ["path", "old_str", "new_str"]
         })
     }
-    async fn execute(&self, input: Value) -> ExecuteResult {
+    async fn execute<'a>(&self, input: Input<'a>) -> ExecuteResult {
+        match input {
+            Input::Starter(input) => self.prepare(input).await.map(Output::from),
+            Input::AppliedTextEdit(input) => self.apply_edit(input).await,
+        }
+    }
+}
+
+impl StrReplaceTool {
+    async fn prepare(&self, input: Value) -> Result<TextEdit, Final> {
         let StrReplaceInput {
             path,
             old_str,
@@ -88,36 +99,13 @@ impl Tool for StrReplaceTool {
         let path = path
             .parse::<std::path::PathBuf>()
             .map_err(|err| format!("Invalid path format: {err}"))?;
+
         if path.is_absolute() {
-            return err_msg!("Path must be relative to the working directory, not absolute");
+            return Err("Path must be relative to the working directory, not absolute".into());
         }
 
         if old_str.is_empty() {
-            let mut fh = if path.exists() {
-                // Overwrite the whole file
-                OpenOptions::new()
-                    .write(true)
-                    .truncate(true)
-                    .open(&path)
-                    .await
-                    .map_err(|err| format!("Failed to open file for writing: {err}"))
-            } else {
-                // Create a new file
-                OpenOptions::new()
-                    .create_new(true)
-                    .write(true)
-                    .open(&path)
-                    .await
-                    .map_err(|err| format!("Failed to create file: {err}"))
-            }?;
-            fh.write_all(new_str.as_bytes())
-                .await
-                .map_err(|err| format!("Failed to write content to file: {err}"))?;
-            fh.flush()
-                .await
-                .map_err(|err| format!("Failed to flush file changes: {err}"))?;
-
-            Ok("success".into())
+            Ok(TextEdit::new(path, String::new(), new_str.to_string()))
         } else {
             // open file
             let fh = tokio::fs::File::open(&path)
@@ -131,43 +119,65 @@ impl Tool for StrReplaceTool {
                 .await
                 .map_err(|err| format!("Failed to read file: {err}"))?;
 
-            // replace and diff
-            let mut new_text = String::with_capacity(
-                text.len() + (new_str.len() - old_str.len()) * expected_replacements,
-            );
+            // replace
+            let new_text = self.replace(&text, &old_str, &new_str, expected_replacements)?;
 
-            let mut countdown = expected_replacements;
-            let mut offset = 0;
-            while countdown > 0
-                && let Some(length) = text[offset..].find(&old_str)
-            {
-                new_text.push_str(&text[offset..offset + length]);
-                new_text.push_str(&new_str);
-                offset = offset + length + old_str.len();
-                countdown -= 1
-            }
-            if countdown > 0 {
-                let found = expected_replacements - countdown;
-                return err_msg!(
-                    "failed to replace: expected {expected_replacements} replacement(s) but found {found}"
-                );
-            }
+            Ok(TextEdit::new(path, text, new_text))
+        }
+    }
 
-            // write whole file
-            let mut fh = OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .open(&path)
-                .await
-                .map_err(|err| format!("Failed to open file for writing: {err}"))?;
-            fh.write_all(new_text.as_bytes())
-                .await
-                .map_err(|err| format!("Failed to write file content: {err}"))?;
-            fh.flush()
-                .await
-                .map_err(|err| format!("Failed to flush file changes: {err}"))?;
+    async fn apply_edit<'a>(&self, input: AppliedTextEdit<'a>) -> ExecuteResult {
+        // TODO: Use writing temporary file then renaming for safe editing.
+        // This ensures atomic file updates and prevents data loss if the operation is interrupted.
+        let AppliedTextEdit { path, text } = input;
 
-            Ok("success".into())
+        // Truncate (or create) and rewrite the entire file
+        let mut fh = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .create(true)
+            .open(&path)
+            .await
+            .map_err(|err| format!("Failed to open file for writing: {err}"))?;
+        fh.write_all(text.as_bytes())
+            .await
+            .map_err(|err| format!("Failed to write file content: {err}"))?;
+        fh.flush()
+            .await
+            .map_err(|err| format!("Failed to flush file changes: {err}"))?;
+
+        Ok(Final::from("Success").into())
+    }
+
+    fn replace(
+        &self,
+        text: &str,
+        old_str: &str,
+        new_str: &str,
+        expected_replacements: usize,
+    ) -> Result<String, Final> {
+        let mut new_text = String::with_capacity(
+            text.len() + new_str.len() * expected_replacements
+                - old_str.len() * expected_replacements,
+        );
+
+        let mut countdown = expected_replacements;
+        let mut offset = 0;
+        while countdown > 0
+            && let Some(length) = text[offset..].find(old_str)
+        {
+            new_text.push_str(&text[offset..offset + length]);
+            new_text.push_str(new_str);
+            offset = offset + length + old_str.len();
+            countdown -= 1
+        }
+        if countdown > 0 {
+            let found = expected_replacements - countdown;
+            Err(format!(
+                "failed to replace: expected {expected_replacements} replacement(s) but found {found}"
+            ).into())
+        } else {
+            Ok(new_text)
         }
     }
 }

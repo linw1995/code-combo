@@ -4,7 +4,7 @@ use lazy_static::lazy_static;
 use serde_json::Value;
 use snafu::prelude::*;
 
-use crate::{BashTool, Output, ReadTool, StrReplaceTool, Tool, error};
+use crate::{BashTool, Final, Input, Output, ReadTool, StrReplaceTool, Tool, error};
 
 #[derive(Clone)]
 pub struct Executor {
@@ -50,8 +50,8 @@ pub enum ExecuteError {
 
 #[derive(Debug)]
 pub enum ExecuteOutput {
-    Success(Output),
-    Failure(Output),
+    Success(Final),
+    Failure(Final),
     Denied,
     AskPermission,
 }
@@ -99,9 +99,12 @@ impl Executor {
 
         if granted_once {
             // Just execute the tool
-            Ok(match tool.execute(input).await {
+            Ok(match tool.execute(Input::Starter(input)).await {
                 Err(output) => ExecuteOutput::Failure(output),
-                Ok(output) => ExecuteOutput::Success(output),
+                Ok(output) => match output {
+                    Output::Final(output) => ExecuteOutput::Success(output),
+                    _ => unimplemented!(),
+                },
             })
         } else {
             // Check if the tool has permission control entries for this session

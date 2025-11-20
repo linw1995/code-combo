@@ -1,10 +1,12 @@
 use async_trait::async_trait;
 use indoc::{formatdoc, indoc};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-use super::{ExecuteResult, Output, Tool};
+use crate::Input;
+
+use super::{ExecuteResult, Final, Tool};
 
 #[derive(Default)]
 pub struct ReadTool {}
@@ -75,7 +77,10 @@ impl Tool for ReadTool {
         })
     }
 
-    async fn execute(&self, input: Value) -> ExecuteResult {
+    async fn execute<'a>(&self, input: Input<'a>) -> ExecuteResult {
+        let Input::Starter(input) = input else {
+            return err_msg!("Input should be Starter variant, not other variants");
+        };
         let ReadInput {
             path,
             line_offset,
@@ -127,6 +132,6 @@ impl Tool for ReadTool {
             no += 1;
         }
 
-        Ok(Output::Message(output))
+        Ok(Final::Message(output).into())
     }
 }

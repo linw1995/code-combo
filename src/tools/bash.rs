@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{process::Command, time::timeout as tokio_timeout};
 
-use super::{ExecuteResult, Output, Tool};
+use super::{ExecuteResult, Final, Input, Tool};
 
 #[derive(Default)]
 pub struct BashTool {}
@@ -51,7 +51,10 @@ impl Tool for BashTool {
         })
     }
 
-    async fn execute(&self, input: Value) -> ExecuteResult {
+    async fn execute<'a>(&self, input: Input<'a>) -> ExecuteResult {
+        let Input::Starter(input) = input else {
+            return err_msg!("Input should be Starter variant, not other variants");
+        };
         let BashInput { command, timeout } =
             serde_json::from_value(input).map_err(|err| format!("Invalid input format: {err}"))?;
 
@@ -81,7 +84,7 @@ impl Tool for BashTool {
         let exit_code = output.exit_code;
         let output = serde_json::to_value(output)
             .map_err(|err| format!("Failed to serialize tool output: {err}"))?;
-        let output = Output::from(output);
+        let output = Final::from(output);
         if exit_code == 0 {
             output.ok()
         } else {

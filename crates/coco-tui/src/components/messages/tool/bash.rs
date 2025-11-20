@@ -1,5 +1,5 @@
 use bon::bon;
-use code_combo::{BashInput, BashOutput, Output};
+use code_combo::{BashInput, BashOutput, Final};
 use code_highlight::Lang;
 use ratatui::{
     Frame,
@@ -63,8 +63,8 @@ impl<'a> Bash<'a> {
         Ok(Self { input, output })
     }
 
-    pub fn update_output(&mut self, output: Option<Output>) -> Result<()> {
-        if let Some(Output::Json(value)) = output {
+    pub fn update_output(&mut self, output: Option<Final>) -> Result<()> {
+        if let Some(Final::Json(value)) = output {
             let output =
                 serde_json::from_value(value).whatever_context("failed to parse BashOutput")?;
             self.output = generate_output(output);
