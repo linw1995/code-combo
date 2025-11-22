@@ -155,6 +155,37 @@ impl StrReplaceTool {
         new_str: &str,
         expected_replacements: usize,
     ) -> Result<String, Final> {
+        /*
+         * String Replacement Algorithm - Visualization
+         *
+         *                <-length->       <--length-->
+         * INPUT TEXT:   "......────old_str─────...────old_str─────..."
+         *                ^                ^                  ^
+         *                |                |
+         *                offset           offset
+         *
+         * PROCESSING:
+         * 1. Initialize new_text with estimated capacity
+         * 2. Use countdown to track remaining replacements
+         * 3. Iteratively find and replace occurrences
+         * 4. Handle partial replacements (when expected > found)
+         *
+         * REPLACEMENT STEPS:
+         * new_text = text[offset..offset + length] + new_str
+         *            <--- preserved -------------> <replaced>
+         *
+         *            offset = offset + length + old_str.len()
+         *
+         *          + text[offset..offset + length] + new_str
+         *            <--- preserved -------------> <replaced>
+         *
+         *          + ..  + new[offset..]
+         *            <--- remaining -->
+         *
+         * ERROR HANDLING:
+         * If countdown > 0 after loop, insufficient replacements found
+         */
+
         let mut new_text = String::with_capacity(
             text.len() + new_str.len() * expected_replacements
                 - old_str.len() * expected_replacements,
@@ -162,12 +193,19 @@ impl StrReplaceTool {
 
         let mut countdown = expected_replacements;
         let mut offset = 0;
+
         while countdown > 0
             && let Some(length) = text[offset..].find(old_str)
         {
+            // Push text before the replacement
             new_text.push_str(&text[offset..offset + length]);
+
+            // Replace with new string
             new_text.push_str(new_str);
+
+            // Update offset to the end of the old string
             offset = offset + length + old_str.len();
+
             countdown -= 1
         }
         if countdown > 0 {
@@ -176,6 +214,10 @@ impl StrReplaceTool {
                 "failed to replace: expected {expected_replacements} replacement(s) but found {found}"
             ).into())
         } else {
+            // Push remaining text after all replacements
+            new_text.push_str(&text[offset..]);
+            new_text.shrink_to_fit();
+
             Ok(new_text)
         }
     }

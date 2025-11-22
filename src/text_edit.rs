@@ -102,15 +102,21 @@ impl TextEdit {
 
         let mut new_text = String::with_capacity(self.new_text.len());
         self.new_text
-            .lines()
+            .split('\n') // Use split('\n') instead of String::lines() to preserve original line content
             .take(new_start)
-            .chain(self.text.lines().skip(old_start).take(old_end - old_start))
-            .chain(self.new_text.lines().skip(new_end))
+            .chain(
+                self.text
+                    .split('\n')
+                    .skip(old_start)
+                    .take(old_end - old_start),
+            )
+            .chain(self.new_text.split('\n').skip(new_end))
             .for_each(|line| {
                 new_text.push_str(line);
                 new_text.push('\n');
             });
         new_text.pop(); // Remove the last newline character
+        new_text.shrink_to_fit();
 
         if new_text == self.text {
             None
@@ -158,20 +164,21 @@ impl TextEdit {
 
         let mut applied_text = String::with_capacity(self.text.len() + self.new_text.len());
         self.text
-            .lines()
+            .split('\n') // Use split('\n') instead of String::lines() to preserve original line content
             .take(old_start)
             .chain(
                 self.new_text
-                    .lines()
+                    .split('\n')
                     .skip(new_start)
                     .take(new_end - new_start),
             )
-            .chain(self.text.lines().skip(old_end))
+            .chain(self.text.split('\n').skip(old_end))
             .for_each(|line| {
                 applied_text.push_str(line);
                 applied_text.push('\n');
             });
         applied_text.pop(); // Remove the last newline character
+        applied_text.shrink_to_fit();
 
         let finished = applied_text == self.new_text;
         self.text = applied_text;
