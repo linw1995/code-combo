@@ -1,17 +1,22 @@
-use code_combo::{TextEdit, ToolUse, tools::STR_REPLACE_TOOL_NAME};
+use code_combo::{
+    TextEdit, ToolUse,
+    tools::{Final, STR_REPLACE_TOOL_NAME},
+};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     prelude::Rect,
+    style::Stylize,
     text::Text,
     widgets::{Block, Paragraph},
 };
+use tracing::warn;
 
 use crate::{
     actions::{Action, ToolAction},
     components::shortcuts_desc,
     error,
-    events::{AskEvent, Event},
+    events::{AnswerEvent, AskEvent, Event},
     global::{self, State},
 };
 
@@ -109,6 +114,25 @@ impl Component for StrReplace<'_> {
             Event::Ask(AskEvent::TextEdit { edit, .. }) => {
                 self.update_text_edit(edit.clone());
                 *self.appliable.write() = true;
+            }
+            Event::Answer(AnswerEvent::ToolResult {
+                is_error, output, ..
+            }) => {
+                self.widget = match output {
+                    Final::Message(message) => {
+                        let mut message = Text::from(message.to_owned());
+                        if *is_error {
+                            message = message.red();
+                        } else {
+                            message = message.green();
+                        }
+                        Paragraph::new(message)
+                    }
+                    _ => {
+                        warn!(?event, "StrReplace tool should only return Final::Message");
+                        Paragraph::new("")
+                    }
+                };
             }
             _ => {
                 handle_component_event!(self, event);
