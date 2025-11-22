@@ -131,7 +131,7 @@ impl Messages {
             m.content
                 .as_any()
                 .downcast_ref::<Tool>()
-                .map(|tool| tool.id == id)
+                .map(|tool| tool.id() == id)
                 .unwrap_or_default()
         }) {
             Some(idx)
@@ -144,6 +144,7 @@ impl Messages {
     pub fn on_tool_event(&mut self, event: &Event) -> Option<usize> {
         match event {
             Event::Ask(AskEvent::ToolUsePermission(id))
+            | Event::Ask(AskEvent::TextEdit { id, .. })
             | Event::Answer(AnswerEvent::ToolResult { id, .. }) => {
                 if let Some(idx) = self.locate_tool_message(id) {
                     // Pass through the relative event to its component.

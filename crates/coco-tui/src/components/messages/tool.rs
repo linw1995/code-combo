@@ -1,5 +1,8 @@
-use code_combo::{BASH_TOOL_NAME, Final, ToolUse};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use code_combo::{
+    ToolUse,
+    tools::{BASH_TOOL_NAME, STR_REPLACE_TOOL_NAME},
+};
+use crossterm::event::KeyEvent;
 use ratatui::{
     Frame,
     layout::Alignment,
@@ -7,22 +10,24 @@ use ratatui::{
     style::Stylize,
     symbols::border,
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders},
 };
-use serde_json::Value;
 use tracing::{debug, warn};
 
 use super::{Component, Content, ContentComponent};
 use crate::{
-    actions::ToolAction,
-    components::shortcuts_desc,
+    actions::{Action, ToolAction},
     error::*,
     events::{AnswerEvent, AskEvent, Event},
-    global::{self, State},
+    global::State,
 };
 
 mod bash;
+mod raw;
+mod str_replace;
 use bash::Bash;
+use raw::Raw;
+use str_replace::StrReplace;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum ToolState {
@@ -38,22 +43,22 @@ pub enum ToolState {
 }
 
 pub struct Tool {
-    pub id: String,
-    pub name: String,
-    pub input: Value,
-    pub state: State<ToolState>,
-    pub output: State<Option<Final>>,
+    id: String,
+    name: String,
+    state: State<ToolState>,
 
-    widget: Option<Box<dyn ContentComponent>>,
+    widget: Box<dyn ContentComponent>,
 }
 
 // TODO: Allow user to edit tool input parameters
 
 impl Tool {
-    pub fn new_use(id: String, name: String, input: Value) -> Self {
-        #[allow(clippy::single_match)]
+    pub fn new(tool_use: ToolUse) -> Self {
+        let id = tool_use.id.clone();
+        let name = tool_use.name.clone();
+
         let widget = match name.as_str() {
-            BASH_TOOL_NAME => match Bash::try_new().input(input.clone()).call() {
+            BASH_TOOL_NAME => match Bash::try_new().tool_use(&tool_use).call() {
                 Ok(widget) => Some(widget.boxed()),
                 Err(err) => {
                     warn!(
@@ -63,17 +68,21 @@ impl Tool {
                     None
                 }
             },
+            STR_REPLACE_TOOL_NAME => Some(StrReplace::new(&tool_use).boxed()),
             _ => None,
-        };
+        }
+        .unwrap_or_else(|| Raw::new(tool_use).boxed());
 
         Self {
             id,
             name,
-            input,
             state: State::default(),
-            output: State::default(),
             widget,
         }
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
     }
 
     pub fn update_state(&mut self, new_state: ToolState) {
@@ -108,62 +117,30 @@ impl Tool {
         spans.push(" ".into());
         spans
     }
-
-    fn tool(&self) -> ToolUse {
-        ToolUse {
-            id: self.id.clone(),
-            name: self.name.clone(),
-            input: self.input.clone(),
-        }
-    }
-
-    fn generate_default(&self) -> Paragraph<'_> {
-        let mut text = match serde_json::to_string_pretty(&self.input) {
-            Ok(json_str) => format!("Input: {}", json_str),
-            Err(_) => "Input: [Invalid JSON]".to_string(),
-        };
-        if let Some(output) = self.output.read() {
-            let output = match output {
-                Final::Json(output) => match serde_json::to_string_pretty(output) {
-                    Ok(json_str) => format!("Output: {}", json_str),
-                    Err(_) => "Output: [Invalid JSON]".to_string(),
-                },
-                Final::Message(text) => text.to_owned(),
-            };
-            text.push('\n');
-            text.push_str(&output);
-        }
-        Paragraph::new(text).wrap(Wrap { trim: false })
-    }
 }
 
 impl Component for Tool {
+    fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
+        Box::new(vec![self.widget.as_mut() as &mut dyn Component].into_iter())
+    }
+
     fn handle_event(&mut self, event: &Event) {
         match event {
-            Event::Ask(AskEvent::ToolUsePermission(id)) => {
+            Event::Ask(AskEvent::ToolUsePermission(id) | AskEvent::TextEdit { id, .. }) => {
                 if &self.id == id {
+                    debug!(?event, "state change to pending confirmation");
                     self.update_state(ToolState::PendingConfirmation);
+                    handle_component_event!(self, event);
                 }
             }
-            Event::Answer(AnswerEvent::ToolResult {
-                id,
-                is_error,
-                output,
-            }) => {
+            Event::Answer(AnswerEvent::ToolResult { id, is_error, .. }) => {
                 if &self.id == id {
                     self.update_state(if *is_error {
                         ToolState::Failed
                     } else {
                         ToolState::Completed
                     });
-                    *self.output.write() = Some(output.to_owned());
-                    // TODO: Make update_output a trait method
-                    if let Some(widget) = &mut self.widget
-                        && let Some(widget) = widget.as_mut_any().downcast_mut::<Bash>()
-                        && let Err(err) = widget.update_output(Some(output.clone()))
-                    {
-                        warn!(?err, "failed to update tool output");
-                    };
+                    handle_component_event!(self, event);
                 }
             }
             _ => handle_component_event!(self, event),
@@ -171,20 +148,24 @@ impl Component for Tool {
     }
 
     fn handle_key_event(&mut self, key: &KeyEvent) {
-        match (key.modifiers, key.code) {
-            (KeyModifiers::NONE, KeyCode::Enter) => {
-                global::action_tx()
-                    .send(ToolAction::Grant(self.tool()).into())
-                    .unwrap();
-                self.update_state(ToolState::Executing);
+        self.widget.handle_key_event(key);
+    }
+
+    fn update(&mut self, action: &Action) {
+        match action {
+            Action::Tool(
+                ToolAction::Grant(ToolUse { id, .. }) | ToolAction::ApplyTextEdit { id, .. },
+            ) => {
+                if &self.id == id {
+                    self.update_state(ToolState::Executing);
+                }
             }
-            (KeyModifiers::NONE, KeyCode::Esc) => {
-                global::action_tx()
-                    .send(ToolAction::Cancel(self.tool()).into())
-                    .unwrap();
-                self.update_state(ToolState::Cancelled);
+            Action::Tool(ToolAction::Cancel(ToolUse { id, .. })) => {
+                if &self.id == id {
+                    self.update_state(ToolState::Cancelled);
+                }
             }
-            _ => (), // ignore
+            _ => (),
         }
     }
 
@@ -203,13 +184,7 @@ impl Component for Tool {
         let content_area = block.inner(area);
 
         // Create content paragraph
-
-        if let Some(widget) = &mut self.widget {
-            widget.draw(frame, content_area)?;
-        } else {
-            let content = self.generate_default();
-            frame.render_widget(content, content_area);
-        }
+        self.widget.draw(frame, content_area)?;
 
         Ok(())
     }
@@ -219,22 +194,15 @@ impl Content for Tool {
     fn height(&self, width: u16) -> usize {
         // Base height for title
         let base_height = 1;
-        base_height
-            + if let Some(widget) = &self.widget {
-                widget.height(width)
-            } else {
-                self.generate_default().line_count(width)
-            }
+        base_height + self.widget.height(width)
     }
 
     fn is_actionable(&self) -> bool {
-        self.state.read() == &ToolState::PendingConfirmation
+        self.widget.is_actionable()
     }
 
     fn block_bottom_with_shortcuts_desc<'a>(&self, block: Block<'a>) -> Block<'a> {
-        block
-            .title_bottom(shortcuts_desc(&[("Ok", "CR")]))
-            .title_bottom(shortcuts_desc(&[("Cancel", "Esc")]))
+        self.widget.block_bottom_with_shortcuts_desc(block)
     }
 }
 

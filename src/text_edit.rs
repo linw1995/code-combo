@@ -1,14 +1,15 @@
 use std::{
     fmt,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct TextEdit {
     pub path: PathBuf,
+    pub origin: Arc<String>,
     pub text: String,
     pub new_text: String,
-    pub applied_text: String,
 }
 
 impl fmt::Debug for TextEdit {
@@ -36,19 +37,32 @@ impl TextEdit {
     pub fn new(path: PathBuf, text: String, new_text: String) -> Self {
         Self {
             path,
+            origin: Arc::new(text.clone()),
             text,
             new_text,
-            ..Default::default()
         }
     }
 
-    pub fn applied(path: PathBuf, text: String, applied_text: String) -> Self {
+    pub fn update(&self, text: String) -> Self {
         Self {
-            path,
+            path: self.path.clone(),
+            origin: Arc::clone(&self.origin),
             text,
-            new_text: applied_text.clone(),
-            applied_text,
+            new_text: self.new_text.clone(),
         }
+    }
+
+    pub fn update_new(&self, new_text: String) -> Self {
+        Self {
+            path: self.path.clone(),
+            origin: Arc::clone(&self.origin),
+            text: self.text.clone(),
+            new_text,
+        }
+    }
+
+    pub fn changed(&self) -> bool {
+        *self.origin != self.text
     }
 
     pub fn text_diff<'a>(&'a self) -> similar::TextDiff<'a, 'a, 'a, str> {
@@ -98,7 +112,11 @@ impl TextEdit {
             });
         new_text.pop(); // Remove the last newline character
 
-        Some(Self::new(self.path.clone(), self.text.clone(), new_text))
+        if new_text == self.text {
+            None
+        } else {
+            Some(self.update_new(new_text))
+        }
     }
 
     pub fn apply_hunk<'a>(
@@ -156,22 +174,15 @@ impl TextEdit {
         applied_text.pop(); // Remove the last newline character
 
         let finished = applied_text == self.new_text;
-        self.applied_text = applied_text;
+        self.text = applied_text;
         let applied = AppliedTextEdit {
             path: self.path.as_path(),
-            text: &self.applied_text,
+            text: &self.text,
         };
         Some(if finished {
             (applied, None)
         } else {
-            (
-                applied,
-                Some(TextEdit::new(
-                    self.path.clone(),
-                    self.applied_text.clone(),
-                    self.new_text.clone(),
-                )),
-            )
+            (applied, Some(self.clone()))
         })
     }
 }
@@ -601,7 +612,78 @@ mod tests {
         "}
             .trim(),
             "Rejected hunk should restore the first line back to original text"
+        );
+
+        let edit = new_edit;
+        let new_edit = edit.reject_hunk(3, 0);
+        assert!(
+            new_edit.is_none(),
+            "Should return None when there are no more hunks to reject"
+        );
+        assert!(
+            !edit.changed(),
+            "All hunks are rejected, so it remains unchanged"
         )
+    }
+
+    #[test]
+    fn mix_hunk_actions() {
+        let mut edit = TextEdit::new(
+            "./example.rs".parse().unwrap(),
+            indoc! {"
+                Delete {
+                    old_index: usize,
+                    old_len: usize,
+                    new_index: usize,
+                },
+                Insert {
+                    old_index: usize,
+                    new_index: usize,
+                    new_len: usize,
+                },
+                Replace {
+                    old_index: usize,
+                    old_len: usize,
+                    new_index: usize,
+                    len: usize,
+                },
+            "}
+            .trim()
+            .to_string(),
+            indoc! {"
+                Equal {
+                    old_index: usize,
+                    old_len: usize,
+                    new_index: usize,
+                },
+                Insert {
+                    old_index: usize,
+                    new_index: usize,
+                    new_len: usize,
+                },
+                Replace {
+                    old_index: usize,
+                    old_len: usize,
+                    new_index: usize,
+                    new_len: usize,
+                },
+            "}
+            .trim()
+            .to_string(),
+        );
+        let (_, new_edit) = edit
+            .apply_hunk(3, 0)
+            .expect("should successfully apply the first hunk");
+        let edit = new_edit.expect("Should be Some when there is one more hunk");
+        let new_edit = edit.reject_hunk(3, 0);
+        assert!(
+            new_edit.is_none(),
+            "Should return None when there are no more hunks to act"
+        );
+        assert!(
+            edit.changed(),
+            "One hunk was applied, so it becomes changed"
+        );
     }
 
     #[test]

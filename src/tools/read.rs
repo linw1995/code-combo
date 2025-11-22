@@ -4,9 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-use crate::Input;
-
-use super::{ExecuteResult, Final, Tool};
+use super::{ExecuteResult, Final, Input, Tool};
 
 #[derive(Default)]
 pub struct ReadTool {}

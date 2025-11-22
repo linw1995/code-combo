@@ -3,14 +3,13 @@ mod combo;
 mod config;
 mod error;
 mod text_edit;
-mod tools;
+pub mod tools;
 
 pub use agent::*;
 pub use combo::*;
 pub use config::*;
 pub use error::*;
 pub use text_edit::*;
-pub use tools::*;
 
 #[cfg(test)]
 #[ctor::ctor]

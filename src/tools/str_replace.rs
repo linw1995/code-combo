@@ -7,9 +7,8 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufReader},
 };
 
-use crate::{AppliedTextEdit, Output};
-
-use super::{ExecuteResult, Final, Input, TextEdit, Tool};
+use super::{ExecuteResult, Final, Input, Output, TextEdit, Tool};
+use crate::AppliedTextEdit;
 
 #[derive(Default)]
 pub struct StrReplaceTool {}

@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anthropic::Client;
-use serde_json::Value;
 use tokio::sync::Mutex;
 use tracing::warn;
 
@@ -10,7 +9,7 @@ use executor::PermissionControl;
 
 mod executor;
 pub use anthropic::{Block, Content, Message, Role, ToolUse};
-pub use executor::{ExecuteOutput, Executor};
+pub use executor::{Executor, Input, Output};
 
 #[derive(Clone)]
 pub struct Agent {
@@ -56,7 +55,12 @@ impl Agent {
             .update_pcl(name, PermissionControl::Once(id.to_string()))
     }
 
-    pub async fn execute(&mut self, id: &str, name: &str, input: Value) -> ExecuteOutput {
+    pub async fn execute<'a>(
+        &mut self,
+        id: &str,
+        name: &str,
+        input: executor::Input<'a>,
+    ) -> Output {
         self.executor
             .execute(id, name, input)
             .await

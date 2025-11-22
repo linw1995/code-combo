@@ -1,10 +1,12 @@
 use std::{collections::HashMap, sync::Arc};
 
 use lazy_static::lazy_static;
-use serde_json::Value;
 use snafu::prelude::*;
 
-use crate::{BashTool, Final, Input, Output, ReadTool, StrReplaceTool, Tool, error};
+use crate::{
+    TextEdit, error,
+    tools::{self, BashTool, Final, ReadTool, STR_REPLACE_TOOL_NAME, StrReplaceTool, Tool},
+};
 
 #[derive(Clone)]
 pub struct Executor {
@@ -48,12 +50,31 @@ pub enum ExecuteError {
     NotFound { name: String },
 }
 
+pub use tools::Input;
+//#[derive(Debug)]
+//pub enum Input<'a> {
+//    ToolInput(tools::Input<'a>),
+//}
+
 #[derive(Debug)]
-pub enum ExecuteOutput {
+pub enum Output {
     Success(Final),
     Failure(Final),
+    TextEdit(TextEdit),
     Denied,
     AskPermission,
+}
+
+impl From<tools::ExecuteResult> for Output {
+    fn from(value: tools::ExecuteResult) -> Self {
+        match value {
+            Err(output) => Output::Failure(output),
+            Ok(output) => match output {
+                tools::Output::Final(output) => Output::Success(output),
+                tools::Output::TextEdit(edit) => Output::TextEdit(edit),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -64,12 +85,12 @@ pub enum PermissionControl {
 }
 
 impl Executor {
-    pub async fn execute(
+    pub async fn execute<'a>(
         &mut self,
         id: &str,
         name: &str,
-        input: Value,
-    ) -> error::Result<ExecuteOutput> {
+        input: Input<'a>,
+    ) -> error::Result<Output> {
         // Check tool
         let Some(tool) = self.tools.get(name) else {
             return Err(NotFoundSnafu {
@@ -97,24 +118,21 @@ impl Executor {
             false
         };
 
-        if granted_once {
-            // Just execute the tool
-            Ok(match tool.execute(Input::Starter(input)).await {
-                Err(output) => ExecuteOutput::Failure(output),
-                Ok(output) => match output {
-                    Output::Final(output) => ExecuteOutput::Success(output),
-                    _ => unimplemented!(),
-                },
-            })
-        } else {
+        if !granted_once {
             // Check if the tool has permission control entries for this session
-            let Some(_pcl) = self.tools_pcl.get(name) else {
-                // No permission control entries found, request permission
-                return Ok(ExecuteOutput::AskPermission);
+            if let Some(_pcl) = self.tools_pcl.get(name) {
+                // TODO: Implement permission control list validation logic
+                unimplemented!("Permission control list validation not yet implemented")
+            } else {
+                // Some tools can execute without explicit permission
+                if !matches!(name, STR_REPLACE_TOOL_NAME) {
+                    // For other tools, request permission if no permission control entries are found
+                    return Ok(Output::AskPermission);
+                }
             };
-            // TODO: Implement permission control list validation logic
-            unimplemented!("Permission control list validation not yet implemented")
         }
+        // Just execute the tool
+        Ok(tool.execute(input).await.into())
     }
 
     /// Update Permission Control List
