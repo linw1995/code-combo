@@ -12,21 +12,25 @@ use ratatui::{
 };
 use tracing::warn;
 
+use super::{Component, Content, ContentComponent};
 use crate::{
     actions::{Action, ToolAction},
-    components::shortcuts_desc,
+    components::{code_highlight::CodeHighlight, shortcuts_desc},
     error,
     events::{AnswerEvent, AskEvent, Event},
     global::{self, State},
 };
 
-use super::{Component, Content, ContentComponent};
-
 pub struct StrReplace<'a> {
     tool_use: ToolUse,
     edit: Option<TextEdit>,
     appliable: State<bool>,
-    widget: Paragraph<'a>,
+    widget: StrReplaceWidget<'a>,
+}
+
+enum StrReplaceWidget<'a> {
+    CodeHighlight(CodeHighlight<'a>),
+    Paragraph(Paragraph<'a>),
 }
 
 const CONTEXT_RADIUS: usize = 3;
@@ -37,7 +41,7 @@ impl<'a> StrReplace<'a> {
             tool_use: tool_use.to_owned(),
             edit: None,
             appliable: State::default(),
-            widget: Paragraph::new(Text::from(String::new())),
+            widget: StrReplaceWidget::Paragraph(Paragraph::new("")),
         }
     }
 
@@ -45,21 +49,43 @@ impl<'a> StrReplace<'a> {
         let diff = edit.text_diff();
 
         let mut buf = vec![];
-        diff.unified_diff()
+        if let Some(hunk) = diff
+            .unified_diff()
             .context_radius(CONTEXT_RADIUS)
-            .to_writer(&mut buf)
-            .expect("failed to write unified diff into memory");
+            .iter_hunks()
+            .next()
+        {
+            if let Err(e) = hunk.to_writer(&mut buf) {
+                warn!(error = ?e, "failed to write unified diff into memory");
+            }
+        } else {
+            warn!("diff should have at least one hunk");
+        }
 
-        let text = String::from_utf8_lossy(&buf).to_string();
+        let diff_text = String::from_utf8_lossy(&buf).to_string();
+
+        // Use CodeHighlight for diff highlighting
+        let config = global::config_sync();
+        let widget = match CodeHighlight::try_new(
+            &diff_text,
+            code_highlight::Lang::Diff,
+            &config.ui.colorschema,
+        ) {
+            Ok(highlight) => StrReplaceWidget::CodeHighlight(highlight),
+            Err(_) => StrReplaceWidget::Paragraph(Paragraph::new(diff_text)),
+        };
 
         self.edit = Some(edit);
-        self.widget = Paragraph::new(Text::from(text));
+        self.widget = widget;
     }
 }
 
 impl Content for StrReplace<'_> {
     fn height(&self, width: u16) -> usize {
-        self.widget.line_count(width)
+        match &self.widget {
+            StrReplaceWidget::CodeHighlight(highlight) => highlight.height(width),
+            StrReplaceWidget::Paragraph(paragraph) => paragraph.line_count(width),
+        }
     }
 
     fn is_actionable(&self) -> bool {
@@ -120,17 +146,16 @@ impl Component for StrReplace<'_> {
             }) => {
                 self.widget = match output {
                     Final::Message(message) => {
-                        let mut message = Text::from(message.to_owned());
-                        if *is_error {
-                            message = message.red();
+                        let message_text = Text::from(message.to_owned());
+                        StrReplaceWidget::Paragraph(Paragraph::new(if *is_error {
+                            message_text.red()
                         } else {
-                            message = message.green();
-                        }
-                        Paragraph::new(message)
+                            message_text.green()
+                        }))
                     }
                     _ => {
                         warn!(?event, "StrReplace tool should only return Final::Message");
-                        Paragraph::new("")
+                        StrReplaceWidget::Paragraph(Paragraph::new(""))
                     }
                 };
             }
@@ -141,7 +166,14 @@ impl Component for StrReplace<'_> {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> error::Result<()> {
-        frame.render_widget(&self.widget, area);
+        match &mut self.widget {
+            StrReplaceWidget::CodeHighlight(highlight) => {
+                highlight.draw(frame, area)?;
+            }
+            StrReplaceWidget::Paragraph(paragraph) => {
+                frame.render_widget(&*paragraph, area);
+            }
+        }
         Ok(())
     }
 }

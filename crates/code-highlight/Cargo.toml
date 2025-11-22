@@ -10,6 +10,7 @@ tree-sitter-highlight = "0.25.10"
 
 # Support Languages
 tree-sitter-bash = "0.25.0"
+tree-sitter-diff = "0.1.0"
 tree-sitter-md.workspace = true
 
 # Serialization and data handling

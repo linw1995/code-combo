@@ -6,6 +6,7 @@ use super::Result;
 #[derive(Debug, PartialEq)]
 pub enum Lang {
     Bash,
+    Diff,
     Markdown,
     MarkdownInline,
 }
@@ -15,6 +16,7 @@ impl Lang {
         use Lang::*;
         match self {
             Bash => "bash",
+            Diff => "diff",
             Markdown => "markdown",
             MarkdownInline => "markdown_inline",
         }
@@ -31,6 +33,7 @@ pub fn new_config(lang: &Lang, names: &[&str]) -> Result<HighlightConfiguration>
     use Lang::*;
     match lang {
         Bash => bash_config(names),
+        Diff => diff_config(names),
         Markdown => markdown_config(names),
         _ => unimplemented!(),
     }
@@ -45,6 +48,21 @@ fn bash_config(names: &[&str]) -> Result<HighlightConfiguration> {
         "",
     )
     .whatever_context("failed to create bash highlight configuration")?;
+
+    config.configure(names);
+
+    Ok(config)
+}
+
+fn diff_config(names: &[&str]) -> Result<HighlightConfiguration> {
+    let mut config = HighlightConfiguration::new(
+        tree_sitter_diff::LANGUAGE.into(),
+        "diff",
+        tree_sitter_diff::HIGHLIGHTS_QUERY,
+        "",
+        "",
+    )
+    .whatever_context("failed to create diff highlight configuration")?;
 
     config.configure(names);
 
