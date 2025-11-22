@@ -178,6 +178,42 @@ impl Chat<'_> {
         })
         .bold()
     }
+
+    fn reject_text_edit(
+        &mut self,
+        id: String,
+        edit: TextEdit,
+        context_radius: usize,
+        hunk_idx: usize,
+    ) {
+        let tx = global::event_tx();
+
+        let new_edit = edit.reject_hunk(context_radius, hunk_idx);
+        if let Some(edit) = new_edit {
+            // Notify components that text edits have been updated and need confirmation again
+            tx.send(AskEvent::TextEdit { id, edit }.into()).unwrap();
+        } else {
+            // Move focus back to Input when the tool interaction ends.
+            if let Some(idx) = self.messages.locate_tool_message(&id)
+                && self.messages.selected_idx() == Some(idx)
+            {
+                self.update_focus(Focus::Input);
+                self.messages.blur();
+            }
+            // Await the next user message to avoid the LLM reacting without further user
+            // instructions
+            self.pending_chats.push(code_combo::Block::ToolResult {
+                tool_use_id: id,
+                is_error: Some(!edit.changed()),
+                content: if edit.changed() {
+                    "User rejects some changes"
+                } else {
+                    "User rejects all changes"
+                }
+                .into(),
+            });
+        }
+    }
 }
 
 impl Component for Chat<'_> {
@@ -356,7 +392,7 @@ impl Component for Chat<'_> {
                     is_rejecting,
                 } => {
                     if *is_rejecting {
-                        reject_text_edit(
+                        self.reject_text_edit(
                             id.to_owned(),
                             edit.to_owned(),
                             *context_radius,
@@ -484,31 +520,6 @@ async fn task_tool_use(mut agent: Agent, tool_use: ToolUse) {
             tx.send(AskEvent::TextEdit { id, edit }.into()).unwrap();
         }
         Output::Denied => (),
-    }
-}
-
-fn reject_text_edit(id: String, edit: TextEdit, context_radius: usize, hunk_idx: usize) {
-    let tx = global::event_tx();
-
-    let new_edit = edit.reject_hunk(context_radius, hunk_idx);
-    if let Some(edit) = new_edit {
-        // Notify components that text edits have been updated and need confirmation again
-        tx.send(AskEvent::TextEdit { id, edit }.into()).unwrap();
-    } else {
-        let event = if edit.changed() {
-            AnswerEvent::ToolResult {
-                id,
-                is_error: false,
-                output: "user rejects some changes".into(),
-            }
-        } else {
-            AnswerEvent::ToolResult {
-                id,
-                is_error: true,
-                output: "user rejects all changes".into(),
-            }
-        };
-        tx.send(event.into()).unwrap();
     }
 }
 
