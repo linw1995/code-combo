@@ -156,11 +156,20 @@ impl Component for Tool {
 
     fn update(&mut self, action: &Action) {
         match action {
-            Action::Tool(
-                ToolAction::Grant(ToolUse { id, .. }) | ToolAction::ApplyTextEdit { id, .. },
-            ) => {
+            Action::Tool(ToolAction::Grant(ToolUse { id, .. })) => {
                 if &self.id == id {
                     self.update_state(ToolState::Executing);
+                }
+            }
+            Action::Tool(ToolAction::ApplyTextEdit {
+                id, is_rejecting, ..
+            }) => {
+                if &self.id == id {
+                    if *is_rejecting {
+                        self.update_state(ToolState::Cancelled);
+                    } else {
+                        self.update_state(ToolState::Executing);
+                    }
                 }
             }
             Action::Tool(ToolAction::Cancel(ToolUse { id, .. })) => {
