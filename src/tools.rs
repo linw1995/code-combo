@@ -19,7 +19,9 @@ mod str_replace;
 
 use crate::{AppliedTextEdit, TextEdit};
 pub use bash::{BASH_TOOL_NAME, BashInput, BashOutput, BashTool};
-pub use read::{READ_TOOL_NAME, ReadInput, ReadTool};
+pub use read::{
+    DEFAULT_LINE_LIMIT, DEFAULT_LINE_OFFSET, MAX_LINE_LIMIT, READ_TOOL_NAME, ReadInput, ReadTool,
+};
 pub use str_replace::{STR_REPLACE_TOOL_NAME, StrReplaceInput, StrReplaceTool};
 
 #[async_trait]

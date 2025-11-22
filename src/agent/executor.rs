@@ -5,7 +5,10 @@ use snafu::prelude::*;
 
 use crate::{
     TextEdit, error,
-    tools::{self, BashTool, Final, ReadTool, STR_REPLACE_TOOL_NAME, StrReplaceTool, Tool},
+    tools::{
+        self, BashTool, Final, READ_TOOL_NAME, ReadTool, STR_REPLACE_TOOL_NAME, StrReplaceTool,
+        Tool,
+    },
 };
 
 #[derive(Clone)]
@@ -125,7 +128,7 @@ impl Executor {
                 unimplemented!("Permission control list validation not yet implemented")
             } else {
                 // Some tools can execute without explicit permission
-                if !matches!(name, STR_REPLACE_TOOL_NAME) {
+                if !matches!(name, STR_REPLACE_TOOL_NAME | READ_TOOL_NAME) {
                     // For other tools, request permission if no permission control entries are found
                     return Ok(Output::AskPermission);
                 }

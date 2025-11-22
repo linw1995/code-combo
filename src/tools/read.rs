@@ -19,15 +19,17 @@ pub struct ReadInput {
 }
 
 pub const READ_TOOL_NAME: &str = "read";
-const MAX_LINE_LIMIT: usize = 1000;
+pub const DEFAULT_LINE_OFFSET: usize = 1;
+pub const DEFAULT_LINE_LIMIT: usize = 1000;
+pub const MAX_LINE_LIMIT: usize = 1000;
 const MAX_BYTES_LIMIT: usize = 1000 * 100; // 100 KB
 
 fn default_line_offset() -> usize {
-    1
+    DEFAULT_LINE_OFFSET
 }
 
 fn default_line_limit() -> usize {
-    MAX_LINE_LIMIT
+    DEFAULT_LINE_LIMIT
 }
 
 #[async_trait]
@@ -56,7 +58,7 @@ impl Tool for ReadTool {
                         Set this when the file is too large to read at once.
                     "}
                     .trim(),
-                    "default": 1,
+                    "default": DEFAULT_LINE_OFFSET,
                     "ge": 1,
                 },
                 "line_limit": {
@@ -67,7 +69,7 @@ impl Tool for ReadTool {
                         Set this value when the file is too large to read at once.
                     "}.trim(),
                     "maximum": MAX_LINE_LIMIT,
-                    "default": MAX_LINE_LIMIT,
+                    "default": DEFAULT_LINE_LIMIT,
                     "ge": 1,
                 }
             },

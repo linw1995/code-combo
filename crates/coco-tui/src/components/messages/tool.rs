@@ -1,6 +1,6 @@
 use code_combo::{
     ToolUse,
-    tools::{BASH_TOOL_NAME, STR_REPLACE_TOOL_NAME},
+    tools::{BASH_TOOL_NAME, READ_TOOL_NAME, STR_REPLACE_TOOL_NAME},
 };
 use crossterm::event::KeyEvent;
 use ratatui::{
@@ -24,9 +24,11 @@ use crate::{
 
 mod bash;
 mod raw;
+mod read;
 mod str_replace;
 use bash::Bash;
 use raw::Raw;
+use read::Read;
 use str_replace::StrReplace;
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -58,6 +60,7 @@ impl Tool {
         let name = tool_use.name.clone();
 
         let widget = match name.as_str() {
+            READ_TOOL_NAME => Some(Read::new(&tool_use).boxed()),
             BASH_TOOL_NAME => match Bash::try_new().tool_use(&tool_use).call() {
                 Ok(widget) => Some(widget.boxed()),
                 Err(err) => {
