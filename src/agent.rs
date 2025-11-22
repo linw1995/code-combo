@@ -44,10 +44,13 @@ impl Agent {
             })
             .unwrap();
 
-        let message = Message::assistant(Content::Multiple(response.content));
-        messages.push(message.clone());
-
-        message
+        if response.content.is_empty() {
+            Message::assistant(Content::Multiple(Vec::default()))
+        } else {
+            let msg = Message::assistant(Content::Multiple(response.content));
+            messages.push(msg.clone());
+            msg
+        }
     }
 
     pub fn grant_once(&mut self, id: &str, name: &str) {
