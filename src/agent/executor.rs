@@ -1,10 +1,15 @@
 use std::{collections::HashMap, sync::Arc};
 
 use lazy_static::lazy_static;
-use serde_json::Value;
-use snafu::{Whatever, prelude::*};
+use snafu::prelude::*;
 
-use crate::{BashTool, Tool};
+use crate::{
+    TextEdit, error,
+    tools::{
+        self, BashTool, Final, READ_TOOL_NAME, ReadTool, STR_REPLACE_TOOL_NAME, StrReplaceTool,
+        Tool,
+    },
+};
 
 #[derive(Clone)]
 pub struct Executor {
@@ -15,12 +20,18 @@ pub struct Executor {
 
 lazy_static! {
     static ref BASH_TOOL: Arc<(dyn Tool + 'static)> = Arc::new(BashTool::default());
+    static ref READ_TOOL: Arc<(dyn Tool + 'static)> = Arc::new(ReadTool::default());
+    static ref STR_REPLACE_TOOL: Arc<(dyn Tool + 'static)> = Arc::new(StrReplaceTool::default());
     static ref DEFAULT_TOOLS: HashMap<String, Arc<(dyn Tool + 'static)>> = {
         let mut m = HashMap::<String, Arc<(dyn Tool + 'static)>>::new();
         m.extend(
-            [BASH_TOOL.clone()]
-                .into_iter()
-                .map(|t| (t.name().to_string(), t)),
+            [
+                BASH_TOOL.clone(),
+                READ_TOOL.clone(),
+                STR_REPLACE_TOOL.clone(),
+            ]
+            .into_iter()
+            .map(|t| (t.name().to_string(), t)),
         );
         m
     };
@@ -42,12 +53,31 @@ pub enum ExecuteError {
     NotFound { name: String },
 }
 
+pub use tools::Input;
+//#[derive(Debug)]
+//pub enum Input<'a> {
+//    ToolInput(tools::Input<'a>),
+//}
+
 #[derive(Debug)]
-pub enum ExecuteOutput<T> {
-    Success(T),
-    Failure(T),
+pub enum Output {
+    Success(Final),
+    Failure(Final),
+    TextEdit(TextEdit),
     Denied,
     AskPermission,
+}
+
+impl From<tools::ExecuteResult> for Output {
+    fn from(value: tools::ExecuteResult) -> Self {
+        match value {
+            Err(output) => Output::Failure(output),
+            Ok(output) => match output {
+                tools::Output::Final(output) => Output::Success(output),
+                tools::Output::TextEdit(edit) => Output::TextEdit(edit),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -58,12 +88,12 @@ pub enum PermissionControl {
 }
 
 impl Executor {
-    pub async fn execute(
+    pub async fn execute<'a>(
         &mut self,
         id: &str,
         name: &str,
-        input: Value,
-    ) -> Result<ExecuteOutput<Value>, Whatever> {
+        input: Input<'a>,
+    ) -> error::Result<Output> {
         // Check tool
         let Some(tool) = self.tools.get(name) else {
             return Err(NotFoundSnafu {
@@ -91,24 +121,21 @@ impl Executor {
             false
         };
 
-        if granted_once {
-            // Just execute the tool
-            tool.execute(input).await.map(|rv| {
-                if rv.is_error {
-                    ExecuteOutput::Failure(rv.output)
-                } else {
-                    ExecuteOutput::Success(rv.output)
-                }
-            })
-        } else {
+        if !granted_once {
             // Check if the tool has permission control entries for this session
-            let Some(_pcl) = self.tools_pcl.get(name) else {
-                // No permission control entries found, request permission
-                return Ok(ExecuteOutput::AskPermission);
+            if let Some(_pcl) = self.tools_pcl.get(name) {
+                // TODO: Implement permission control list validation logic
+                unimplemented!("Permission control list validation not yet implemented")
+            } else {
+                // Some tools can execute without explicit permission
+                if !matches!(name, STR_REPLACE_TOOL_NAME | READ_TOOL_NAME) {
+                    // For other tools, request permission if no permission control entries are found
+                    return Ok(Output::AskPermission);
+                }
             };
-            // TODO: Implement permission control list validation logic
-            unimplemented!("Permission control list validation not yet implemented")
         }
+        // Just execute the tool
+        Ok(tool.execute(input).await.into())
     }
 
     /// Update Permission Control List

@@ -1,12 +1,15 @@
 mod agent;
 mod combo;
 mod config;
-mod tools;
+mod error;
+mod text_edit;
+pub mod tools;
 
 pub use agent::*;
 pub use combo::*;
 pub use config::*;
-pub use tools::*;
+pub use error::*;
+pub use text_edit::*;
 
 #[cfg(test)]
 #[ctor::ctor]

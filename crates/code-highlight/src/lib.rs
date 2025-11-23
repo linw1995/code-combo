@@ -2,6 +2,9 @@ mod error;
 mod highlight;
 mod lang;
 
+#[cfg(test)]
+mod tests;
+
 pub use error::*;
 pub use highlight::*;
 pub use lang::*;

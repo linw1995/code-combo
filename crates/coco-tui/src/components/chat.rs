@@ -1,6 +1,6 @@
 use code_combo::{
-    Agent, Block as ChatBlock, Config, Content as ChatContent, ExecuteOutput,
-    Message as ChatMessage, ToolUse,
+    Agent, Block as ChatBlock, Config, Content as ChatContent, Message as ChatMessage, Output,
+    TextEdit, ToolUse,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -178,6 +178,42 @@ impl Chat<'_> {
         })
         .bold()
     }
+
+    fn reject_text_edit(
+        &mut self,
+        id: String,
+        edit: TextEdit,
+        context_radius: usize,
+        hunk_idx: usize,
+    ) {
+        let tx = global::event_tx();
+
+        let new_edit = edit.reject_hunk(context_radius, hunk_idx);
+        if let Some(edit) = new_edit {
+            // Notify components that text edits have been updated and need confirmation again
+            tx.send(AskEvent::TextEdit { id, edit }.into()).unwrap();
+        } else {
+            // Move focus back to Input when the tool interaction ends.
+            if let Some(idx) = self.messages.locate_tool_message(&id)
+                && self.messages.selected_idx() == Some(idx)
+            {
+                self.update_focus(Focus::Input);
+                self.messages.blur();
+            }
+            // Await the next user message to avoid the LLM reacting without further user
+            // instructions
+            self.pending_chats.push(code_combo::Block::ToolResult {
+                tool_use_id: id,
+                is_error: Some(!edit.changed()),
+                content: if edit.changed() {
+                    "User rejects some changes"
+                } else {
+                    "User rejects all changes"
+                }
+                .into(),
+            });
+        }
+    }
 }
 
 impl Component for Chat<'_> {
@@ -215,13 +251,11 @@ impl Component for Chat<'_> {
                 self.messages.extend(msgs.iter().cloned().map(|msg| {
                     Message::bot(match msg {
                         BotMessage::Plain(text) => Plain::new(text).boxed(),
-                        BotMessage::ToolUse { id, name, input } => {
-                            Tool::new_use(id, name, input).boxed()
-                        }
+                        BotMessage::ToolUse(tool_use) => Tool::new(tool_use.to_owned()).boxed(),
                     })
                 }));
             }
-            Event::Ask(AskEvent::ToolUsePermission(_)) => {
+            Event::Ask(AskEvent::ToolUsePermission(_) | AskEvent::TextEdit { .. }) => {
                 if let Some(idx) = self.messages.on_tool_event(event) {
                     // Move focus to tool use message when permission is required
                     self.update_focus(Focus::Messages);
@@ -246,7 +280,7 @@ impl Component for Chat<'_> {
                 let content = ChatContent::Multiple(vec![code_combo::Block::ToolResult {
                     tool_use_id: id.clone(),
                     is_error: Some(*is_error),
-                    content: code_combo::Content::Text(serde_json::to_string(output).unwrap()),
+                    content: output.try_into().unwrap(),
                 }]);
                 let content = self.build_user_content(content);
                 tokio::task::spawn(task_chat(self.agent.clone(), content));
@@ -349,6 +383,32 @@ impl Component for Chat<'_> {
                         content: code_combo::Content::Text("User cancelled".to_string()),
                     });
                 }
+                ToolAction::ApplyTextEdit {
+                    id,
+                    name,
+                    edit,
+                    context_radius,
+                    hunk_idx,
+                    is_rejecting,
+                } => {
+                    if *is_rejecting {
+                        self.reject_text_edit(
+                            id.to_owned(),
+                            edit.to_owned(),
+                            *context_radius,
+                            *hunk_idx,
+                        );
+                    } else {
+                        tokio::task::spawn(task_apply_text_edit(
+                            self.agent.clone(),
+                            id.to_owned(),
+                            name.to_owned(),
+                            edit.to_owned(),
+                            *context_radius,
+                            *hunk_idx,
+                        ));
+                    }
+                }
             },
             _ => (),
         }
@@ -411,9 +471,7 @@ async fn task_chat(mut agent: Agent, content: ChatContent) {
                     .into_iter()
                     .map(|m| match m {
                         code_combo::Block::Text { text } => BotMessage::Plain(text),
-                        code_combo::Block::ToolUse(code_combo::ToolUse { id, name, input }) => {
-                            BotMessage::ToolUse { id, name, input }
-                        }
+                        code_combo::Block::ToolUse(tool_use) => BotMessage::ToolUse(tool_use),
                         _ => unreachable!("unknown content type: {:?}", m),
                     })
                     .collect()
@@ -441,11 +499,13 @@ async fn task_tool_use(mut agent: Agent, tool_use: ToolUse) {
     let tx = global::event_tx();
     let code_combo::ToolUse { id, name, input } = tool_use;
     // It will be executed if permission check pass
-    let rv = agent.execute(&id, &name, input).await;
-    let is_error = matches!(rv, ExecuteOutput::Failure(_));
+    let rv = agent
+        .execute(&id, &name, code_combo::Input::Starter(input))
+        .await;
+    let is_error = matches!(rv, Output::Failure(_));
     match rv {
-        ExecuteOutput::AskPermission => tx.send(AskEvent::ToolUsePermission(id).into()).unwrap(),
-        ExecuteOutput::Success(output) | ExecuteOutput::Failure(output) => {
+        Output::AskPermission => tx.send(AskEvent::ToolUsePermission(id).into()).unwrap(),
+        Output::Success(output) | Output::Failure(output) => {
             tx.send(
                 AnswerEvent::ToolResult {
                     id,
@@ -456,6 +516,49 @@ async fn task_tool_use(mut agent: Agent, tool_use: ToolUse) {
             )
             .unwrap();
         }
-        ExecuteOutput::Denied => (),
+        Output::TextEdit(edit) => {
+            tx.send(AskEvent::TextEdit { id, edit }.into()).unwrap();
+        }
+        Output::Denied => (),
+    }
+}
+
+async fn task_apply_text_edit(
+    mut agent: Agent,
+    id: String,
+    name: String,
+    mut edit: TextEdit,
+    context_radius: usize,
+    hunk_idx: usize,
+) {
+    let tx = global::event_tx();
+
+    let (applied, new_edit) = edit
+        .apply_hunk(context_radius, hunk_idx)
+        .expect("should apply successfully");
+
+    let rv = agent
+        .execute(&id, &name, code_combo::Input::AppliedTextEdit(applied))
+        .await;
+    let is_error = matches!(rv, Output::Failure(_));
+    match rv {
+        Output::Success(output) | Output::Failure(output) => {
+            if is_error || new_edit.is_none() {
+                // End the tool use if there's an error or no more text edits to apply
+                tx.send(
+                    AnswerEvent::ToolResult {
+                        id,
+                        is_error,
+                        output,
+                    }
+                    .into(),
+                )
+                .unwrap();
+            } else if let Some(edit) = new_edit {
+                // Notify components that text edits have been updated and need confirmation again
+                tx.send(AskEvent::TextEdit { id, edit }.into()).unwrap();
+            }
+        }
+        _ => (),
     }
 }

@@ -1,4 +1,4 @@
-use code_combo::ToolUse;
+use code_combo::{TextEdit, ToolUse};
 
 #[derive(Debug, Clone)]
 pub enum Action {
@@ -28,6 +28,14 @@ impl From<ComboAction> for Action {
 pub enum ToolAction {
     Grant(ToolUse),
     Cancel(ToolUse),
+    ApplyTextEdit {
+        id: String,
+        name: String,
+        edit: TextEdit,
+        context_radius: usize,
+        hunk_idx: usize,
+        is_rejecting: bool,
+    },
 }
 
 impl From<ToolAction> for Action {

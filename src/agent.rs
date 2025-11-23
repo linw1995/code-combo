@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anthropic::Client;
-use serde_json::Value;
 use tokio::sync::Mutex;
 use tracing::warn;
 
@@ -10,7 +9,7 @@ use executor::PermissionControl;
 
 mod executor;
 pub use anthropic::{Block, Content, Message, Role, ToolUse};
-pub use executor::{ExecuteOutput, Executor};
+pub use executor::{Executor, Input, Output};
 
 #[derive(Clone)]
 pub struct Agent {
@@ -45,10 +44,13 @@ impl Agent {
             })
             .unwrap();
 
-        let message = Message::assistant(Content::Multiple(response.content));
-        messages.push(message.clone());
-
-        message
+        if response.content.is_empty() {
+            Message::assistant(Content::Multiple(Vec::default()))
+        } else {
+            let msg = Message::assistant(Content::Multiple(response.content));
+            messages.push(msg.clone());
+            msg
+        }
     }
 
     pub fn grant_once(&mut self, id: &str, name: &str) {
@@ -56,7 +58,12 @@ impl Agent {
             .update_pcl(name, PermissionControl::Once(id.to_string()))
     }
 
-    pub async fn execute(&mut self, id: &str, name: &str, input: Value) -> ExecuteOutput<Value> {
+    pub async fn execute<'a>(
+        &mut self,
+        id: &str,
+        name: &str,
+        input: executor::Input<'a>,
+    ) -> Output {
         self.executor
             .execute(id, name, input)
             .await

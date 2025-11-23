@@ -1,6 +1,5 @@
-use code_combo::{Line, Starter};
+use code_combo::{Line, Starter, TextEdit, ToolUse, tools::Final};
 use crossterm::event::{KeyEvent, MouseEvent};
-use serde_json::Value;
 
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -22,6 +21,7 @@ pub enum AskEvent {
     Bot,
     // Below events come from Bot
     ToolUsePermission(String),
+    TextEdit { id: String, edit: TextEdit },
 }
 
 impl From<AskEvent> for Event {
@@ -37,7 +37,7 @@ pub enum AnswerEvent {
     ToolResult {
         id: String,
         is_error: bool,
-        output: Value,
+        output: Final,
     },
 }
 
@@ -68,9 +68,5 @@ impl From<ComboEvent> for Event {
 #[derive(Debug, Clone)]
 pub enum BotMessage {
     Plain(String),
-    ToolUse {
-        id: String,
-        name: String,
-        input: Value,
-    },
+    ToolUse(ToolUse),
 }

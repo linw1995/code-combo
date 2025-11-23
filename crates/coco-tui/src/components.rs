@@ -26,7 +26,7 @@ use crate::{actions::*, error::*, events::*};
 /// This approach is preferred over a helper method in the trait to maintain clean and
 /// organized trait methods.
 macro_rules! handle_component_event {
-    ($component:ident, $event:ident) => {
+    ($component:ident, $event:ident) => {{
         match $event {
             Event::Key(key_event) => $component.handle_key_event(key_event),
             Event::Mouse(mouse_event) => $component.handle_mouse_event(mouse_event),
@@ -34,13 +34,15 @@ macro_rules! handle_component_event {
                 // Trigger on_tick and propagate the tick event to all children.
                 if matches!($event, Event::Tick) {
                     $component.on_tick();
+                } else {
+                    tracing::trace!(?$event, "handling component event");
                 }
                 for child in $component.children() {
                     child.handle_event($event);
                 }
             }
         }
-    };
+    }};
 }
 
 mod chat;
