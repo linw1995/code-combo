@@ -3,7 +3,7 @@ mod highlight;
 mod lang;
 
 #[cfg(test)]
-mod diff_test;
+mod tests;
 
 pub use error::*;
 pub use highlight::*;
