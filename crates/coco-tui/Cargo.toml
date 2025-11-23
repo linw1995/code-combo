@@ -51,6 +51,7 @@ bon.workspace = true
 # Others
 lazy_static.workspace = true
 bitflags = "2.10.0"
+indoc.workspace = true
 
 [dev-dependencies]
 ctor.workspace = true

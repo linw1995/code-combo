@@ -19,5 +19,9 @@
         "fg": "#89b4fa",
         "add_modifier": "ITALIC|UNDERLINED"
     },
-    "string.escape": "#f5c2e7"
+    "string.escape": "#f5c2e7",
+    "diff.plus": "#a6e3a1",
+    "diff.minus": "#f38ba8",
+    "attribute": "#fab387",
+    "variable.parameter": "#eba0ac"
 }

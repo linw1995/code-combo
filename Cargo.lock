@@ -304,6 +304,7 @@ dependencies = [
  "crossterm",
  "ctor",
  "futures",
+ "indoc",
  "lazy_static",
  "ratatui",
  "serde",

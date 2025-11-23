@@ -30,3 +30,11 @@ impl Config {
         self.config_dir.join("combos")
     }
 }
+
+pub fn default_config_dir() -> PathBuf {
+    PathBuf::from(std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").expect("HOME environment variable not set");
+        format!("{}/.config", home)
+    }))
+    .join("coco")
+}

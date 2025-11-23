@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use code_combo::Config;
+use code_combo::{Config, default_config_dir};
 use snafu::prelude::*;
 
 use coco_tui::{actions::ComboAction, app, error::Result, global};
@@ -20,14 +20,6 @@ struct Args {
 
     #[command(subcommand)]
     command: Option<Commands>,
-}
-
-fn default_config_dir() -> PathBuf {
-    PathBuf::from(std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").expect("HOME environment variable not set");
-        format!("{}/.config", home)
-    }))
-    .join("coco")
 }
 
 #[derive(Subcommand)]
