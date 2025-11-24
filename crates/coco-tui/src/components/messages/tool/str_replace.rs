@@ -87,7 +87,7 @@ impl Content for StrReplace<'_> {
         self.appliable.get()
     }
 
-    fn block_bottom_with_shortcuts_desc<'b>(&self, block: Block<'b>) -> Block<'b> {
+    fn block_with_shortcuts_desc<'b>(&self, block: Block<'b>) -> Block<'b> {
         if self.appliable.get() {
             block
                 .title_bottom(shortcuts_desc(&[("Apply", "CR")]))

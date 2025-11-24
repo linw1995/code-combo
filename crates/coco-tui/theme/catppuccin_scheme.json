@@ -7,7 +7,12 @@
         "bot_role": {
             "fg": "blue",
             "add_modifier": "BOLD|ITALIC"
-        }
+        },
+        "shortcut": {
+            "fg": "blue",
+            "add_modifier": "BOLD|ITALIC"
+        },
+        "shortcut_desc": "overlay0"
     },
     "tree_sitter": {
         "string": "green",

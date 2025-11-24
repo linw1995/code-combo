@@ -72,7 +72,9 @@ macro_rules! build_theme {
 
 build_theme_type!(FinalizedUiTheme {
     user_role,
-    bot_role
+    bot_role,
+    shortcut,
+    shortcut_desc,
 });
 
 impl Theme {
@@ -96,6 +98,8 @@ impl Theme {
                 FinalizedUiTheme {
                     user_role,
                     bot_role,
+                    shortcut,
+                    shortcut_desc,
                 }
             )?,
             tree_sitter,

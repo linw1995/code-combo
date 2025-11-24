@@ -242,11 +242,11 @@ impl Content for Messages {
         component.is_actionable()
     }
 
-    fn block_bottom_with_shortcuts_desc<'a>(&self, mut block: Block<'a>) -> Block<'a> {
+    fn block_with_shortcuts_desc<'a>(&self, mut block: Block<'a>) -> Block<'a> {
         if let Some(idx) = self.focus.get() {
             let component = &self.messages.read()[idx];
             if component.is_actionable() {
-                block = component.block_bottom_with_shortcuts_desc(block);
+                block = component.block_with_shortcuts_desc(block);
             }
         }
         block
@@ -319,7 +319,7 @@ pub trait Content {
     }
 
     /// Display shortcuts description on the block bottom of the chat window.
-    fn block_bottom_with_shortcuts_desc<'a>(&self, block: Block<'a>) -> Block<'a> {
+    fn block_with_shortcuts_desc<'a>(&self, block: Block<'a>) -> Block<'a> {
         block
     }
 }
@@ -380,8 +380,8 @@ impl Content for Message {
         self.content.is_actionable()
     }
 
-    fn block_bottom_with_shortcuts_desc<'a>(&self, block: Block<'a>) -> Block<'a> {
-        self.content.block_bottom_with_shortcuts_desc(block)
+    fn block_with_shortcuts_desc<'a>(&self, block: Block<'a>) -> Block<'a> {
+        self.content.block_with_shortcuts_desc(block)
     }
 }
 
@@ -415,11 +415,15 @@ impl Component for Message {
 impl ContentComponent for Message {}
 
 pub(super) fn shortcuts_desc<'a>(pairs: &[(&str, &str)]) -> Line<'a> {
+    let theme = global::theme();
     let descs: Vec<&str> = pairs.iter().map(|(desc, _)| desc.to_owned()).collect();
-    let mut spans = vec![Span::raw(format!(" {} ", descs.join("/")))];
+    let mut spans = vec![Span::styled(
+        format!(" {} ", descs.join("/")),
+        theme.ui.shortcut_desc,
+    )];
     let last_idx = pairs.len() - 1;
     for (idx, (_, key)) in pairs.iter().enumerate() {
-        spans.push(Span::raw(format!("<{key}>")).blue().bold());
+        spans.push(Span::styled(format!("<{key}>"), theme.ui.shortcut));
         if idx != last_idx {
             spans.push(Span::raw("/"));
         }

@@ -99,7 +99,7 @@ impl<'a> Content for Bash<'a> {
         self.requiring_confirmation
     }
 
-    fn block_bottom_with_shortcuts_desc<'b>(&self, block: Block<'b>) -> Block<'b> {
+    fn block_with_shortcuts_desc<'b>(&self, block: Block<'b>) -> Block<'b> {
         block
             .title_bottom(shortcuts_desc(&[("Run", "CR")]))
             .title_bottom(shortcuts_desc(&[("Cancel", "Esc")]))

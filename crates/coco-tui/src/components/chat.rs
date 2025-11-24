@@ -155,7 +155,7 @@ impl Chat<'_> {
                 .title_bottom(shortcuts_desc(&[("Focus", "CR")]))
                 .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")])),
             Focus::Messages => {
-                block = self.messages.block_bottom_with_shortcuts_desc(block);
+                block = self.messages.block_with_shortcuts_desc(block);
                 block
                     .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")]))
                     .title_bottom(shortcuts_desc(&[("Scroll Up", "C-y"), ("Down", "C-e")]))

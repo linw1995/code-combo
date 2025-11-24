@@ -213,8 +213,8 @@ impl Content for Tool {
         self.widget.is_actionable()
     }
 
-    fn block_bottom_with_shortcuts_desc<'a>(&self, block: Block<'a>) -> Block<'a> {
-        self.widget.block_bottom_with_shortcuts_desc(block)
+    fn block_with_shortcuts_desc<'a>(&self, block: Block<'a>) -> Block<'a> {
+        self.widget.block_with_shortcuts_desc(block)
     }
 }
 

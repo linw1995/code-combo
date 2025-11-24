@@ -109,7 +109,7 @@ impl Content for Read<'_> {
         self.output_widget.read().is_some()
     }
 
-    fn block_bottom_with_shortcuts_desc<'b>(&self, block: Block<'b>) -> Block<'b> {
+    fn block_with_shortcuts_desc<'b>(&self, block: Block<'b>) -> Block<'b> {
         if self.output_widget.read().is_some() {
             let toggle_text = if *self.collapsed.read() {
                 ("Unfold", "z")
