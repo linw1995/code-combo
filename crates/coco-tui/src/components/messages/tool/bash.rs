@@ -64,8 +64,7 @@ impl<'a> Bash<'a> {
         let input: BashInput = serde_json::from_value(tool_use.input.clone())
             .whatever_context("failed to parse BashInput")?;
 
-        let config = global::config_sync();
-        let input = CodeHighlight::try_new(&input.command, Lang::Bash, &config.ui.colorschema)?;
+        let input = CodeHighlight::try_new(&input.command, Lang::Bash)?;
 
         let output = output
             .map(serde_json::from_value)

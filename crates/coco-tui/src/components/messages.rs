@@ -12,7 +12,10 @@ use ratatui::{
 use snafu::ResultExt;
 use tracing::{trace, warn};
 
-use crate::{error::*, global::State};
+use crate::{
+    error::*,
+    global::{self, State},
+};
 
 use super::{AnswerEvent, AskEvent, Component, Event};
 
@@ -398,13 +401,11 @@ impl Component for Message {
         let [area_role, area_content] = Layout::horizontal([Length(8), Min(1)]).areas(area);
         self.content.draw(frame, area_content)?;
 
-        let paragraph = Paragraph::new(Line::from(
-            match self.role {
-                Role::User => " User: ".green(),
-                Role::Bot => " Bot: ".blue(),
-            }
-            .bold(),
-        ));
+        let theme = global::theme();
+        let paragraph = Paragraph::new(Line::from(match self.role {
+            Role::User => Span::styled(" User: ", theme.ui.user_role),
+            Role::Bot => Span::styled(" Bot: ", theme.ui.bot_role),
+        }));
         frame.render_widget(paragraph, area_role);
 
         Ok(())
@@ -430,6 +431,8 @@ pub(super) fn shortcuts_desc<'a>(pairs: &[(&str, &str)]) -> Line<'a> {
 #[cfg(test)]
 mod tests {
     use ratatui::backend::TestBackend;
+
+    use crate::global::theme;
 
     use super::*;
 
@@ -458,7 +461,7 @@ mod tests {
         ]);
         let border_style = Style::new().dark_gray();
         expected.set_style(Rect::new(0, 2, 1, 3), border_style);
-        let role_style = Style::new().green().bold();
+        let role_style = theme().ui.user_role;
         expected.set_style(Rect::new(1, 2, 7, 1), role_style);
         expected.set_style(Rect::new(1, 3, 7, 1), role_style);
 
@@ -491,7 +494,7 @@ mod tests {
         expected.set_style(Rect::new(0, 0, 1, 5), border_style);
         let scrollbar_style = Style::new().dark_gray();
         expected.set_style(Rect::new(16, 0, 1, 1), scrollbar_style);
-        let role_style = Style::new().green().bold();
+        let role_style = theme().ui.user_role;
         expected.set_style(Rect::new(1, 0, 7, 1), role_style);
         assert_eq!(terminal.backend().buffer(), &expected);
 
@@ -511,7 +514,6 @@ mod tests {
         expected.set_style(Rect::new(0, 0, 1, 5), border_style);
         let scrollbar_style = Style::new().dark_gray();
         expected.set_style(Rect::new(16, 4, 1, 1), scrollbar_style);
-        let role_style = Style::new().green().bold();
         expected.set_style(Rect::new(1, 0, 7, 2), role_style);
         assert_eq!(terminal.backend().buffer(), &expected);
 
@@ -551,7 +553,7 @@ mod tests {
         expected.set_style(Rect::new(1, 1, 1, 5), border_style);
         let scrollbar_style = Style::new().dark_gray();
         expected.set_style(Rect::new(17, 1, 1, 1), scrollbar_style);
-        let role_style = Style::new().green().bold();
+        let role_style = theme().ui.user_role;
         expected.set_style(Rect::new(2, 1, 7, 1), role_style);
         assert_eq!(terminal.backend().buffer(), &expected);
 
@@ -572,7 +574,6 @@ mod tests {
         expected.set_style(Rect::new(1, 1, 1, 5), border_style);
         let scrollbar_style = Style::new().dark_gray();
         expected.set_style(Rect::new(17, 5, 1, 1), scrollbar_style);
-        let role_style = Style::new().green().bold();
         expected.set_style(Rect::new(2, 1, 7, 2), role_style);
         assert_eq!(terminal.backend().buffer(), &expected);
 

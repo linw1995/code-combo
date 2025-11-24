@@ -68,7 +68,6 @@ async fn main() -> Result<()> {
         "}
                 .trim(),
                 code_highlight::Lang::Diff,
-                &config.ui.colorschema,
             )
             .whatever_context("failed to new CodeHighlight")?;
             Box::new(app)

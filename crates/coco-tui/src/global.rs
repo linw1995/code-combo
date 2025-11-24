@@ -5,7 +5,11 @@ use std::{
 
 use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
-use crate::{actions::Action, events::Event};
+use crate::{
+    actions::Action,
+    events::Event,
+    theme::{FinalizedTheme, use_builtin_theme},
+};
 
 static EVENT_TX: OnceLock<UnboundedSender<Event>> = OnceLock::new();
 static ACTION_TX: OnceLock<UnboundedSender<Action>> = OnceLock::new();
@@ -60,6 +64,11 @@ pub async fn set_config(config: code_combo::Config) {
     let cell = CONFIG.get_or_init(Default::default);
     let mut cell = cell.lock().await;
     *cell = config;
+}
+
+pub fn theme() -> &'static FinalizedTheme {
+    let config = config_sync();
+    use_builtin_theme(&config.ui.theme)
 }
 
 /// Signal dirty for re-rendering.

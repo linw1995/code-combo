@@ -1,18 +1,18 @@
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct UI {
-    #[serde(default = "default_colorscheme")]
-    pub colorschema: String,
+    #[serde(default = "default_theme")]
+    pub theme: String,
     pub markdown_render_engine: MarkdownRenderEngine,
 }
 
-fn default_colorscheme() -> String {
+fn default_theme() -> String {
     "catppuccin_mocha".to_string()
 }
 
 impl Default for UI {
     fn default() -> Self {
         Self {
-            colorschema: default_colorscheme(),
+            theme: default_theme(),
             markdown_render_engine: MarkdownRenderEngine::default(),
         }
     }

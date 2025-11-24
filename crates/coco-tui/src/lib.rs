@@ -6,6 +6,7 @@ pub mod global;
 pub mod components;
 pub mod events;
 pub mod logging;
+pub mod theme;
 
 #[cfg(test)]
 #[ctor::ctor]

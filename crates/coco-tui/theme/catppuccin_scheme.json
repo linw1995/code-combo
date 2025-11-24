@@ -1,0 +1,39 @@
+{
+    "ui": {
+        "user_role": {
+            "fg": "green",
+            "add_modifier": "BOLD|ITALIC"
+        },
+        "bot_role": {
+            "fg": "blue",
+            "add_modifier": "BOLD|ITALIC"
+        }
+    },
+    "tree_sitter": {
+        "string": "green",
+        "function": "blue",
+        "property": "lavender",
+        "keyword": "mauve",
+        "comment": {
+            "fg": "overlay2",
+            "add_modifier": "ITALIC"
+        },
+        "number": "peach",
+        "operator": "sky",
+        "constant": "peach",
+        "text.title": "blue",
+        "punctuation.special": "pink",
+        "text.literal": "green",
+        "punctuation.delimiter": "overlay2",
+        "text.reference": "lavender",
+        "text.uri": {
+            "fg": "blue",
+            "add_modifier": "ITALIC|UNDERLINED"
+        },
+        "string.escape": "pink",
+        "diff.plus": "green",
+        "diff.minus": "red",
+        "attribute": "peach",
+        "variable.parameter": "maroon"
+    }
+}

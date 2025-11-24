@@ -10,20 +10,22 @@ use snafu::ResultExt;
 use tracing::trace;
 
 use super::{Component, Content, ContentComponent};
-use crate::error::*;
+use crate::{error::*, global};
 
 pub struct CodeHighlight<'a> {
     widget: Paragraph<'a>,
 }
 
 impl<'a> CodeHighlight<'a> {
-    pub fn try_new(source: &str, lang: Lang, colorscheme: &str) -> Result<Self> {
+    pub fn try_new(source: &str, lang: Lang) -> Result<Self> {
         use Event::*;
 
-        let colorscheme = colorschemes::use_builtin_colorscheme(colorscheme)
-            .expect("failed to use built-in colorscheme");
-
-        let names = colorscheme.keys().map(|x| x.as_str()).collect::<Vec<_>>();
+        let theme = global::theme();
+        let names = theme
+            .tree_sitter
+            .keys()
+            .map(|x| x.as_str())
+            .collect::<Vec<_>>();
         trace!(?names, "highlighting with color scheme");
         let events = highlight(&lang, &names, source).whatever_context("failed to highlight")?;
 
@@ -34,9 +36,10 @@ impl<'a> CodeHighlight<'a> {
         for event in events {
             match event {
                 Start(kind) => styles.push(
-                    colorscheme
+                    theme
+                        .tree_sitter
                         .get(kind)
-                        .map(Style::from)
+                        .cloned()
                         .unwrap_or(default_style),
                 ),
                 Source(src) => {
@@ -81,89 +84,3 @@ impl<'a> Content for CodeHighlight<'a> {
 }
 
 impl ContentComponent for CodeHighlight<'static> {}
-
-mod colorschemes {
-    use ratatui::style::{Color, Modifier, Style};
-    use serde::{Deserialize, Serialize};
-
-    use lazy_static::lazy_static;
-    use std::collections::HashMap;
-    use tracing::warn;
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(untagged)]
-    pub enum ColorSchemeStyle {
-        Advance(ColorSchemeStyleAdvance),
-        Fg(Color),
-    }
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-    pub struct ColorSchemeStyleAdvance {
-        fg: Option<Color>,
-        bg: Option<Color>,
-        underline_color: Option<Color>,
-        add_modifier: Option<String>,
-        sub_modifier: Option<String>,
-    }
-
-    impl From<&ColorSchemeStyle> for Style {
-        fn from(value: &ColorSchemeStyle) -> Self {
-            let ColorSchemeStyleAdvance {
-                fg,
-                bg,
-                underline_color,
-                add_modifier,
-                sub_modifier,
-            } = match value {
-                ColorSchemeStyle::Fg(fg) => ColorSchemeStyleAdvance {
-                    fg: Some(fg.to_owned()),
-                    ..Default::default()
-                },
-                ColorSchemeStyle::Advance(value) => value.to_owned(),
-            };
-
-            let add_modifier = add_modifier
-                .map(|name| match bitflags::parser::from_str(&name) {
-                    Err(err) => {
-                        warn!(?name, ?err, "invalid add_modifier of style");
-                        Modifier::empty()
-                    }
-                    Ok(v) => v,
-                })
-                .unwrap_or_default();
-
-            let sub_modifier = sub_modifier
-                .map(|name| match bitflags::parser::from_str(&name) {
-                    Err(err) => {
-                        warn!(?name, ?err, "invalid sub_modifier of style");
-                        Modifier::empty()
-                    }
-                    Ok(v) => v,
-                })
-                .unwrap_or_default();
-
-            Self {
-                fg,
-                bg,
-                underline_color,
-                add_modifier,
-                sub_modifier,
-            }
-        }
-    }
-
-    pub type ColorScheme = HashMap<String, ColorSchemeStyle>;
-
-    lazy_static! {
-        pub static ref CATPPUCCIN_MOCHA: ColorScheme =
-            serde_json::from_str(include_str!("../../colorscheme/catppuccin_mocha.json"))
-                .expect("failed to load catppuccin_mocha colorscheme");
-    }
-
-    pub fn use_builtin_colorscheme(name: &str) -> Option<ColorScheme> {
-        match name {
-            "catppuccin_mocha" => Some(CATPPUCCIN_MOCHA.clone()),
-            _ => None,
-        }
-    }
-}

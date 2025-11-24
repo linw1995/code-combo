@@ -58,17 +58,12 @@ impl Plain {
             MarkdownRenderEngine::Native => None,
         };
 
-        let config = global::config_sync();
-        let widget = CodeHighlight::try_new(
-            &text,
-            code_highlight::Lang::Markdown,
-            &config.ui.colorschema,
-        )
-        .map(|x| x.boxed())
-        .unwrap_or_else(|err| {
-            warn!(?err, "failed to new CodeHighlight Component");
-            RawTextViewer::new(text).boxed()
-        });
+        let widget = CodeHighlight::try_new(&text, code_highlight::Lang::Markdown)
+            .map(|x| x.boxed())
+            .unwrap_or_else(|err| {
+                warn!(?err, "failed to new CodeHighlight Component");
+                RawTextViewer::new(text).boxed()
+            });
         Self { widget, rx }
     }
 }
