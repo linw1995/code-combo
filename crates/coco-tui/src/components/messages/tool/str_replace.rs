@@ -65,12 +65,7 @@ impl<'a> StrReplace<'a> {
         let diff_text = String::from_utf8_lossy(&buf).to_string();
 
         // Use CodeHighlight for diff highlighting
-        let config = global::config_sync();
-        let widget = match CodeHighlight::try_new(
-            &diff_text,
-            code_highlight::Lang::Diff,
-            &config.ui.colorschema,
-        ) {
+        let widget = match CodeHighlight::try_new(&diff_text, code_highlight::Lang::Diff) {
             Ok(highlight) => StrReplaceWidget::CodeHighlight(highlight),
             Err(_) => StrReplaceWidget::Paragraph(Paragraph::new(diff_text)),
         };
@@ -92,7 +87,7 @@ impl Content for StrReplace<'_> {
         self.appliable.get()
     }
 
-    fn block_bottom_with_shortcuts_desc<'b>(&self, block: Block<'b>) -> Block<'b> {
+    fn block_with_shortcuts_desc<'b>(&self, block: Block<'b>) -> Block<'b> {
         if self.appliable.get() {
             block
                 .title_bottom(shortcuts_desc(&[("Apply", "CR")]))
