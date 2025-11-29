@@ -1,4 +1,5 @@
 use bon::bon;
+use coco_macro::{ComponentExt, ContentComponentExt};
 use code_combo::{
     ToolUse,
     tools::{BashInput, BashOutput, Final},
@@ -13,6 +14,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Paragraph, Wrap},
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::prelude::*;
 use tracing::warn;
@@ -20,16 +22,26 @@ use tracing::warn;
 use super::{Component, Content, ContentComponent};
 use crate::{
     actions::ToolAction,
-    components::{CodeHighlight, shortcuts_desc},
+    components::{CodeHighlight, Persistable, shortcuts_desc},
     error::*,
     events::{AnswerEvent, AskEvent, Event},
-    global,
+    global::{self, State},
+    session::{self, Session},
 };
 
-pub struct Bash<'a> {
+#[derive(Serialize, Deserialize)]
+struct Inner {
     tool_use: ToolUse,
-    input: CodeHighlight<'a>,
     requiring_confirmation: bool,
+    output: Option<BashOutput>,
+}
+
+#[derive(ComponentExt, ContentComponentExt)]
+#[component(type_id = "bash")]
+pub struct Bash<'a> {
+    state: State<Inner>,
+
+    input: CodeHighlight<'a>,
     output: Paragraph<'a>,
 }
 
@@ -57,26 +69,31 @@ fn generate_output<'a>(output: Option<BashOutput>) -> Paragraph<'a> {
     Paragraph::new(lines).wrap(Wrap { trim: false })
 }
 
+fn generate_input<'b>(tool_use: &ToolUse) -> CodeHighlight<'b> {
+    let input: BashInput =
+        serde_json::from_value(tool_use.input.clone()).expect("failed to parse BashInput");
+    CodeHighlight::try_new(&input.command, Lang::Bash).expect("failed to new CodeHighlight")
+}
+
 #[bon]
 impl<'a> Bash<'a> {
     #[builder]
     pub fn try_new(tool_use: &ToolUse, output: Option<Value>) -> Result<Self> {
-        let input: BashInput = serde_json::from_value(tool_use.input.clone())
-            .whatever_context("failed to parse BashInput")?;
-
-        let input = CodeHighlight::try_new(&input.command, Lang::Bash)?;
-
+        let input = generate_input(tool_use);
         let output = output
             .map(serde_json::from_value)
             .transpose()
             .whatever_context("failed to parse BashOutput")?;
-        let output = generate_output(output);
+        let output_widget = generate_output(output.clone());
 
         Ok(Self {
-            tool_use: tool_use.to_owned(),
+            state: State::new(Inner {
+                tool_use: tool_use.to_owned(),
+                requiring_confirmation: false,
+                output,
+            }),
             input,
-            requiring_confirmation: false,
-            output,
+            output: output_widget,
         })
     }
 
@@ -96,7 +113,7 @@ impl<'a> Content for Bash<'a> {
     }
 
     fn is_actionable(&self) -> bool {
-        self.requiring_confirmation
+        self.state.requiring_confirmation
     }
 
     fn block_with_shortcuts_desc<'b>(&self, block: Block<'b>) -> Block<'b> {
@@ -106,10 +123,27 @@ impl<'a> Content for Bash<'a> {
     }
 }
 
-impl Component for Bash<'_> {
+impl Persistable for Bash<'static> {
+    fn save(&self) -> Session {
+        session::save(&self.state)
+    }
+
+    fn load(session: Session) -> Result<Self> {
+        let state: Inner = session::load(session)?;
+        Ok(Self {
+            input: generate_input(&state.tool_use),
+            output: generate_output(state.output.clone()),
+            state: global::State::new(state),
+        })
+    }
+}
+
+impl Component for Bash<'static> {
     fn handle_event(&mut self, event: &Event) {
         match event {
-            Event::Ask(AskEvent::ToolUsePermission(_)) => self.requiring_confirmation = true,
+            Event::Ask(AskEvent::ToolUsePermission(_)) => {
+                self.state.write().requiring_confirmation = true
+            }
             Event::Answer(AnswerEvent::ToolResult { output, .. }) => {
                 if let Err(err) = self.update_output(Some(output.to_owned())) {
                     warn!(?err, "failed to update tool output");
@@ -123,15 +157,15 @@ impl Component for Bash<'_> {
         match (key.modifiers, key.code) {
             (KeyModifiers::NONE, KeyCode::Enter) => {
                 global::action_tx()
-                    .send(ToolAction::Grant(self.tool_use.to_owned()).into())
+                    .send(ToolAction::Grant(self.state.tool_use.to_owned()).into())
                     .unwrap();
-                self.requiring_confirmation = false;
+                self.state.write().requiring_confirmation = false;
             }
             (KeyModifiers::NONE, KeyCode::Esc) => {
                 global::action_tx()
-                    .send(ToolAction::Cancel(self.tool_use.to_owned()).into())
+                    .send(ToolAction::Cancel(self.state.tool_use.to_owned()).into())
                     .unwrap();
-                self.requiring_confirmation = false;
+                self.state.write().requiring_confirmation = false;
             }
             _ => (), // ignore
         }

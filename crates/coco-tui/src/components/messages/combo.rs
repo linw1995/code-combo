@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 
+use coco_macro::{ComponentExt, ContentComponentExt};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout},
@@ -8,130 +9,146 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
+use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use super::{Component, Content, ContentComponent, Plain};
 use crate::{
     actions::{Action, ComboAction},
+    components::{Component, Content, ContentComponent, Persistable, Plain},
     error::*,
     events::{ComboEvent, Event},
     global::{self, State},
+    session::{self, Session},
 };
 
-#[derive(Default)]
-pub struct Combo {
-    // executing
-    event: State<Option<ComboEvent>>,
-    output: State<VecDeque<code_combo::Line>>,
+#[derive(Serialize, Deserialize)]
+enum StarterState {
+    Discovering,
+    NotFound,
+    Executing { output: VecDeque<code_combo::Line> },
+    Finalized { output: String },
+}
 
-    // finalized
+#[derive(Default, Serialize, Deserialize)]
+struct Inner {
+    name: String,
+    is_error: bool,
+    starter_state: StarterState,
+}
+
+impl Default for StarterState {
+    fn default() -> Self {
+        Self::Discovering
+    }
+}
+
+#[derive(ComponentExt, ContentComponentExt)]
+#[component(type_id = "combo")]
+pub struct Combo {
+    state: State<Inner>,
+
     widget: Option<Plain>,
 }
 
 const LIMIT: usize = 10;
 
 impl Combo {
-    fn update_event_state(&mut self, new_event: &ComboEvent) {
-        let event = self.event.read();
-        // Skip updating if in final state.
-        if matches!(
-            event,
-            Some(ComboEvent::NotFound { .. } | ComboEvent::Executed { .. })
-        ) {
-            return;
+    pub fn new(name: &str) -> Self {
+        Self {
+            state: State::new(Inner {
+                name: name.to_string(),
+                ..Default::default()
+            }),
+            widget: None,
         }
-        let new_event = Some(new_event.to_owned());
-        debug!(?event, ?new_event, "update event state");
-        *self.event.write() = new_event;
     }
 
     fn on_combo_event(&mut self, event: &ComboEvent) {
         match event {
-            ComboEvent::Output { name, lines } => self.on_output_event(name, lines),
-            ComboEvent::Discovering
-            | ComboEvent::Executing { .. }
-            | ComboEvent::Discovered { .. }
-            | ComboEvent::NotFound { .. } => {
-                self.update_event_state(event);
+            ComboEvent::NotFound { name } => {
+                if &self.state.name == name {
+                    self.state.write().starter_state = StarterState::NotFound
+                }
             }
-            ComboEvent::Executed { starter, .. } => {
-                let combo = starter.combo.as_ref().unwrap();
-                self.update_plain_msg(combo);
-                self.update_event_state(event);
+            ComboEvent::Output { name, lines } => self.on_ouput_event(name, lines),
+            ComboEvent::Executing { name } => {
+                if &self.state.name == name {
+                    self.state.write().starter_state = StarterState::Executing {
+                        output: VecDeque::new(),
+                    };
+                }
             }
+            ComboEvent::Executed { name, starter, .. } => {
+                if &self.state.name == name {
+                    let mut state = self.state.write();
+                    let output = match &starter.combo {
+                        Ok(combo) => combo.to_markdown(),
+                        Err(err) => {
+                            state.is_error = true;
+                            format!("Failed to execute starter: {err}")
+                        }
+                    };
+                    self.widget = Some(Plain::new(output.clone()));
+                    state.starter_state = StarterState::Finalized { output };
+                }
+            }
+            _ => (),
         }
     }
 
-    fn on_output_event(&mut self, target: &String, batch: &Vec<code_combo::Line>) {
-        match self.event.read() {
-            Some(ComboEvent::Executing { name } | ComboEvent::Executed { name, .. })
-                if name == target =>
-            {
-                let mut lines = self.output.write();
-                let batch_size = batch.len();
-                let line_count = lines.len();
-                if batch_size > LIMIT {
-                    debug!(?LIMIT, ?batch_size, "Batch size exceeds limit, truncating");
-                    lines.clear();
-                    lines.extend(batch[batch_size - LIMIT..batch_size].to_vec());
-                } else if line_count + batch_size > LIMIT {
-                    debug!(
-                        ?line_count,
-                        ?batch_size,
-                        ?LIMIT,
-                        "Line count exceeds limit, removing oldest lines"
-                    );
-                    lines.drain(0..(line_count + batch_size - LIMIT));
-                    lines.extend(batch.to_owned());
-                } else {
-                    debug!(?line_count, ?batch_size, ?LIMIT, "Adding new lines");
-                    lines.extend(batch.to_owned());
-                }
-            }
-            _ => {
-                // ignore
-            }
+    fn on_ouput_event(&mut self, name: &str, batch: &Vec<code_combo::Line>) {
+        if self.state.name != name {
+            return;
+        }
+        let StarterState::Executing { output: lines } = &mut self.state.write().starter_state
+        else {
+            return;
+        };
+        let batch_size = batch.len();
+        let line_count = lines.len();
+        if batch_size > LIMIT {
+            debug!(?LIMIT, ?batch_size, "Batch size exceeds limit, truncating");
+            lines.clear();
+            lines.extend(batch[batch_size - LIMIT..batch_size].to_vec());
+        } else if line_count + batch_size > LIMIT {
+            debug!(
+                ?line_count,
+                ?batch_size,
+                ?LIMIT,
+                "Line count exceeds limit, removing oldest lines"
+            );
+            lines.drain(0..(line_count + batch_size - LIMIT));
+            lines.extend(batch.to_owned());
+        } else {
+            debug!(?line_count, ?batch_size, ?LIMIT, "Adding new lines");
+            lines.extend(batch.to_owned());
         }
     }
 
     fn get_title_spans(&self) -> Vec<Span<'_>> {
         // Use block title to show progress message and indicator with simple loading character
         let mut spans = vec![" 󱐋 ".yellow(), " Combo:".into()];
-        match self.event.read() {
-            Some(ComboEvent::Discovering) => {
-                spans.push("   Discovering combo starters...".yellow())
-            }
-            Some(ComboEvent::Discovered { starters }) => {
-                spans.push(format!("   Discovered {} combo starters", starters.len()).green())
-            }
-            Some(ComboEvent::Executing { name }) => {
-                spans.push(name.as_str().cyan());
-                spans.push("   Executing...".yellow());
-            }
-            Some(ComboEvent::Executed { name, starter }) => {
-                spans.push(name.as_str().cyan());
-                spans.push(if starter.combo.is_ok() {
-                    "   Completed".green()
-                } else {
-                    "   Failed".red()
-                });
-            }
-            Some(ComboEvent::NotFound { name }) => {
-                spans.push(name.as_str().cyan());
+        match self.state.starter_state {
+            StarterState::Discovering => spans.push("   Discovering combo starters...".yellow()),
+            StarterState::NotFound => {
+                spans.push(self.state.name.clone().cyan());
                 spans.push("   Not found".red())
             }
-            None => spans.push("   Null".into()),
-            Some(ComboEvent::Output { .. }) => {
-                unreachable!()
+            StarterState::Executing { .. } => {
+                spans.push(self.state.name.clone().cyan());
+                spans.push("   Executing...".yellow());
+            }
+            StarterState::Finalized { .. } => {
+                spans.push(self.state.name.clone().cyan());
+                spans.push(if self.state.is_error {
+                    "   Failed".red()
+                } else {
+                    "   Completed".green()
+                });
             }
         }
         spans.push(" ".into());
         spans
-    }
-
-    fn update_plain_msg(&mut self, combo: &code_combo::Combo) {
-        let text = combo.to_markdown();
-        self.widget = Some(Plain::new(text))
     }
 }
 
@@ -141,13 +158,30 @@ impl Content for Combo {
         if let Some(plain) = &self.widget {
             plain.height(width) + border_height
         } else {
-            match self.event.read() {
-                Some(ComboEvent::Executing { .. } | ComboEvent::Executed { .. }) => {
-                    self.output.len() + border_height
-                }
-                _ => border_height,
-            }
+            (match &self.state.starter_state {
+                StarterState::Executing { output } => output.len(),
+                _ => 0,
+            }) + border_height
         }
+    }
+}
+
+impl Persistable for Combo {
+    fn save(&self) -> Session {
+        session::save(&self.state)
+    }
+
+    fn load(session: Session) -> Result<Self> {
+        let state: Inner = session::load(session)?;
+        let widget = if let StarterState::Finalized { output } = &state.starter_state {
+            Some(Plain::new(output.clone()))
+        } else {
+            None
+        };
+        Ok(Self {
+            state: State::new(state),
+            widget,
+        })
     }
 }
 
@@ -177,7 +211,7 @@ impl Component for Combo {
                     tokio::task::spawn(discover());
                 }
                 ComboAction::Execute { name } => {
-                    tokio::task::spawn(execute(name.to_owned(), self.event.get()));
+                    tokio::task::spawn(execute(name.to_owned()));
                 }
             }
         }
@@ -197,11 +231,9 @@ impl Component for Combo {
 
         if let Some(plain) = &mut self.widget {
             plain.draw(frame, output_area)?;
-        } else if let Some(ComboEvent::Executing { .. } | ComboEvent::Executed { .. }) =
-            self.event.read()
-        {
-            let chunks = Layout::vertical(self.output.iter().map(|_| Length(1))).split(output_area);
-            for (idx, line) in self.output.iter().enumerate() {
+        } else if let StarterState::Executing { output } = &self.state.starter_state {
+            let chunks = Layout::vertical(output.iter().map(|_| Length(1))).split(output_area);
+            for (idx, line) in output.iter().enumerate() {
                 let p = Paragraph::new(line.content.to_string());
                 frame.render_widget(&p, chunks[idx]);
             }
@@ -223,24 +255,21 @@ async fn discover() {
     tx.send(ComboEvent::Discovered { starters }.into()).unwrap();
 }
 
-async fn execute(name: String, event: Option<ComboEvent>) {
+async fn execute(name: String) {
     let tx = global::event_tx();
     let config = global::config().await;
     let combo_dir = config.combo_dir();
-    let starters = match event {
-        Some(ComboEvent::Discovered { starters }) => starters,
-        _ => {
-            tx.send(ComboEvent::Discovering.into()).unwrap();
-            let starters = code_combo::discover_combo_starters(&combo_dir.to_string_lossy()).await;
-            tx.send(
-                ComboEvent::Discovered {
-                    starters: starters.clone(),
-                }
-                .into(),
-            )
-            .unwrap();
-            starters
-        }
+    let starters = {
+        tx.send(ComboEvent::Discovering.into()).unwrap();
+        let starters = code_combo::discover_combo_starters(&combo_dir.to_string_lossy()).await;
+        tx.send(
+            ComboEvent::Discovered {
+                starters: starters.clone(),
+            }
+            .into(),
+        )
+        .unwrap();
+        starters
     };
     if let Some(starter) = starters.into_iter().find(|starter| match &starter.combo {
         Ok(combo) => combo.metadata.name == name,

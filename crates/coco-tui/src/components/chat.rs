@@ -1,3 +1,4 @@
+use coco_macro::ComponentExt;
 use code_combo::{
     Agent, Block as ChatBlock, Config, Content as ChatContent, Message as ChatMessage, Output,
     TextEdit, ToolUse,
@@ -12,31 +13,41 @@ use ratatui::{
     widgets::{Block, Borders},
 };
 
+use serde::{Deserialize, Serialize};
 use throbber_widgets_tui::{Throbber, ThrobberState};
 use tracing::{debug, warn};
 
 use super::{
     Action, AnswerEvent, AskEvent, BotMessage, Combo, ComboAction, ComboEvent, Component, Content,
-    ContentComponent, Event, Input, Message, Messages, Plain, Role, Tool, ToolAction,
-    shortcuts_desc,
+    Event, Input, Message, Messages, Plain, Tool, ToolAction, shortcuts_desc,
 };
 use crate::{
+    components::Persistable,
     error::*,
     global::{self, State},
+    session::{self, Session},
 };
 
+#[derive(ComponentExt)]
+#[component(type_id = "chat")]
 pub struct Chat<'a> {
-    state: State<ChatState>,
-    focus: State<Focus>,
+    state: State<Inner>,
+
     agent: Agent,
 
     input: Input<'a>,
     messages: Messages,
-    pending_chats: Vec<ChatBlock>,
     indicator: ThrobberState,
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Serialize, Deserialize)]
+struct Inner {
+    state: ChatState,
+    focus: Focus,
+    pending_chats: Vec<ChatBlock>,
+}
+
+#[derive(Default, Clone, Serialize, Deserialize)]
 enum ChatState {
     #[default]
     Ready,
@@ -54,7 +65,7 @@ impl std::fmt::Display for ChatState {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 enum Focus {
     #[default]
     Input,
@@ -62,15 +73,13 @@ enum Focus {
     Messages,
 }
 
-impl Chat<'_> {
+impl Chat<'static> {
     pub fn new(config: Config) -> Self {
         Self {
             state: State::default(),
-            focus: State::default(),
             agent: Agent::new(config),
             input: Input::default(),
             messages: Messages::default(),
-            pending_chats: vec![],
             indicator: ThrobberState::default(),
         }
     }
@@ -79,10 +88,10 @@ impl Chat<'_> {
         debug!(?event, "receive combo event");
         match event {
             ComboEvent::Discovering => {
-                *self.state.write() = ChatState::ComboDiscovering;
+                self.state.write().state = ChatState::ComboDiscovering;
             }
             ComboEvent::Executing { .. } | ComboEvent::Output { .. } => {
-                *self.state.write() = ChatState::Procesing;
+                self.state.write().state = ChatState::Procesing;
             }
             ComboEvent::Executed { starter, .. } => {
                 let combo = starter.combo.as_ref().unwrap();
@@ -90,13 +99,13 @@ impl Chat<'_> {
                 tokio::task::spawn(task_chat(self.agent.clone(), content));
             }
             ComboEvent::Discovered { .. } | ComboEvent::NotFound { .. } => {
-                *self.state.write() = ChatState::Ready;
+                self.state.write().state = ChatState::Ready;
             }
         }
     }
 
     fn update_focus(&mut self, new_focus: Focus) {
-        let focus = self.focus.read();
+        let focus = &self.state.focus;
         if focus == &new_focus {
             return;
         }
@@ -107,7 +116,7 @@ impl Chat<'_> {
         if new_focus == Focus::Input {
             self.input.update(&Action::Focus);
         }
-        *self.focus.write() = new_focus
+        self.state.write().focus = new_focus
     }
 
     /// Combines pending ToolResults (e.g., User Cancelled) with user instructions.
@@ -115,10 +124,10 @@ impl Chat<'_> {
     /// This ensures the LLM doesn't react to tool results without explicit user instructions.
     /// Tool results are queued and combined with the next user message to provide context.
     fn build_user_content(&mut self, content: ChatContent) -> ChatContent {
-        if self.pending_chats.is_empty() {
+        if self.state.pending_chats.is_empty() {
             content
         } else {
-            let mut blocks = std::mem::take(&mut self.pending_chats);
+            let mut blocks = std::mem::take(&mut self.state.write().pending_chats);
             ChatContent::Multiple(match content {
                 ChatContent::Text(text) => {
                     blocks.push(ChatBlock::Text { text });
@@ -133,11 +142,11 @@ impl Chat<'_> {
     }
 
     fn on_submit(&mut self) {
-        if matches!(self.state.read(), ChatState::Ready) {
+        if matches!(self.state.state, ChatState::Ready) {
             let value = self.input.clear();
             debug!(?value, "submiting");
             self.messages
-                .push(Message::user(Plain::new(value.clone()).boxed()));
+                .push(Message::user(Plain::new(value.clone()).into()));
             let content = self.build_user_content(ChatContent::Text(value));
             tokio::task::spawn(task_chat(self.agent.clone(), content));
         } else {
@@ -147,7 +156,7 @@ impl Chat<'_> {
 
     fn block_bottom_with_shortcuts_desc<'a>(&self, mut block: Block<'a>) -> Block<'a> {
         block = block.title_bottom(Line::from(""));
-        match self.focus.read() {
+        match self.state.focus {
             Focus::Input => block
                 .title_bottom(shortcuts_desc(&[("Blur", "Esc")]))
                 .title_bottom(shortcuts_desc(&[("Submit", "CR")])),
@@ -165,7 +174,7 @@ impl Chat<'_> {
     }
 
     fn widget_state_indicator(&self) -> Line<'_> {
-        let state = self.state.read();
+        let state = &self.state.state;
         (match state {
             ChatState::Ready => Line::from(format!(" {state} ").green()),
             ChatState::Procesing | ChatState::ComboDiscovering => Line::from(vec![
@@ -202,21 +211,38 @@ impl Chat<'_> {
             }
             // Await the next user message to avoid the LLM reacting without further user
             // instructions
-            self.pending_chats.push(code_combo::Block::ToolResult {
-                tool_use_id: id,
-                is_error: Some(!edit.changed()),
-                content: if edit.changed() {
-                    "User rejects some changes"
-                } else {
-                    "User rejects all changes"
-                }
-                .into(),
-            });
+            self.state
+                .write()
+                .pending_chats
+                .push(code_combo::Block::ToolResult {
+                    tool_use_id: id,
+                    is_error: Some(!edit.changed()),
+                    content: if edit.changed() {
+                        "User rejects some changes"
+                    } else {
+                        "User rejects all changes"
+                    }
+                    .into(),
+                });
         }
     }
 }
 
-impl Component for Chat<'_> {
+impl Persistable for Chat<'static> {
+    fn save(&self) -> Session {
+        session::save_related(&self.state, self.messages.save())
+    }
+
+    fn load(session: Session) -> Result<Self> {
+        let (state, session): (Inner, Session) = session::load_related(session)?;
+        let mut inst = Self::new(global::config_sync());
+        inst.state = State::new(state);
+        inst.messages = Messages::load(session)?;
+        Ok(inst)
+    }
+}
+
+impl Component for Chat<'static> {
     fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
         let children: Vec<&mut dyn Component> = vec![&mut self.input, &mut self.messages];
         Box::new(children.into_iter())
@@ -224,7 +250,7 @@ impl Component for Chat<'_> {
 
     fn on_tick(&mut self) {
         if matches!(
-            self.state.get(),
+            self.state.state,
             ChatState::Procesing | ChatState::ComboDiscovering
         ) {
             self.indicator.calc_next();
@@ -244,14 +270,14 @@ impl Component for Chat<'_> {
                 handle_component_event!(self, event);
             }
             Event::Ask(AskEvent::Bot) => {
-                *self.state.write() = ChatState::Procesing;
+                self.state.write().state = ChatState::Procesing;
             }
             Event::Answer(AnswerEvent::Bot(msgs)) => {
-                *self.state.write() = ChatState::Ready;
+                self.state.write().state = ChatState::Ready;
                 self.messages.extend(msgs.iter().cloned().map(|msg| {
                     Message::bot(match msg {
-                        BotMessage::Plain(text) => Plain::new(text).boxed(),
-                        BotMessage::ToolUse(tool_use) => Tool::new(tool_use.to_owned()).boxed(),
+                        BotMessage::Plain(text) => Plain::new(text).into(),
+                        BotMessage::ToolUse(tool_use) => Tool::new(tool_use.to_owned()).into(),
                     })
                 }));
             }
@@ -297,7 +323,8 @@ impl Component for Chat<'_> {
         use KeyCode::*;
         use KeyModifiers as KM;
 
-        match (self.focus.read(), key.modifiers, key.code) {
+        let focus = &self.state.focus;
+        match (focus, key.modifiers, key.code) {
             // Focus switching
             (Input, KM::NONE, Esc) => self.update_focus(Focus::InputBlur),
             (InputBlur, KM::NONE, Enter) => self.update_focus(Focus::Input),
@@ -345,7 +372,7 @@ impl Component for Chat<'_> {
             (Messages, _, _) => self.messages.handle_key_event(key),
 
             (InputBlur, _, _) => {
-                warn!(?key, ?self.focus, "unknown key event");
+                warn!(?key, ?focus, "unknown key event");
             }
         }
     }
@@ -354,12 +381,9 @@ impl Component for Chat<'_> {
         debug!(?action, "updating");
 
         match action {
-            Action::Combo(ComboAction::Discover | ComboAction::Execute { .. }) => {
-                let combo = Combo::default();
-                self.messages.push(Message {
-                    role: Role::User,
-                    content: Box::new(combo),
-                });
+            Action::Combo(ComboAction::Execute { name }) => {
+                let combo = Combo::new(name);
+                self.messages.push(Message::user(combo.into()));
                 debug!("Combo message pushed");
             }
             Action::Tool(action) => match action {
@@ -377,11 +401,14 @@ impl Component for Chat<'_> {
                     }
                     // Await the next user message to avoid the LLM reacting without further user
                     // instructions
-                    self.pending_chats.push(code_combo::Block::ToolResult {
-                        tool_use_id: tool_use.id.clone(),
-                        is_error: Some(true),
-                        content: code_combo::Content::Text("User cancelled".to_string()),
-                    });
+                    self.state
+                        .write()
+                        .pending_chats
+                        .push(code_combo::Block::ToolResult {
+                            tool_use_id: tool_use.id.clone(),
+                            is_error: Some(true),
+                            content: code_combo::Content::Text("User cancelled".to_string()),
+                        });
                 }
                 ToolAction::ApplyTextEdit {
                     id,
@@ -428,7 +455,7 @@ impl Component for Chat<'_> {
         frame.render_widget(self.block_bottom_with_shortcuts_desc(block), divider);
 
         let mut block = Block::new().borders(Borders::BOTTOM);
-        block = if !matches!(self.focus.read(), Focus::Messages) {
+        block = if !matches!(self.state.focus, Focus::Messages) {
             block.border_set(border::THICK).border_style(Style::reset())
         } else {
             block

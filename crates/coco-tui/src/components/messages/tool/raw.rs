@@ -1,3 +1,4 @@
+use coco_macro::{ComponentExt, ContentComponentExt};
 use code_combo::{ToolUse, tools::Final};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -5,54 +6,85 @@ use ratatui::{
     prelude::Rect,
     widgets::{Paragraph, Wrap},
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{
     actions::ToolAction,
-    components::{Component, Content, ContentComponent},
-    error,
+    components::{Component, Content, ContentComponent, Persistable},
+    error::Result,
     events::{AnswerEvent, Event},
     global::{self, State},
+    session::{self, Session},
 };
 
-pub struct Raw {
+#[derive(Serialize, Deserialize)]
+struct Inner {
     tool_use: ToolUse,
-    is_actionable: State<bool>,
-    output: State<Option<Final>>,
+    is_actionable: bool,
+    output: Option<Final>,
 }
 
-impl Raw {
-    pub fn new(tool_use: ToolUse) -> Self {
-        Self {
-            tool_use,
-            is_actionable: State::new(true),
-            output: State::default(),
-        }
-    }
+#[derive(ComponentExt, ContentComponentExt)]
+#[component(type_id = "raw")]
+pub struct Raw<'a> {
+    state: State<Inner>,
+    widget: Paragraph<'a>,
+}
 
-    fn generate_default(&self) -> Paragraph<'_> {
-        let mut text = match serde_json::to_string_pretty(&self.tool_use.input) {
-            Ok(json_str) => format!("Input: {}", json_str),
-            Err(_) => "Input: [Invalid JSON]".to_string(),
+fn generate_widget<'b>(tool_use: &ToolUse, output: &Option<Final>) -> Paragraph<'b> {
+    let mut text = match serde_json::to_string_pretty(&tool_use.input) {
+        Ok(json_str) => format!("Input: {}", json_str),
+        Err(_) => "Input: [Invalid JSON]".to_string(),
+    };
+    if let Some(output) = output {
+        let output = match output {
+            Final::Json(output) => match serde_json::to_string_pretty(output) {
+                Ok(json_str) => format!("Output: {}", json_str),
+                Err(_) => "Output: [Invalid JSON]".to_string(),
+            },
+            Final::Message(text) => text.to_owned(),
         };
-        if let Some(output) = self.output.read() {
-            let output = match output {
-                Final::Json(output) => match serde_json::to_string_pretty(output) {
-                    Ok(json_str) => format!("Output: {}", json_str),
-                    Err(_) => "Output: [Invalid JSON]".to_string(),
-                },
-                Final::Message(text) => text.to_owned(),
-            };
-            text.push('\n');
-            text.push_str(&output);
+        text.push('\n');
+        text.push_str(&output);
+    }
+    Paragraph::new(text).wrap(Wrap { trim: false })
+}
+
+impl<'a> Raw<'a> {
+    pub fn new(tool_use: ToolUse) -> Self {
+        let widget = generate_widget(&tool_use, &None);
+        Self {
+            state: State::new(Inner {
+                tool_use,
+                is_actionable: true,
+                output: None,
+            }),
+            widget,
         }
-        Paragraph::new(text).wrap(Wrap { trim: false })
     }
 }
 
-impl Component for Raw {
+impl Persistable for Raw<'static> {
+    fn save(&self) -> Session {
+        session::save(&self.state)
+    }
+
+    fn load(session: Session) -> Result<Self> {
+        let state: Inner = session::load(session)?;
+        let widget = generate_widget(&state.tool_use, &state.output);
+        Ok(Self {
+            state: State::new(state),
+            widget,
+        })
+    }
+}
+
+impl Component for Raw<'static> {
     fn handle_event(&mut self, event: &Event) {
         if let Event::Answer(AnswerEvent::ToolResult { output, .. }) = event {
-            *self.output.write() = Some(output.to_owned());
+            let output = Some(output.to_owned());
+            self.widget = generate_widget(&self.state.tool_use, &output);
+            self.state.write().output = output;
         } else {
             handle_component_event!(self, event);
         }
@@ -60,32 +92,35 @@ impl Component for Raw {
 
     fn handle_key_event(&mut self, key: &KeyEvent) {
         let action = match (key.modifiers, key.code) {
-            (KeyModifiers::NONE, KeyCode::Enter) => ToolAction::Grant(self.tool_use.to_owned()),
-            (KeyModifiers::NONE, KeyCode::Esc) => ToolAction::Cancel(self.tool_use.to_owned()),
+            (KeyModifiers::NONE, KeyCode::Enter) => {
+                ToolAction::Grant(self.state.tool_use.to_owned())
+            }
+            (KeyModifiers::NONE, KeyCode::Esc) => {
+                ToolAction::Cancel(self.state.tool_use.to_owned())
+            }
             _ => {
                 // ignore
                 return;
             }
         };
-        *self.is_actionable.write() = false;
+        self.state.write().is_actionable = false;
         global::action_tx().send(action.into()).unwrap();
     }
 
-    fn draw(&mut self, frame: &mut Frame, area: Rect) -> error::Result<()> {
-        let content = self.generate_default();
-        frame.render_widget(content, area);
+    fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        frame.render_widget(&self.widget, area);
         Ok(())
     }
 }
 
-impl Content for Raw {
+impl<'a> Content for Raw<'a> {
     fn is_actionable(&self) -> bool {
-        self.is_actionable.get()
+        self.state.is_actionable
     }
 
     fn height(&self, width: u16) -> usize {
-        self.generate_default().line_count(width)
+        self.widget.line_count(width)
     }
 }
 
-impl ContentComponent for Raw {}
+impl ContentComponent for Raw<'static> {}

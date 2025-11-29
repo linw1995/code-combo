@@ -1,9 +1,10 @@
+use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
 use tree_sitter_highlight::HighlightConfiguration;
 
 use super::Result;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub enum Lang {
     Bash,
     Diff,

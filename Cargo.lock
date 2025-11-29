@@ -292,6 +292,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b94f61472cee1439c0b966b47e3aca9ae07e45d070759512cd390ea2bebc6675"
 
 [[package]]
+name = "coco-macro"
+version = "0.1.0"
+dependencies = [
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "coco-tui"
 version = "0.1.0"
 dependencies = [
@@ -299,6 +307,7 @@ dependencies = [
  "bitflags",
  "bon",
  "clap",
+ "coco-macro",
  "code-combo",
  "code-highlight",
  "crossterm",
@@ -1410,9 +1419,9 @@ dependencies = [
 
 [[package]]
 name = "quote"
-version = "1.0.40"
+version = "1.0.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1885c039570dc00dcb4ff087a89e185fd56bae234ddc7f056a945bf36467248d"
+checksum = "a338cc41d27e6cc6dce6cefc13a0729dfbb81c262b1f519331575dd80ef3067f"
 dependencies = [
  "proc-macro2",
 ]
@@ -1884,9 +1893,9 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "syn"
-version = "2.0.106"
+version = "2.0.111"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ede7c438028d4436d71104916910f5bb611972c5cfd7f89b8300a8186e6fada6"
+checksum = "390cc9a294ab71bdb1aa2e99d13be9c753cd2d7bd6560c77118597410c4d2e87"
 dependencies = [
  "proc-macro2",
  "quote",

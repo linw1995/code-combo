@@ -9,7 +9,7 @@ use super::{ExecuteResult, Final, Input, Tool};
 #[derive(Default)]
 pub struct ReadTool {}
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadInput {
     pub path: String,
     #[serde(default = "default_line_offset")]

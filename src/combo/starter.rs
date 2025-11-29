@@ -1,5 +1,6 @@
 use std::process::Stdio;
 
+use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
 use tokio::{
     fs,
@@ -46,7 +47,7 @@ pub async fn discover_combo_starters(path: &str) -> Vec<Starter> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LineContent {
     Stdout(String),
     Stderr(String),
@@ -61,7 +62,7 @@ impl std::fmt::Display for LineContent {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Line {
     pub timestamp: i64,
     pub content: LineContent,

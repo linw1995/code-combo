@@ -30,7 +30,6 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum ComboCommands {
-    List,
     Run { name: String },
 }
 
@@ -54,9 +53,6 @@ async fn main() -> Result<()> {
     let mut app = app::App::new(config)?;
     match args.command {
         Some(Commands::Combo(combo_cmd)) => match combo_cmd {
-            ComboCommands::List => {
-                app.send_action(ComboAction::Discover.into());
-            }
             ComboCommands::Run { name } => {
                 app.send_action(ComboAction::Execute { name }.into());
             }

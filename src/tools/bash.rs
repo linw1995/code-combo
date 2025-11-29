@@ -17,7 +17,7 @@ pub struct BashInput {
     pub timeout: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BashOutput {
     pub exit_code: u8,
     pub stdout: String,

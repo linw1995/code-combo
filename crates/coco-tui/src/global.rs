@@ -3,6 +3,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
 use crate::{
@@ -90,8 +91,9 @@ pub fn signal_ditry() {
 /// mutable access to the inner value. When the `WriteGuard` is dropped, it
 /// automatically sends a `Dirty` event to notify the system that the state
 /// has been modified.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct State<T> {
+    #[serde(flatten)]
     inner: T,
 }
 

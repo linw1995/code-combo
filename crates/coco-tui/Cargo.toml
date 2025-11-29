@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 # Core
 code-combo = { path = "../.." }
+coco-macro = { path = "../coco-macro/" }
 
 # CLI
 clap = "4.5.49"
@@ -42,16 +43,16 @@ tracing-error.workspace = true
 tracing-subscriber.workspace = true
 
 # Serialization and data handling
-serde.workspace = true
+serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 
 # Builder
 bon.workspace = true
 
 # Others
+ctor.workspace = true
 lazy_static.workspace = true
 bitflags = "2.10.0"
 indoc.workspace = true
 
 [dev-dependencies]
-ctor.workspace = true
