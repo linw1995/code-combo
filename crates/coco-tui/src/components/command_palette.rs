@@ -8,7 +8,7 @@ use ratatui::{
     prelude::Rect,
     symbols::border,
     text::Text,
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph, Widget},
 };
 use serde::{Deserialize, Serialize};
 
@@ -170,6 +170,8 @@ impl Component for CommandPalette {
                 Layout::vertical([Fill(1), Max(20), Fill(1)]).areas(area_h_center);
             area_floating
         };
+        // ensure that all cells under the popup are cleared to avoid leaking content
+        Clear.render(area, frame.buffer_mut());
 
         let block = Block::new().borders(Borders::BOTTOM);
         let block = block
