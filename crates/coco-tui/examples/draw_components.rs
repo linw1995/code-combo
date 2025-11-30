@@ -5,6 +5,7 @@ use coco_tui::{
     components::{Chat, CodeHighlight, Component},
     error::Result,
     global,
+    session::{self, Session},
 };
 use code_combo::{Config, default_config_dir};
 use crossterm::{
@@ -36,6 +37,8 @@ struct Args {
 #[derive(Subcommand)]
 enum Commands {
     CodeHighlight,
+
+    Session { path: String },
 }
 
 #[snafu::report]
@@ -55,7 +58,13 @@ async fn main() -> Result<()> {
     config.config_dir = config_dir;
     global::set_config(config.clone()).await;
 
-    let mut app: Box<dyn Component> = match args.command {
+    // Initialize dummy channels for testing.
+    use tokio::sync::mpsc;
+    let (event_tx, _) = mpsc::unbounded_channel();
+    let (action_tx, _) = mpsc::unbounded_channel();
+    global::initialize(event_tx, action_tx);
+
+    let mut component: Box<dyn Component> = match args.command {
         Some(Commands::CodeHighlight) => {
             let app = CodeHighlight::try_new(
                 indoc! {"
@@ -72,8 +81,18 @@ async fn main() -> Result<()> {
             .whatever_context("failed to new CodeHighlight")?;
             Box::new(app)
         }
+        Some(Commands::Session { path }) => {
+            let content = tokio::fs::read_to_string(path)
+                .await
+                .whatever_context("failed to read text file")?;
+            let s: Session =
+                serde_json::from_str(&content).whatever_context("failed to deserialize json")?;
+            let (type_id, s): (String, Session) = session::load_related(s)?;
+            session::load_component(&type_id, s)?
+        }
         None => Box::new(Chat::new(config)),
     };
+
     let backend = CrosstermBackend::new(stderr());
     let mut terminal = Terminal::new(backend).whatever_context("failed to new terminal")?;
     let mut event_stream = EventStream::new();
@@ -84,7 +103,7 @@ async fn main() -> Result<()> {
 
     terminal
         .draw(|frame| {
-            app.draw(frame, frame.area()).expect("failed to draw");
+            component.draw(frame, frame.area()).expect("failed to draw");
         })
         .whatever_context("failed to draw")?;
 

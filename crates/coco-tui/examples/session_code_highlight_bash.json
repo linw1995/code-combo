@@ -1,0 +1,7 @@
+{
+    "t": "code_highlight",
+    "y": {
+        "source": "echo \"hello world\"",
+        "lang": "Bash"
+    }
+}
