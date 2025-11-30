@@ -22,7 +22,7 @@ use super::{
     Event, Input, Message, Messages, Plain, Tool, ToolAction, shortcuts_desc,
 };
 use crate::{
-    components::Persistable,
+    components::{Command, CommandPalette, Persistable},
     error::*,
     global::{self, State},
     session::{self, Session},
@@ -35,6 +35,7 @@ pub struct Chat<'a> {
 
     agent: Agent,
 
+    command_palette: CommandPalette,
     input: Input<'a>,
     messages: Messages,
     indicator: ThrobberState,
@@ -71,6 +72,7 @@ enum Focus {
     Input,
     InputBlur,
     Messages,
+    CommandPalette,
 }
 
 impl Chat<'static> {
@@ -78,6 +80,16 @@ impl Chat<'static> {
         Self {
             state: State::default(),
             agent: Agent::new(config),
+            command_palette: CommandPalette::new(&[
+                Command {
+                    name: "New Session".to_string(),
+                    shortcut: Some("<C-n>".to_string()),
+                },
+                Command {
+                    name: "Switch Session".to_string(),
+                    shortcut: Some("<C-s>".to_string()),
+                },
+            ]),
             input: Input::default(),
             messages: Messages::default(),
             indicator: ThrobberState::default(),
@@ -162,6 +174,7 @@ impl Chat<'static> {
                 .title_bottom(shortcuts_desc(&[("Submit", "CR")])),
             Focus::InputBlur => block
                 .title_bottom(shortcuts_desc(&[("Focus", "CR")]))
+                .title_bottom(shortcuts_desc(&[("Commands", "C-p")]))
                 .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")])),
             Focus::Messages => {
                 block = self.messages.block_with_shortcuts_desc(block);
@@ -170,6 +183,7 @@ impl Chat<'static> {
                     .title_bottom(shortcuts_desc(&[("Scroll Up", "C-y"), ("Down", "C-e")]))
                     .title_bottom(shortcuts_desc(&[("Scroll+ Up", "C-u"), ("Down", "C-d")]))
             }
+            Focus::CommandPalette => block,
         }
     }
 
@@ -326,8 +340,9 @@ impl Component for Chat<'static> {
         let focus = &self.state.focus;
         match (focus, key.modifiers, key.code) {
             // Focus switching
-            (Input, KM::NONE, Esc) => self.update_focus(Focus::InputBlur),
-            (InputBlur, KM::NONE, Enter) => self.update_focus(Focus::Input),
+            (Input, KM::NONE, Esc) => self.update_focus(InputBlur),
+            (InputBlur, KM::NONE, Enter) => self.update_focus(Input),
+            (InputBlur, KM::CONTROL, Char('p')) => self.update_focus(CommandPalette),
             (Messages, KM::NONE, Esc) if !self.messages.is_actionable() => {
                 self.messages.blur();
                 self.update_focus(Focus::InputBlur);
@@ -370,6 +385,8 @@ impl Component for Chat<'static> {
 
             // Handle actionable messages
             (Messages, _, _) => self.messages.handle_key_event(key),
+            (CommandPalette, KM::NONE, Esc) => self.update_focus(InputBlur),
+            (CommandPalette, _, _) => self.command_palette.handle_key_event(key),
 
             (InputBlur, _, _) => {
                 warn!(?key, ?focus, "unknown key event");
@@ -468,7 +485,14 @@ impl Component for Chat<'static> {
                 .title_bottom(self.widget_state_indicator()),
             bottom,
         );
-        self.input.draw(frame, area_input)
+        self.input.draw(frame, area_input)?;
+
+        if self.state.focus == Focus::CommandPalette {
+            // popup floating window
+            self.command_palette.draw(frame, area)?;
+        }
+
+        Ok(())
     }
 }
 

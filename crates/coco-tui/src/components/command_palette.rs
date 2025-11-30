@@ -154,7 +154,7 @@ impl Component for CommandPalette {
                 unimplemented!()
             }
             (KM::NONE, Esc) => {
-                unimplemented!()
+                unreachable!("Esc key should be handled by the parent component")
             }
             _ => (),
         }
