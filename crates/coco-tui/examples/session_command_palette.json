@@ -1,0 +1,16 @@
+{
+    "t": "command_palette",
+    "y": {
+        "commands": [
+            {
+                "name": "New Session",
+                "shortcut": "<C-n>"
+            },
+            {
+                "name": "Switch Session",
+                "shortcut": "<C-s>"
+            }
+        ],
+        "focus": 0
+    }
+}

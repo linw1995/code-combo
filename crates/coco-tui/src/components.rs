@@ -49,12 +49,14 @@ macro_rules! handle_component_event {
 
 mod chat;
 mod code_highlight;
+mod command_palette;
 mod input;
 mod message;
 mod messages;
 
 pub use chat::Chat;
 pub use code_highlight::CodeHighlight;
+pub use command_palette::*;
 pub use input::Input;
 pub use message::*;
 pub use messages::*;

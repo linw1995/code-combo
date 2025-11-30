@@ -72,6 +72,10 @@ impl App {
         })
     }
 
+    pub fn set_root(&mut self, component: Box<dyn Component>) {
+        self.root = component
+    }
+
     pub fn send_action(&self, action: Action) {
         self.action_tx.send(action).unwrap()
     }
