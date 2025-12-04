@@ -91,7 +91,7 @@ impl Component for Plain {
             };
             self.widget = widget;
             self.rx = None;
-            global::signal_ditry();
+            global::signal_dirty();
             trace!("replaced inner widget of Plain Message");
         }
     }

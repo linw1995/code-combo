@@ -73,7 +73,7 @@ impl Component for Input<'static> {
         let cursor = self.textarea.cursor();
         // Signal dirty if text changed or cursor position changed
         if self.textarea.input(key.to_owned()) || self.textarea.cursor() != cursor {
-            global::signal_ditry();
+            global::signal_dirty();
         }
     }
 

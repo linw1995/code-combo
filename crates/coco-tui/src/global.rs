@@ -112,7 +112,7 @@ pub fn workspace_dir() -> &'static Path {
 /// This function sends a `Dirty` event to trigger a re-render of the UI.
 /// It's typically called automatically when state is modified through a `WriteGuard`.
 #[inline]
-pub fn signal_ditry() {
+pub fn signal_dirty() {
     event_tx().send(Event::Dirty).ok();
 }
 
@@ -184,7 +184,7 @@ pub struct WriteGuard<T> {
 
 impl<T> Drop for WriteGuard<T> {
     fn drop(&mut self) {
-        signal_ditry();
+        signal_dirty();
     }
 }
 

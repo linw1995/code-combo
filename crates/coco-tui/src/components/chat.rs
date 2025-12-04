@@ -268,7 +268,7 @@ impl Component for Chat<'static> {
             ChatState::Procesing | ChatState::ComboDiscovering
         ) {
             self.indicator.calc_next();
-            global::signal_ditry();
+            global::signal_dirty();
         }
     }
 
