@@ -4,7 +4,9 @@ use snafu::prelude::*;
 
 use crate::error::Result;
 
+mod fs;
 mod registries;
+pub use fs::*;
 pub use registries::*;
 
 /// A serialized session state that can be saved and restored.

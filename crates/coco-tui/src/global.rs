@@ -1,5 +1,7 @@
 use std::{
+    env,
     ops::{Deref, DerefMut},
+    path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
 
@@ -14,6 +16,7 @@ use crate::{
 
 static EVENT_TX: OnceLock<UnboundedSender<Event>> = OnceLock::new();
 static ACTION_TX: OnceLock<UnboundedSender<Action>> = OnceLock::new();
+static WORKSPACE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Initialize the global event and action senders.
 ///
@@ -70,6 +73,38 @@ pub async fn set_config(config: code_combo::Config) {
 pub fn theme() -> &'static FinalizedTheme {
     let config = config_sync();
     use_builtin_theme(&config.ui.theme)
+}
+
+/// Returns the workspace directory by walking up from the current directory
+/// until a `.git` directory is found. If no `.git` directory is found,
+/// falls back to the current directory.
+///
+/// The result is cached globally after the first call.
+pub fn workspace_dir() -> &'static Path {
+    WORKSPACE_DIR.get_or_init(|| {
+        // Start from current directory
+        let current_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+        // Walk up the directory tree to find a .git directory
+        let mut dir = current_dir.clone();
+        loop {
+            let git_dir = dir.join(".git");
+            if git_dir.exists() && git_dir.is_dir() {
+                return dir;
+            }
+
+            // Move to parent directory
+            if let Some(parent) = dir.parent() {
+                dir = parent.to_path_buf();
+            } else {
+                // Reached root, use current directory
+                break;
+            }
+        }
+
+        // Fallback to current directory
+        current_dir
+    })
 }
 
 /// Signal dirty for re-rendering.
