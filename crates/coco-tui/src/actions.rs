@@ -1,4 +1,5 @@
 use code_combo::{TextEdit, ToolUse};
+use tokio::time::Instant;
 
 #[derive(Debug, Clone)]
 pub enum Action {
@@ -7,9 +8,27 @@ pub enum Action {
 
     Combo(ComboAction),
     Tool(ToolAction),
+    Session(SessionAction),
 
     Blur,
     Focus,
+}
+
+const SAVE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl Action {
+    /// Create a Session action with schedule save
+    pub fn schedule_session_save() -> Self {
+        SessionAction::ScheduleSave {
+            save_at: Instant::now() + SAVE_DELAY,
+        }
+        .into()
+    }
+
+    /// Create a Session action with immediate save
+    pub fn save_session_now() -> Self {
+        SessionAction::SaveNow.into()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -41,5 +60,17 @@ pub enum ToolAction {
 impl From<ToolAction> for Action {
     fn from(value: ToolAction) -> Self {
         Self::Tool(value)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum SessionAction {
+    ScheduleSave { save_at: Instant },
+    SaveNow,
+}
+
+impl From<SessionAction> for Action {
+    fn from(value: SessionAction) -> Self {
+        Self::Session(value)
     }
 }

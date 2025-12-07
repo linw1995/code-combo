@@ -15,11 +15,14 @@ use ratatui::{
 
 use serde::{Deserialize, Serialize};
 use throbber_widgets_tui::{Throbber, ThrobberState};
+use time::OffsetDateTime;
+use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use super::{
     Action, AnswerEvent, AskEvent, BotMessage, Combo, ComboAction, ComboEvent, Component, Content,
-    Event, Input, Message, Messages, Plain, Tool, ToolAction, shortcuts_desc,
+    Event, Input, Message, Messages, Plain, SessionAction, Tool, ToolAction, shortcuts_desc,
 };
 use crate::{
     components::{Command, CommandPalette, Persistable},
@@ -39,13 +42,38 @@ pub struct Chat<'a> {
     input: Input<'a>,
     messages: Messages,
     indicator: ThrobberState,
+
+    token_schedule_session_save: Option<CancellationToken>,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct Inner {
     state: ChatState,
     focus: Focus,
     pending_chats: Vec<ChatBlock>,
+    #[serde(with = "time::serde::rfc3339")]
+    created_at: time::OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    updated_at: time::OffsetDateTime,
+    name: String,
+}
+
+impl Default for Inner {
+    fn default() -> Self {
+        let now = time::OffsetDateTime::now_utc();
+        Self {
+            state: ChatState::Ready,
+            focus: Focus::Input,
+            pending_chats: Vec::new(),
+            created_at: now,
+            updated_at: now,
+            name: format!(
+                "Session {}",
+                now.format(&time::format_description::well_known::Rfc3339)
+                    .expect("failed to format current time")
+            ),
+        }
+    }
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
@@ -93,7 +121,54 @@ impl Chat<'static> {
             input: Input::default(),
             messages: Messages::default(),
             indicator: ThrobberState::default(),
+            token_schedule_session_save: None,
         }
+    }
+
+    fn trigger_save(&mut self, save_at: Instant) {
+        // Cancel existing timer if any
+        if let Some(token) = self.token_schedule_session_save.take() {
+            token.cancel();
+        }
+
+        let token = CancellationToken::new();
+        self.token_schedule_session_save = Some(token.clone());
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = token.cancelled() => (),
+                _ = tokio::time::sleep_until(save_at) => {
+                    global::action_tx().send(Action::save_session_now()).unwrap();
+                }
+            }
+        });
+    }
+
+    fn save_now(&self) {
+        let session_dir = std::path::Path::new(".coco/sessions");
+        let session = self.save();
+        let name = self.state.name.clone();
+        let created_at = self.state.created_at;
+
+        tokio::spawn(async move {
+            if let Err(e) = tokio::fs::create_dir_all(session_dir).await {
+                warn!(?e, "failed to create session directory");
+                return;
+            }
+
+            let now = time::OffsetDateTime::now_utc();
+            let persistent_session = crate::session::PersistentSession {
+                name,
+                inner: session,
+                created_at,
+                updated_at: now,
+            };
+
+            if let Err(e) = crate::session::save_session(session_dir, persistent_session).await {
+                warn!(?e, "failed to save session");
+            } else {
+                debug!("Session saved successfully");
+            }
+        });
     }
 
     fn handle_combo_event(&mut self, event: &ComboEvent) {
@@ -294,6 +369,8 @@ impl Component for Chat<'static> {
                         BotMessage::ToolUse(tool_use) => Tool::new(tool_use.to_owned()).into(),
                     })
                 }));
+                // Trigger session save after receiving bot response
+                global::trigger_schedule_session_save();
             }
             Event::Ask(AskEvent::ToolUsePermission(_) | AskEvent::TextEdit { .. }) => {
                 if let Some(idx) = self.messages.on_tool_event(event) {
@@ -301,6 +378,8 @@ impl Component for Chat<'static> {
                     self.update_focus(Focus::Messages);
                     self.messages.focus(idx);
                 }
+                // Trigger session save after ask event
+                global::trigger_schedule_session_save();
             }
             Event::Answer(AnswerEvent::ToolResult {
                 id,
@@ -324,6 +403,8 @@ impl Component for Chat<'static> {
                 }]);
                 let content = self.build_user_content(content);
                 tokio::task::spawn(task_chat(self.agent.clone(), content));
+                // Trigger session save after tool result
+                global::trigger_schedule_session_save();
             }
             _ => {
                 // Handle other kinds of events by default
@@ -426,6 +507,8 @@ impl Component for Chat<'static> {
                             is_error: Some(true),
                             content: code_combo::Content::Text("User cancelled".to_string()),
                         });
+                    // Trigger session save after tool cancellation
+                    global::trigger_schedule_session_save();
                 }
                 ToolAction::ApplyTextEdit {
                     id,
@@ -452,8 +535,19 @@ impl Component for Chat<'static> {
                             *hunk_idx,
                         ));
                     }
+                    // Trigger session save after text edit operation
+                    global::trigger_schedule_session_save();
                 }
             },
+            Action::Session(SessionAction::SaveNow) => {
+                // Immediate save
+                self.save_now();
+            }
+            Action::Session(SessionAction::ScheduleSave { save_at }) => {
+                // Schedule a debounced save
+                self.state.write_untracked().updated_at = OffsetDateTime::now_utc();
+                self.trigger_save(save_at.to_owned());
+            }
             _ => (),
         }
     }

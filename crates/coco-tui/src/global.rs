@@ -107,6 +107,11 @@ pub fn workspace_dir() -> &'static Path {
     })
 }
 
+#[inline]
+pub fn trigger_schedule_session_save() {
+    action_tx().send(Action::schedule_session_save()).ok();
+}
+
 /// Signal dirty for re-rendering.
 ///
 /// This function sends a `Dirty` event to trigger a re-render of the UI.
