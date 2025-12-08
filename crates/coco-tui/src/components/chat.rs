@@ -103,6 +103,8 @@ enum Focus {
     CommandPalette,
 }
 
+const COMMAND_NEW_SESSION: &str = "New Session";
+
 impl Chat<'static> {
     pub fn new(config: Config) -> Self {
         Self {
@@ -110,13 +112,10 @@ impl Chat<'static> {
             agent: Agent::new(config),
             command_palette: CommandPalette::new(&[
                 Command {
-                    name: "New Session".to_string(),
+                    name: COMMAND_NEW_SESSION.to_string(),
                     shortcut: Some("<C-n>".to_string()),
                 },
-                Command {
-                    name: "Switch Session".to_string(),
-                    shortcut: Some("<C-s>".to_string()),
-                },
+                // TODO: Switch Session
             ]),
             input: Input::default(),
             messages: Messages::default(),
@@ -351,10 +350,41 @@ impl Chat<'static> {
                 });
         }
     }
+
+    /// Handle the "New Session" command
+    /// Optionally saves the current session before clearing
+    fn new_session(&mut self) {
+        // 1. Save current session if there are messages
+        if !self.messages.is_empty() {
+            // TODO: maybe don't save if being in processing state
+            self.save_now();
+        }
+
+        // 2. Clear messages
+        self.messages.clear();
+
+        // 3. Reset state
+        *self.state.write() = Inner {
+            focus: Focus::InputBlur,
+            ..Default::default()
+        };
+
+        // 4. Reset focus to Input from InputBlur to trigger the input component
+        self.update_focus(Focus::Input);
+
+        // 5. Cancel any pending save timer
+        if let Some(token) = self.token_schedule_session_save.take() {
+            token.cancel();
+        }
+
+        debug!("New session started");
+        global::signal_dirty();
+    }
 }
 
 impl Persistable for Chat<'static> {
     fn save(&self) -> Session {
+        // FIXME: Save LLM messages from self.agent
         session::save_related(&self.state, self.messages.save())
     }
 
@@ -597,6 +627,20 @@ impl Component for Chat<'static> {
                     }
                     Err(e) => {
                         warn!(?e, "failed to restore session");
+                    }
+                }
+            }
+            Action::Command(name) => {
+                // Close command palette
+                self.update_focus(Focus::InputBlur);
+
+                // Handle command
+                match name.as_str() {
+                    COMMAND_NEW_SESSION => {
+                        self.new_session();
+                    }
+                    unknown => {
+                        warn!(?unknown, "unknown command");
                     }
                 }
             }

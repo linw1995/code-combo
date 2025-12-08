@@ -11,6 +11,7 @@ pub enum Action {
     Combo(ComboAction),
     Tool(ToolAction),
     Session(SessionAction),
+    Command(String),
 
     Blur,
     Focus,

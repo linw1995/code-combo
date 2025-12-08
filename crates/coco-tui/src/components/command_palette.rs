@@ -13,6 +13,7 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    actions::Action,
     components::{Component, Persistable, shortcuts_desc},
     error::Result,
     global::{self, State},
@@ -73,6 +74,13 @@ impl CommandPalette {
         } else {
             false
         }
+    }
+
+    /// Returns the currently focused command, if any
+    fn selected_command(&self) -> Option<&Command> {
+        self.state
+            .focus
+            .and_then(|idx| self.state.commands.get(idx))
     }
 
     pub fn draw_commands(&self, frame: &mut Frame, area: Rect) -> Result<()> {
@@ -151,7 +159,11 @@ impl Component for CommandPalette {
                 self.select_next();
             }
             (KM::NONE, Enter) => {
-                unimplemented!()
+                if let Some(command) = self.selected_command() {
+                    global::action_tx()
+                        .send(Action::Command(command.name.clone()))
+                        .unwrap();
+                }
             }
             (KM::NONE, Esc) => {
                 unreachable!("Esc key should be handled by the parent component")

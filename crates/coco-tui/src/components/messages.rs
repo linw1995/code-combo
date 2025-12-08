@@ -51,6 +51,19 @@ impl Messages {
         self.messages.write().push(message);
     }
 
+    /// Clear all messages
+    pub fn clear(&mut self) {
+        self.messages.write().clear();
+        *self.focus.write() = None;
+        *self.offset.write() = 0;
+        self.total_height = 0;
+    }
+
+    /// Check if there are no messages
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+
     fn new_scrollstate(&self) -> ScrollbarState {
         // N is the viewport sliding range on the whole content.
         // It has double end, so we need to add 1 to fit with position design.
