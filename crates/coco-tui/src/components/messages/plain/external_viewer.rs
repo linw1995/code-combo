@@ -2,11 +2,7 @@ use std::process::Stdio;
 
 use ansi_to_tui::IntoText;
 use coco_macro::{ComponentExt, ContentComponentExt};
-use ratatui::{
-    Frame,
-    layout::Rect,
-    widgets::{Paragraph, Wrap},
-};
+use ratatui::{Frame, layout::Rect, widgets::Wrap};
 use snafu::prelude::*;
 use tokio::io::AsyncWriteExt;
 
@@ -14,6 +10,7 @@ use crate::{
     components::{Component, Content, ContentComponent, Persistable},
     error::*,
     session::Session,
+    widgets::Paragraph,
 };
 
 #[derive(ComponentExt, ContentComponentExt)]
@@ -49,7 +46,7 @@ impl<'a> ExternalMarkdownViewer<'a> {
             .stdout
             .into_text()
             .whatever_context("failed to convert the external markdown viewer result")?;
-        let widget = Paragraph::new(text).wrap(Wrap { trim: false });
+        let widget = Paragraph::new_wrap(text, Wrap { trim: false });
         Ok(Self { widget })
     }
 }

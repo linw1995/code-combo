@@ -4,13 +4,7 @@ use code_combo::{
     tools::{Final, STR_REPLACE_TOOL_NAME},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{
-    Frame,
-    prelude::Rect,
-    style::Stylize,
-    text::Text,
-    widgets::{Block, Paragraph},
-};
+use ratatui::{Frame, prelude::Rect, style::Stylize, text::Text, widgets::Block};
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
 use tracing::warn;
@@ -23,6 +17,7 @@ use crate::{
     events::{AnswerEvent, AskEvent, Event},
     global::{self, State},
     session::{self, Session},
+    widgets::Paragraph,
 };
 
 #[derive(Serialize, Deserialize)]

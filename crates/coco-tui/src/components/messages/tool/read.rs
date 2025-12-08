@@ -10,7 +10,7 @@ use ratatui::{
     prelude::Rect,
     style::Stylize,
     text::{Line, Span, Text},
-    widgets::{Block, Paragraph, Wrap},
+    widgets::{Block, Wrap},
 };
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +20,7 @@ use crate::{
     events::{AnswerEvent, Event},
     global::State,
     session::{self, Session},
+    widgets::Paragraph,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -67,11 +68,11 @@ fn generate_input_widget<'a>(input: ReadInput) -> Paragraph<'a> {
         ]));
     }
 
-    Paragraph::new(lines).wrap(Wrap { trim: false })
+    Paragraph::new_wrap(lines, Wrap { trim: false })
 }
 
 fn generate_output_widget<'a>(output: String) -> Paragraph<'a> {
-    Paragraph::new(Text::from(output)).wrap(Wrap { trim: false })
+    Paragraph::new_wrap(Text::from(output), Wrap { trim: false })
 }
 
 impl Read<'_> {

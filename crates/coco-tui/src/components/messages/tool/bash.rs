@@ -12,7 +12,7 @@ use ratatui::{
     prelude::Rect,
     style::Stylize,
     text::{Line, Span},
-    widgets::{Block, Paragraph, Wrap},
+    widgets::{Block, Wrap},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -27,6 +27,7 @@ use crate::{
     events::{AnswerEvent, AskEvent, Event},
     global::{self, State},
     session::{self, Session},
+    widgets::Paragraph,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -51,12 +52,7 @@ fn generate_output<'a>(output: Option<BashOutput>) -> Paragraph<'a> {
         .map(|output| (output.stderr, output.stdout))
         .unwrap_or_default();
 
-    // '\t' rendering doesn't work well in ratatui.
-    // It causes the screen to retain the previous render result in the area of `\t` during scrolling.
-    for (prompt, output) in [
-        ("2> ".red(), &stderr.replace("\t", "  ")),
-        ("1> ".blue(), &stdout.replace("\t", "  ")),
-    ] {
+    for (prompt, output) in [("2> ".red(), &stderr), ("1> ".blue(), &stdout)] {
         if output.is_empty() {
             continue;
         }
@@ -66,7 +62,7 @@ fn generate_output<'a>(output: Option<BashOutput>) -> Paragraph<'a> {
             lines.push(Line::from(line));
         }
     }
-    Paragraph::new(lines).wrap(Wrap { trim: false })
+    Paragraph::new_wrap(lines, Wrap { trim: false })
 }
 
 fn generate_input<'b>(tool_use: &ToolUse) -> CodeHighlight<'b> {

@@ -3,6 +3,7 @@ pub mod app;
 pub mod error;
 pub mod global;
 pub mod session;
+pub mod widgets;
 #[macro_use]
 pub mod components;
 pub mod events;

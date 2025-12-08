@@ -12,7 +12,8 @@
             "fg": "blue",
             "add_modifier": "BOLD|ITALIC"
         },
-        "shortcut_desc": "overlay0"
+        "shortcut_desc": "overlay0",
+        "tab_spaces": "overlay0"
     },
     "tree_sitter": {
         "string": "green",
