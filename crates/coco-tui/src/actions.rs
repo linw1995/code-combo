@@ -1,6 +1,8 @@
 use code_combo::{TextEdit, ToolUse};
 use tokio::time::Instant;
 
+use crate::session::Session;
+
 #[derive(Debug, Clone)]
 pub enum Action {
     Quit,
@@ -28,6 +30,16 @@ impl Action {
     /// Create a Session action with immediate save
     pub fn save_session_now() -> Self {
         SessionAction::SaveNow.into()
+    }
+
+    /// Restore last Session
+    pub fn restore_last_session() -> Self {
+        SessionAction::RestoreLastSession.into()
+    }
+
+    /// Restore a Session
+    pub fn restore_session(s: Session) -> Self {
+        SessionAction::RestoreSession(s).into()
     }
 }
 
@@ -67,6 +79,8 @@ impl From<ToolAction> for Action {
 pub enum SessionAction {
     ScheduleSave { save_at: Instant },
     SaveNow,
+    RestoreLastSession,
+    RestoreSession(Session),
 }
 
 impl From<SessionAction> for Action {

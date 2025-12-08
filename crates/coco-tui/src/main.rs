@@ -4,7 +4,13 @@ use clap::{Parser, Subcommand};
 use code_combo::{Config, default_config_dir};
 use snafu::prelude::*;
 
-use coco_tui::{actions::ComboAction, app, error::Result, global};
+use coco_tui::{
+    actions::{Action, ComboAction},
+    app,
+    error::Result,
+    global,
+};
+use tracing::info;
 
 /// Code Combo
 #[derive(Parser)]
@@ -17,6 +23,10 @@ struct Args {
     /// Config file dir
     #[arg(long, default_value_t = default_config_dir().to_string_lossy().to_string())]
     config_dir: String,
+
+    /// Restore the last session
+    #[arg(short = 'r', long)]
+    restore: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -57,7 +67,12 @@ async fn main() -> Result<()> {
                 app.send_action(ComboAction::Execute { name }.into());
             }
         },
-        None => {}
+        None => {
+            if args.restore {
+                info!("restoring last session");
+                app.send_action(Action::restore_last_session());
+            }
+        }
     }
 
     let result = app.run().await;

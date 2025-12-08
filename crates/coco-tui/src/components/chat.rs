@@ -171,6 +171,42 @@ impl Chat<'static> {
         });
     }
 
+    fn restore_last_session(&mut self) {
+        let session_dir = std::path::Path::new(".coco/sessions").to_path_buf();
+
+        tokio::spawn(async move {
+            match crate::session::list_session(&session_dir).await {
+                Ok(mut sessions) => {
+                    if sessions.is_empty() {
+                        debug!("No sessions to restore");
+                        return;
+                    }
+
+                    // Sort by updated_at descending to get the most recent session
+                    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+
+                    let last_session = &sessions[0];
+                    let filename = last_session.filename();
+
+                    match crate::session::load_session(&session_dir, &filename).await {
+                        Ok(persistent_session) => {
+                            global::action_tx()
+                                .send(Action::restore_session(persistent_session.inner))
+                                .unwrap();
+                            debug!(name = %persistent_session.name, "Session restore requested");
+                        }
+                        Err(e) => {
+                            warn!(?e, "failed to load session");
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(?e, "failed to list sessions");
+                }
+            }
+        });
+    }
+
     fn handle_combo_event(&mut self, event: &ComboEvent) {
         debug!(?event, "receive combo event");
         match event {
@@ -547,6 +583,22 @@ impl Component for Chat<'static> {
                 // Schedule a debounced save
                 self.state.write_untracked().updated_at = OffsetDateTime::now_utc();
                 self.trigger_save(save_at.to_owned());
+            }
+            Action::Session(SessionAction::RestoreLastSession) => {
+                self.restore_last_session();
+            }
+            Action::Session(SessionAction::RestoreSession(session)) => {
+                match Self::load(session.clone()) {
+                    Ok(restored) => {
+                        self.state = restored.state;
+                        self.messages = restored.messages;
+                        debug!(name = %self.state.name, "Session restored");
+                        global::signal_dirty();
+                    }
+                    Err(e) => {
+                        warn!(?e, "failed to restore session");
+                    }
+                }
             }
             _ => (),
         }

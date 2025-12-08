@@ -84,14 +84,18 @@ pub async fn list_session(session_dir: &Path) -> Result<Vec<PersistentSessionMet
         }
 
         if let Some(extension) = file_path.extension().and_then(|e| e.to_str()) {
-            if extension != "metadata" {
+            if extension != "json" {
                 continue;
             }
+
             let file_name = file_path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or_default()
                 .to_string();
+            if !file_name.contains("metadata") {
+                continue;
+            }
 
             if let Some(file_path_str) = file_path.to_str() {
                 match load_session_metadata(session_dir, &file_name).await {
