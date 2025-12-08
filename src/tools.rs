@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 macro_rules! err_msg {
@@ -61,7 +62,7 @@ impl From<TextEdit> for Output {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Final {
     Json(Value),
     Message(String),

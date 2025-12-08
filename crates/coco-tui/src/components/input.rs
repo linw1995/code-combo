@@ -1,9 +1,17 @@
+use coco_macro::ComponentExt;
 use crossterm::event::KeyEvent;
 use ratatui::{Frame, prelude::*};
 
 use super::{Action, Component};
-use crate::{error::*, global};
+use crate::{
+    components::Persistable,
+    error::*,
+    global,
+    session::{self, Session},
+};
 
+#[derive(ComponentExt)]
+#[component(type_id = "input")]
 pub struct Input<'a> {
     pub textarea: tui_textarea::TextArea<'a>,
     pub cursor_style: Style,
@@ -33,7 +41,22 @@ impl Input<'_> {
     }
 }
 
-impl Component for Input<'_> {
+impl Persistable for Input<'static> {
+    fn save(&self) -> Session {
+        session::save(self.textarea.lines().join("\n"))
+    }
+
+    fn load(session: Session) -> Result<Self> {
+        let text: String = session::load(session)?;
+        let mut inst = Self::default();
+        inst.textarea.set_yank_text(text);
+        inst.textarea.paste();
+        inst.textarea.set_yank_text("");
+        Ok(inst)
+    }
+}
+
+impl Component for Input<'static> {
     fn update(&mut self, action: &Action) {
         match action {
             Action::Blur => {
@@ -50,7 +73,7 @@ impl Component for Input<'_> {
         let cursor = self.textarea.cursor();
         // Signal dirty if text changed or cursor position changed
         if self.textarea.input(key.to_owned()) || self.textarea.cursor() != cursor {
-            global::signal_ditry();
+            global::signal_dirty();
         }
     }
 

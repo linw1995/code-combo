@@ -1,20 +1,15 @@
-use std::{io::stderr, path::PathBuf};
+use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use coco_tui::{
+    app,
     components::{Chat, CodeHighlight, Component},
     error::Result,
     global,
+    session::{self, Session},
 };
 use code_combo::{Config, default_config_dir};
-use crossterm::{
-    cursor,
-    event::{EventStream, KeyCode, KeyModifiers},
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen},
-};
-use futures::{FutureExt, StreamExt};
 use indoc::indoc;
-use ratatui::{Terminal, prelude::CrosstermBackend};
 use snafu::prelude::*;
 
 /// Code Combo
@@ -36,6 +31,8 @@ struct Args {
 #[derive(Subcommand)]
 enum Commands {
     CodeHighlight,
+
+    Session { path: String },
 }
 
 #[snafu::report]
@@ -55,7 +52,8 @@ async fn main() -> Result<()> {
     config.config_dir = config_dir;
     global::set_config(config.clone()).await;
 
-    let mut app: Box<dyn Component> = match args.command {
+    let mut app = app::App::new(config.clone())?;
+    let component: Box<dyn Component> = match args.command {
         Some(Commands::CodeHighlight) => {
             let app = CodeHighlight::try_new(
                 indoc! {"
@@ -72,42 +70,22 @@ async fn main() -> Result<()> {
             .whatever_context("failed to new CodeHighlight")?;
             Box::new(app)
         }
+        Some(Commands::Session { path }) => {
+            let content = tokio::fs::read_to_string(path)
+                .await
+                .whatever_context("failed to read text file")?;
+            let s: Session =
+                serde_json::from_str(&content).whatever_context("failed to deserialize json")?;
+            let (type_id, s): (String, Session) = session::load_related(s)?;
+            session::load_component(&type_id, s)?
+        }
         None => Box::new(Chat::new(config)),
     };
-    let backend = CrosstermBackend::new(stderr());
-    let mut terminal = Terminal::new(backend).whatever_context("failed to new terminal")?;
-    let mut event_stream = EventStream::new();
+    app.set_root(component);
 
-    crossterm::terminal::enable_raw_mode().whatever_context("failed to enable raw mode")?;
-    crossterm::execute!(stderr(), EnterAlternateScreen, cursor::Hide)
-        .whatever_context("failed to enter alter screen")?;
+    let result = app.run().await;
 
-    terminal
-        .draw(|frame| {
-            app.draw(frame, frame.area()).expect("failed to draw");
-        })
-        .whatever_context("failed to draw")?;
+    ratatui::restore();
 
-    loop {
-        let crossterm_event = event_stream.next().fuse().await;
-        if let Some(Ok(crossterm::event::Event::Key(key))) = crossterm_event
-            && key.code == KeyCode::Char('c')
-            && key.modifiers == KeyModifiers::CONTROL
-        {
-            break;
-        }
-    }
-
-    if crossterm::terminal::is_raw_mode_enabled()
-        .whatever_context("failed to check raw mode enabled")?
-    {
-        terminal
-            .flush()
-            .whatever_context("failed to flush terminal")?;
-        crossterm::execute!(stderr(), LeaveAlternateScreen, cursor::Show)
-            .whatever_context("faile to leave alter screen")?;
-        crossterm::terminal::disable_raw_mode().whatever_context("failed to disable raw mode")?;
-    }
-
-    Ok(())
+    result
 }

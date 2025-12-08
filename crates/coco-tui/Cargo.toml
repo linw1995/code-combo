@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 # Core
 code-combo = { path = "../.." }
+coco-macro = { path = "../coco-macro/" }
 
 # CLI
 clap = "4.5.49"
@@ -49,9 +50,16 @@ serde_json.workspace = true
 bon.workspace = true
 
 # Others
+ctor.workspace = true
 lazy_static.workspace = true
 bitflags = "2.10.0"
 indoc.workspace = true
+time = { version = "0.3.44", features = [
+  "macros",
+  "serde",
+  "local-offset",
+  "formatting",
+  "parsing",
+] }
 
 [dev-dependencies]
-ctor.workspace = true

@@ -4,7 +4,9 @@ use std::{
     sync::Arc,
 };
 
-#[derive(Default, Clone)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Default, Clone, Serialize, Deserialize)]
 pub struct TextEdit {
     pub path: PathBuf,
     pub origin: Arc<String>,

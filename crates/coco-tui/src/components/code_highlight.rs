@@ -1,3 +1,4 @@
+use coco_macro::{ComponentExt, ContentComponentExt};
 use code_highlight::{Event, Lang, highlight};
 use ratatui::{
     Frame,
@@ -6,13 +7,28 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Paragraph, Wrap},
 };
+use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use tracing::trace;
 
 use super::{Component, Content, ContentComponent};
-use crate::{error::*, global};
+use crate::{
+    components::Persistable,
+    error::Result,
+    global,
+    session::{self, Session},
+};
 
+#[derive(Debug, Serialize, Deserialize)]
+struct State {
+    source: String,
+    lang: Lang,
+}
+
+#[derive(ComponentExt, ContentComponentExt)]
+#[component(type_id = "code_highlight")]
 pub struct CodeHighlight<'a> {
+    state: State,
     widget: Paragraph<'a>,
 }
 
@@ -66,11 +82,28 @@ impl<'a> CodeHighlight<'a> {
             lines.into_iter().map(Line::from).collect::<Vec<_>>(),
         ))
         .wrap(Wrap { trim: false });
-        Ok(Self { widget })
+        Ok(Self {
+            state: State {
+                source: source.to_string(),
+                lang,
+            },
+            widget,
+        })
     }
 }
 
-impl<'a> Component for CodeHighlight<'a> {
+impl Persistable for CodeHighlight<'static> {
+    fn save(&self) -> Session {
+        session::save(&self.state)
+    }
+
+    fn load(session: Session) -> Result<Self> {
+        let state: State = session::load(session)?;
+        Self::try_new(&state.source, state.lang)
+    }
+}
+
+impl Component for CodeHighlight<'static> {
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         frame.render_widget(&self.widget, area);
         Ok(())

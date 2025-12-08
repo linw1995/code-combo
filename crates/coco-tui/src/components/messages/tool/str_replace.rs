@@ -1,3 +1,4 @@
+use coco_macro::{ComponentExt, ContentComponentExt};
 use code_combo::{
     TextEdit, ToolUse,
     tools::{Final, STR_REPLACE_TOOL_NAME},
@@ -10,21 +11,31 @@ use ratatui::{
     text::Text,
     widgets::{Block, Paragraph},
 };
+use serde::{Deserialize, Serialize};
+use snafu::prelude::*;
 use tracing::warn;
 
 use super::{Component, Content, ContentComponent};
 use crate::{
     actions::{Action, ToolAction},
-    components::{code_highlight::CodeHighlight, shortcuts_desc},
-    error,
+    components::{Persistable, code_highlight::CodeHighlight, shortcuts_desc},
+    error::Result,
     events::{AnswerEvent, AskEvent, Event},
     global::{self, State},
+    session::{self, Session},
 };
 
-pub struct StrReplace<'a> {
+#[derive(Serialize, Deserialize)]
+struct Inner {
     tool_use: ToolUse,
     edit: Option<TextEdit>,
-    appliable: State<bool>,
+    appliable: bool,
+}
+
+#[derive(ComponentExt, ContentComponentExt)]
+#[component(type_id = "str_replace")]
+pub struct StrReplace<'a> {
+    state: State<Inner>,
     widget: StrReplaceWidget<'a>,
 }
 
@@ -38,9 +49,11 @@ const CONTEXT_RADIUS: usize = 3;
 impl<'a> StrReplace<'a> {
     pub fn new(tool_use: &ToolUse) -> Self {
         Self {
-            tool_use: tool_use.to_owned(),
-            edit: None,
-            appliable: State::default(),
+            state: State::new(Inner {
+                tool_use: tool_use.to_owned(),
+                edit: None,
+                appliable: false,
+            }),
             widget: StrReplaceWidget::Paragraph(Paragraph::new("")),
         }
     }
@@ -70,7 +83,9 @@ impl<'a> StrReplace<'a> {
             Err(_) => StrReplaceWidget::Paragraph(Paragraph::new(diff_text)),
         };
 
-        self.edit = Some(edit);
+        let mut state = self.state.write();
+        state.edit = Some(edit);
+        state.appliable = true;
         self.widget = widget;
     }
 }
@@ -84,11 +99,11 @@ impl Content for StrReplace<'_> {
     }
 
     fn is_actionable(&self) -> bool {
-        self.appliable.get()
+        self.state.appliable
     }
 
     fn block_with_shortcuts_desc<'b>(&self, block: Block<'b>) -> Block<'b> {
-        if self.appliable.get() {
+        if self.state.appliable {
             block
                 .title_bottom(shortcuts_desc(&[("Apply", "CR")]))
                 .title_bottom(shortcuts_desc(&[("Reject", "Esc")]))
@@ -98,15 +113,24 @@ impl Content for StrReplace<'_> {
     }
 }
 
-impl Component for StrReplace<'_> {
+impl Persistable for StrReplace<'static> {
+    fn save(&self) -> Session {
+        session::save(&self.state)
+    }
+
+    fn load(session: Session) -> Result<Self> {
+        let state: Inner = session::load(session)?;
+        let mut inst = Self::new(&state.tool_use);
+        inst.update_text_edit(state.edit.whatever_context("text edit should exist")?);
+        Ok(inst)
+    }
+}
+
+impl Component for StrReplace<'static> {
     fn handle_key_event(&mut self, key: &KeyEvent) {
-        if !self.appliable.read() {
+        if self.state.appliable && self.state.edit.is_some() {
             return;
         }
-
-        let Some(edit) = &mut self.edit else {
-            return;
-        };
 
         let is_rejecting = match (key.modifiers, key.code) {
             (KeyModifiers::NONE, KeyCode::Enter) => false,
@@ -116,13 +140,16 @@ impl Component for StrReplace<'_> {
             } // ignore
         };
 
-        *self.appliable.write() = false;
+        let Some(edit) = self.state.edit.clone() else {
+            return;
+        };
+        self.state.write().appliable = false;
 
         global::action_tx()
             .send(Action::Tool(ToolAction::ApplyTextEdit {
-                id: self.tool_use.id.clone(),
+                id: self.state.tool_use.id.clone(),
                 name: STR_REPLACE_TOOL_NAME.to_string(),
-                edit: edit.clone(),
+                edit,
                 context_radius: CONTEXT_RADIUS,
                 hunk_idx: 0,
                 is_rejecting,
@@ -134,7 +161,6 @@ impl Component for StrReplace<'_> {
         match event {
             Event::Ask(AskEvent::TextEdit { edit, .. }) => {
                 self.update_text_edit(edit.clone());
-                *self.appliable.write() = true;
             }
             Event::Answer(AnswerEvent::ToolResult {
                 is_error, output, ..
@@ -160,7 +186,7 @@ impl Component for StrReplace<'_> {
         }
     }
 
-    fn draw(&mut self, frame: &mut Frame, area: Rect) -> error::Result<()> {
+    fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         match &mut self.widget {
             StrReplaceWidget::CodeHighlight(highlight) => {
                 highlight.draw(frame, area)?;

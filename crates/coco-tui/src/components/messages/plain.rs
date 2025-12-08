@@ -1,3 +1,4 @@
+use coco_macro::{ComponentExt, ContentComponentExt};
 use code_combo::MarkdownRenderEngine;
 use ratatui::{Frame, prelude::Rect};
 use tokio::sync::oneshot;
@@ -5,9 +6,10 @@ use tracing::{trace, warn};
 
 use super::{Component, Content};
 use crate::{
-    components::{CodeHighlight, ContentComponent},
+    components::{CodeHighlight, ContentComponent, Persistable},
     error::*,
     global,
+    session::{self, Session},
 };
 
 mod external_viewer;
@@ -21,7 +23,10 @@ use raw::RawTextViewer;
 /// - Use a built-in Markdown parser and renderer. (Streaming)
 /// - Use an external CLI tool to render Markdown
 /// - Save content to a temporary file and open with external viewer
+#[derive(ComponentExt, ContentComponentExt)]
+#[component(type_id = "plain")]
 pub struct Plain {
+    text: String,
     widget: Box<dyn ContentComponent>,
     rx: Option<oneshot::Receiver<Box<dyn ContentComponent>>>,
 }
@@ -44,7 +49,7 @@ impl Plain {
                         match ExternalMarkdownViewer::try_new(&text, &executable, &args).await {
                             Ok(widget) => {
                                 trace!("using an external CLI tool to render Markdown success");
-                                tx.send(widget.boxed()).ok();
+                                tx.send(widget.into()).ok();
                             }
                             Err(err) => {
                                 warn!(?err, "failed using an external CLI tool to render Markdown");
@@ -59,12 +64,22 @@ impl Plain {
         };
 
         let widget = CodeHighlight::try_new(&text, code_highlight::Lang::Markdown)
-            .map(|x| x.boxed())
+            .map(|x| x.into())
             .unwrap_or_else(|err| {
                 warn!(?err, "failed to new CodeHighlight Component");
-                RawTextViewer::new(text).boxed()
+                RawTextViewer::new(text.clone()).into()
             });
-        Self { widget, rx }
+        Self { text, widget, rx }
+    }
+}
+
+impl Persistable for Plain {
+    fn save(&self) -> Session {
+        session::save(&self.text)
+    }
+
+    fn load(session: Session) -> Result<Self> {
+        Ok(Self::new(session::load(session)?))
     }
 }
 
@@ -76,7 +91,7 @@ impl Component for Plain {
             };
             self.widget = widget;
             self.rx = None;
-            global::signal_ditry();
+            global::signal_dirty();
             trace!("replaced inner widget of Plain Message");
         }
     }

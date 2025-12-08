@@ -1,0 +1,17 @@
+{
+    "t": "str_replace",
+    "y": {
+        "tool_use": {
+            "id": "xxxxxxx",
+            "name": "str_replace",
+            "input": null
+        },
+        "edit": {
+            "path": "README.md",
+            "origin": "# Hello jack",
+            "text": "# Hello jack",
+            "new_text": "# Hello world"
+        },
+        "appliable": true
+    }
+}

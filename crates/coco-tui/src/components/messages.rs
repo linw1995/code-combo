@@ -1,5 +1,6 @@
-use std::{any::Any, cmp::min};
+use std::cmp::min;
 
+use coco_macro::ComponentExt;
 use crossterm::event::KeyEvent;
 use ratatui::{
     Frame,
@@ -7,17 +8,19 @@ use ratatui::{
     layout::Flex,
     prelude::*,
     symbols::{border, line},
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Block, Borders, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 use snafu::ResultExt;
 use tracing::{trace, warn};
 
 use crate::{
+    components::Persistable,
     error::*,
     global::{self, State},
+    session::{self, Session},
 };
 
-use super::{AnswerEvent, AskEvent, Component, Event};
+use super::{AnswerEvent, AskEvent, Component, Content, Event, Message};
 
 mod combo;
 mod plain;
@@ -26,7 +29,8 @@ pub use combo::Combo;
 pub use plain::Plain;
 pub use tool::Tool;
 
-#[derive(Default)]
+#[derive(Default, ComponentExt)]
+#[component(type_id = "messages")]
 pub struct Messages {
     messages: State<Vec<Message>>,
     focus: State<Option<usize>>,
@@ -45,6 +49,19 @@ impl Messages {
 
     pub fn push(&mut self, message: Message) {
         self.messages.write().push(message);
+    }
+
+    /// Clear all messages
+    pub fn clear(&mut self) {
+        self.messages.write().clear();
+        *self.focus.write() = None;
+        *self.offset.write() = 0;
+        self.total_height = 0;
+    }
+
+    /// Check if there are no messages
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
     }
 
     fn new_scrollstate(&self) -> ScrollbarState {
@@ -130,13 +147,12 @@ impl Messages {
     }
 
     pub fn locate_tool_message(&mut self, id: &str) -> Option<usize> {
-        if let Some((idx, _)) = self.messages.iter().enumerate().find(|(_, m)| {
-            m.content
-                .as_any()
-                .downcast_ref::<Tool>()
-                .map(|tool| tool.id() == id)
-                .unwrap_or_default()
-        }) {
+        if let Some((idx, _)) = self
+            .messages
+            .iter()
+            .enumerate()
+            .find(|(_, m)| m.is_same_tool_id(id))
+        {
             Some(idx)
         } else {
             None
@@ -253,6 +269,22 @@ impl Content for Messages {
     }
 }
 
+impl Persistable for Messages {
+    fn save(&self) -> Session {
+        let messages = self.messages.iter().map(|m| (m.save())).collect::<Vec<_>>();
+        session::save(messages)
+    }
+
+    fn load(session: Session) -> Result<Self> {
+        let messages: Vec<Session> = session::load(session)?;
+        let mut inst = Self::default();
+        for message in messages {
+            inst.push(Message::load(message)?);
+        }
+        Ok(inst)
+    }
+}
+
 impl Component for Messages {
     fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
         Box::new(
@@ -303,117 +335,6 @@ impl Component for Messages {
     }
 }
 
-pub enum Role {
-    User,
-    Bot,
-}
-
-/// The content of `Message`;
-pub trait Content {
-    /// the height of content rect.
-    fn height(&self, width: u16) -> usize;
-
-    /// Check if the content is actionable.
-    fn is_actionable(&self) -> bool {
-        false
-    }
-
-    /// Display shortcuts description on the block bottom of the chat window.
-    fn block_with_shortcuts_desc<'a>(&self, block: Block<'a>) -> Block<'a> {
-        block
-    }
-}
-
-pub trait ContentComponent: Component + Content + Any + Send {
-    fn boxed(self) -> Box<dyn ContentComponent>
-    where
-        Self: Sized + Send + 'static,
-    {
-        Box::new(self)
-    }
-}
-
-impl dyn ContentComponent {
-    /// Allow downcasting the trait object to its concrete type at runtime
-    pub fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    pub fn as_mut_any(&mut self) -> &mut dyn Any {
-        self
-    }
-}
-
-/// A message component in the Chat component
-pub struct Message {
-    pub role: Role,
-    pub content: Box<dyn ContentComponent>,
-}
-
-impl Message {
-    pub fn bot(content: Box<dyn ContentComponent>) -> Self {
-        Self {
-            role: Role::Bot,
-            content,
-        }
-    }
-
-    pub fn user(content: Box<dyn ContentComponent>) -> Self {
-        Self {
-            role: Role::User,
-            content,
-        }
-    }
-}
-
-// Delegate Content trait to its inner content.
-impl Content for Message {
-    fn height(&self, width: u16) -> usize {
-        let role_width = match self.role {
-            Role::User => 7,
-            Role::Bot => 6,
-        };
-        self.content.height(width.saturating_sub(role_width))
-    }
-
-    fn is_actionable(&self) -> bool {
-        self.content.is_actionable()
-    }
-
-    fn block_with_shortcuts_desc<'a>(&self, block: Block<'a>) -> Block<'a> {
-        self.content.block_with_shortcuts_desc(block)
-    }
-}
-
-impl Component for Message {
-    fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
-        Box::new(vec![self.content.as_mut() as &mut dyn Component].into_iter())
-    }
-
-    fn handle_key_event(&mut self, event: &KeyEvent) {
-        // Delegate the handle_key_event to its inner content.
-        self.content.handle_key_event(event);
-    }
-
-    fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        use Constraint::*;
-
-        let [area_role, area_content] = Layout::horizontal([Length(8), Min(1)]).areas(area);
-        self.content.draw(frame, area_content)?;
-
-        let theme = global::theme();
-        let paragraph = Paragraph::new(Line::from(match self.role {
-            Role::User => Span::styled(" User: ", theme.ui.user_role),
-            Role::Bot => Span::styled(" Bot: ", theme.ui.bot_role),
-        }));
-        frame.render_widget(paragraph, area_role);
-
-        Ok(())
-    }
-}
-
-impl ContentComponent for Message {}
-
 pub(super) fn shortcuts_desc<'a>(pairs: &[(&str, &str)]) -> Line<'a> {
     let theme = global::theme();
     let descs: Vec<&str> = pairs.iter().map(|(desc, _)| desc.to_owned()).collect();
@@ -445,8 +366,8 @@ mod tests {
         let mut app = Messages::default();
         app.extend(
             [
-                Message::user(Plain::new("Hello".to_string()).boxed()),
-                Message::user(Plain::new("Hello world".to_string()).boxed()),
+                Message::user(Plain::new("Hello".to_string()).into()),
+                Message::user(Plain::new("Hello world".to_string()).into()),
             ]
             .into_iter(),
         );
@@ -477,8 +398,8 @@ mod tests {
         let mut app = Messages::default();
         app.extend(
             [
-                Message::user(Plain::new("Hello".to_string()).boxed()),
-                Message::user(Plain::new("Lorem ipsum dolor sit amet".to_string()).boxed()),
+                Message::user(Plain::new("Hello".to_string()).into()),
+                Message::user(Plain::new("Lorem ipsum dolor sit amet".to_string()).into()),
             ]
             .into_iter(),
         );
@@ -534,8 +455,8 @@ mod tests {
         let mut app = Messages::default();
         app.extend(
             [
-                Message::user(Plain::new("Hello".to_string()).boxed()),
-                Message::user(Plain::new("Lorem ipsum dolor sit amet".to_string()).boxed()),
+                Message::user(Plain::new("Hello".to_string()).into()),
+                Message::user(Plain::new("Lorem ipsum dolor sit amet".to_string()).into()),
             ]
             .into_iter(),
         );

@@ -1,7 +1,9 @@
+use std::any::Any;
+
 use crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::{Frame, layout::Rect};
 
-use crate::{actions::*, error::*, events::*};
+use crate::{actions::*, error::*, events::*, session::Session};
 
 /// A macro to handle component events in a standardized way.
 ///
@@ -47,17 +49,68 @@ macro_rules! handle_component_event {
 
 mod chat;
 mod code_highlight;
+mod command_palette;
 mod input;
+mod message;
 mod messages;
 
 pub use chat::Chat;
 pub use code_highlight::CodeHighlight;
+pub use command_palette::*;
 pub use input::Input;
+pub use message::*;
 pub use messages::*;
 
+/// Provides a unique identifier string for struct registry.
+///
+/// This trait allows components to be uniquely identified, which is useful for
+/// registration systems, session management, and component lookup operations.
+/// Each implementing struct should return a constant string that uniquely
+/// identifies its type.
+///
+/// The `coco-macro` crate provides a derive macro `ComponentExt` that will fill the implementation.
+pub trait Identity {
+    /// Get the unique identifier string for this struct.
+    ///
+    /// # Returns
+    ///
+    /// * `&'static str` - A static string slice that uniquely identifies this type
+    fn id(&self) -> &'static str;
+}
+
+/// Provides persistence capabilities for components.
+///
+/// This trait defines the interface for components that can save their state to persistent storage
+/// and restore their state from previously saved data. This enables persistence
+/// of component state across application restarts.
+pub trait Persistable: Identity {
+    /// Save the current state of the component to persistent storage.
+    ///
+    /// # Returns
+    ///
+    /// * `Session` - A session object containing the serialized state of the component.
+    fn save(&self) -> Session;
+
+    /// Load the component state from previously saved data.
+    ///
+    /// # Arguments
+    ///
+    /// * `state` - The session state to restore from
+    ///
+    /// # Returns
+    ///
+    /// * `Result<Self>` - The restored component instance or an error if loading fails
+    ///
+    /// # Type Parameters
+    ///
+    /// * `Self` - The implementing component type
+    fn load(state: Session) -> Result<Self>
+    where
+        Self: Sized;
+}
+
 /// `Component` is a trait that represents a visual and interactive element of the user interface.
-#[allow(dead_code)]
-pub trait Component {
+pub trait Component: Persistable + Any + Send {
     /// Get the children components of this component.
     ///
     /// This method returns an iterator over mutable references to the child components.
@@ -134,4 +187,22 @@ pub trait Component {
     ///
     /// * `Result<()>` - An Ok result or an error.
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()>;
+}
+
+impl<T: Component> From<T> for Box<dyn Component> {
+    fn from(value: T) -> Self {
+        Box::new(value)
+    }
+}
+
+impl dyn Component {
+    /// Allow downcasting the trait object to its concrete type at runtime
+    pub fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    /// Allow downcasting the trait object to its concrete type at runtime
+    pub fn as_mut_any(&mut self) -> &mut dyn Any {
+        self
+    }
 }

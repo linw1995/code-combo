@@ -2,6 +2,7 @@ pub mod actions;
 pub mod app;
 pub mod error;
 pub mod global;
+pub mod session;
 #[macro_use]
 pub mod components;
 pub mod events;

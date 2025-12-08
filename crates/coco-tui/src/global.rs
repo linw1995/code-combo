@@ -1,8 +1,11 @@
 use std::{
+    env,
     ops::{Deref, DerefMut},
+    path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
 use crate::{
@@ -13,6 +16,7 @@ use crate::{
 
 static EVENT_TX: OnceLock<UnboundedSender<Event>> = OnceLock::new();
 static ACTION_TX: OnceLock<UnboundedSender<Action>> = OnceLock::new();
+static WORKSPACE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Initialize the global event and action senders.
 ///
@@ -71,12 +75,49 @@ pub fn theme() -> &'static FinalizedTheme {
     use_builtin_theme(&config.ui.theme)
 }
 
+/// Returns the workspace directory by walking up from the current directory
+/// until a `.git` directory is found. If no `.git` directory is found,
+/// falls back to the current directory.
+///
+/// The result is cached globally after the first call.
+pub fn workspace_dir() -> &'static Path {
+    WORKSPACE_DIR.get_or_init(|| {
+        // Start from current directory
+        let current_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+        // Walk up the directory tree to find a .git directory
+        let mut dir = current_dir.clone();
+        loop {
+            let git_dir = dir.join(".git");
+            if git_dir.exists() && git_dir.is_dir() {
+                return dir;
+            }
+
+            // Move to parent directory
+            if let Some(parent) = dir.parent() {
+                dir = parent.to_path_buf();
+            } else {
+                // Reached root, use current directory
+                break;
+            }
+        }
+
+        // Fallback to current directory
+        current_dir
+    })
+}
+
+#[inline]
+pub fn trigger_schedule_session_save() {
+    action_tx().send(Action::schedule_session_save()).ok();
+}
+
 /// Signal dirty for re-rendering.
 ///
 /// This function sends a `Dirty` event to trigger a re-render of the UI.
 /// It's typically called automatically when state is modified through a `WriteGuard`.
 #[inline]
-pub fn signal_ditry() {
+pub fn signal_dirty() {
     event_tx().send(Event::Dirty).ok();
 }
 
@@ -90,8 +131,9 @@ pub fn signal_ditry() {
 /// mutable access to the inner value. When the `WriteGuard` is dropped, it
 /// automatically sends a `Dirty` event to notify the system that the state
 /// has been modified.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct State<T> {
+    #[serde(flatten)]
     inner: T,
 }
 
@@ -147,7 +189,7 @@ pub struct WriteGuard<T> {
 
 impl<T> Drop for WriteGuard<T> {
     fn drop(&mut self) {
-        signal_ditry();
+        signal_dirty();
     }
 }
 

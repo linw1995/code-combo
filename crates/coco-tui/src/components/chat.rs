@@ -1,3 +1,4 @@
+use coco_macro::ComponentExt;
 use code_combo::{
     Agent, Block as ChatBlock, Config, Content as ChatContent, Message as ChatMessage, Output,
     TextEdit, ToolUse,
@@ -12,31 +13,70 @@ use ratatui::{
     widgets::{Block, Borders},
 };
 
+use serde::{Deserialize, Serialize};
 use throbber_widgets_tui::{Throbber, ThrobberState};
+use time::OffsetDateTime;
+use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use super::{
     Action, AnswerEvent, AskEvent, BotMessage, Combo, ComboAction, ComboEvent, Component, Content,
-    ContentComponent, Event, Input, Message, Messages, Plain, Role, Tool, ToolAction,
-    shortcuts_desc,
+    Event, Input, Message, Messages, Plain, SessionAction, Tool, ToolAction, shortcuts_desc,
 };
 use crate::{
+    components::{Command, CommandPalette, Persistable},
     error::*,
     global::{self, State},
+    session::{self, Session},
 };
 
+#[derive(ComponentExt)]
+#[component(type_id = "chat")]
 pub struct Chat<'a> {
-    state: State<ChatState>,
-    focus: State<Focus>,
+    state: State<Inner>,
+
     agent: Agent,
 
+    command_palette: CommandPalette,
     input: Input<'a>,
     messages: Messages,
-    pending_chats: Vec<ChatBlock>,
     indicator: ThrobberState,
+
+    token_schedule_session_save: Option<CancellationToken>,
 }
 
-#[derive(Default, Clone)]
+#[derive(Serialize, Deserialize)]
+struct Inner {
+    state: ChatState,
+    focus: Focus,
+    pending_chats: Vec<ChatBlock>,
+    #[serde(with = "time::serde::rfc3339")]
+    created_at: time::OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    updated_at: time::OffsetDateTime,
+    name: String,
+}
+
+impl Default for Inner {
+    fn default() -> Self {
+        let now = time::OffsetDateTime::now_utc();
+        Self {
+            state: ChatState::Ready,
+            focus: Focus::Input,
+            pending_chats: Vec::new(),
+            created_at: now,
+            updated_at: now,
+            name: format!(
+                "Session {}",
+                now.format(&time::format_description::well_known::Rfc3339)
+                    .expect("failed to format current time")
+            ),
+        }
+    }
+}
+
+#[derive(Default, Clone, Serialize, Deserialize)]
 enum ChatState {
     #[default]
     Ready,
@@ -54,35 +94,126 @@ impl std::fmt::Display for ChatState {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 enum Focus {
     #[default]
     Input,
     InputBlur,
     Messages,
+    CommandPalette,
 }
 
-impl Chat<'_> {
+const COMMAND_NEW_SESSION: &str = "New Session";
+
+impl Chat<'static> {
     pub fn new(config: Config) -> Self {
         Self {
             state: State::default(),
-            focus: State::default(),
             agent: Agent::new(config),
+            command_palette: CommandPalette::new(&[
+                Command {
+                    name: COMMAND_NEW_SESSION.to_string(),
+                    shortcut: Some("<C-n>".to_string()),
+                },
+                // TODO: Switch Session
+            ]),
             input: Input::default(),
             messages: Messages::default(),
-            pending_chats: vec![],
             indicator: ThrobberState::default(),
+            token_schedule_session_save: None,
         }
+    }
+
+    fn trigger_save(&mut self, save_at: Instant) {
+        // Cancel existing timer if any
+        if let Some(token) = self.token_schedule_session_save.take() {
+            token.cancel();
+        }
+
+        let token = CancellationToken::new();
+        self.token_schedule_session_save = Some(token.clone());
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = token.cancelled() => (),
+                _ = tokio::time::sleep_until(save_at) => {
+                    global::action_tx().send(Action::save_session_now()).unwrap();
+                }
+            }
+        });
+    }
+
+    fn save_now(&self) {
+        let session_dir = std::path::Path::new(".coco/sessions");
+        let session = self.save();
+        let name = self.state.name.clone();
+        let created_at = self.state.created_at;
+
+        tokio::spawn(async move {
+            if let Err(e) = tokio::fs::create_dir_all(session_dir).await {
+                warn!(?e, "failed to create session directory");
+                return;
+            }
+
+            let now = time::OffsetDateTime::now_utc();
+            let persistent_session = crate::session::PersistentSession {
+                name,
+                inner: session,
+                created_at,
+                updated_at: now,
+            };
+
+            if let Err(e) = crate::session::save_session(session_dir, persistent_session).await {
+                warn!(?e, "failed to save session");
+            } else {
+                debug!("Session saved successfully");
+            }
+        });
+    }
+
+    fn restore_last_session(&mut self) {
+        let session_dir = std::path::Path::new(".coco/sessions").to_path_buf();
+
+        tokio::spawn(async move {
+            match crate::session::list_session(&session_dir).await {
+                Ok(mut sessions) => {
+                    if sessions.is_empty() {
+                        debug!("No sessions to restore");
+                        return;
+                    }
+
+                    // Sort by updated_at descending to get the most recent session
+                    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+
+                    let last_session = &sessions[0];
+                    let filename = last_session.filename();
+
+                    match crate::session::load_session(&session_dir, &filename).await {
+                        Ok(persistent_session) => {
+                            global::action_tx()
+                                .send(Action::restore_session(persistent_session.inner))
+                                .unwrap();
+                            debug!(name = %persistent_session.name, "Session restore requested");
+                        }
+                        Err(e) => {
+                            warn!(?e, "failed to load session");
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(?e, "failed to list sessions");
+                }
+            }
+        });
     }
 
     fn handle_combo_event(&mut self, event: &ComboEvent) {
         debug!(?event, "receive combo event");
         match event {
             ComboEvent::Discovering => {
-                *self.state.write() = ChatState::ComboDiscovering;
+                self.state.write().state = ChatState::ComboDiscovering;
             }
             ComboEvent::Executing { .. } | ComboEvent::Output { .. } => {
-                *self.state.write() = ChatState::Procesing;
+                self.state.write().state = ChatState::Procesing;
             }
             ComboEvent::Executed { starter, .. } => {
                 let combo = starter.combo.as_ref().unwrap();
@@ -90,13 +221,13 @@ impl Chat<'_> {
                 tokio::task::spawn(task_chat(self.agent.clone(), content));
             }
             ComboEvent::Discovered { .. } | ComboEvent::NotFound { .. } => {
-                *self.state.write() = ChatState::Ready;
+                self.state.write().state = ChatState::Ready;
             }
         }
     }
 
     fn update_focus(&mut self, new_focus: Focus) {
-        let focus = self.focus.read();
+        let focus = &self.state.focus;
         if focus == &new_focus {
             return;
         }
@@ -107,7 +238,7 @@ impl Chat<'_> {
         if new_focus == Focus::Input {
             self.input.update(&Action::Focus);
         }
-        *self.focus.write() = new_focus
+        self.state.write().focus = new_focus
     }
 
     /// Combines pending ToolResults (e.g., User Cancelled) with user instructions.
@@ -115,10 +246,10 @@ impl Chat<'_> {
     /// This ensures the LLM doesn't react to tool results without explicit user instructions.
     /// Tool results are queued and combined with the next user message to provide context.
     fn build_user_content(&mut self, content: ChatContent) -> ChatContent {
-        if self.pending_chats.is_empty() {
+        if self.state.pending_chats.is_empty() {
             content
         } else {
-            let mut blocks = std::mem::take(&mut self.pending_chats);
+            let mut blocks = std::mem::take(&mut self.state.write().pending_chats);
             ChatContent::Multiple(match content {
                 ChatContent::Text(text) => {
                     blocks.push(ChatBlock::Text { text });
@@ -133,11 +264,11 @@ impl Chat<'_> {
     }
 
     fn on_submit(&mut self) {
-        if matches!(self.state.read(), ChatState::Ready) {
+        if matches!(self.state.state, ChatState::Ready) {
             let value = self.input.clear();
             debug!(?value, "submiting");
             self.messages
-                .push(Message::user(Plain::new(value.clone()).boxed()));
+                .push(Message::user(Plain::new(value.clone()).into()));
             let content = self.build_user_content(ChatContent::Text(value));
             tokio::task::spawn(task_chat(self.agent.clone(), content));
         } else {
@@ -147,12 +278,13 @@ impl Chat<'_> {
 
     fn block_bottom_with_shortcuts_desc<'a>(&self, mut block: Block<'a>) -> Block<'a> {
         block = block.title_bottom(Line::from(""));
-        match self.focus.read() {
+        match self.state.focus {
             Focus::Input => block
                 .title_bottom(shortcuts_desc(&[("Blur", "Esc")]))
                 .title_bottom(shortcuts_desc(&[("Submit", "CR")])),
             Focus::InputBlur => block
                 .title_bottom(shortcuts_desc(&[("Focus", "CR")]))
+                .title_bottom(shortcuts_desc(&[("Commands", "C-p")]))
                 .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")])),
             Focus::Messages => {
                 block = self.messages.block_with_shortcuts_desc(block);
@@ -161,11 +293,12 @@ impl Chat<'_> {
                     .title_bottom(shortcuts_desc(&[("Scroll Up", "C-y"), ("Down", "C-e")]))
                     .title_bottom(shortcuts_desc(&[("Scroll+ Up", "C-u"), ("Down", "C-d")]))
             }
+            Focus::CommandPalette => block,
         }
     }
 
     fn widget_state_indicator(&self) -> Line<'_> {
-        let state = self.state.read();
+        let state = &self.state.state;
         (match state {
             ChatState::Ready => Line::from(format!(" {state} ").green()),
             ChatState::Procesing | ChatState::ComboDiscovering => Line::from(vec![
@@ -202,21 +335,69 @@ impl Chat<'_> {
             }
             // Await the next user message to avoid the LLM reacting without further user
             // instructions
-            self.pending_chats.push(code_combo::Block::ToolResult {
-                tool_use_id: id,
-                is_error: Some(!edit.changed()),
-                content: if edit.changed() {
-                    "User rejects some changes"
-                } else {
-                    "User rejects all changes"
-                }
-                .into(),
-            });
+            self.state
+                .write()
+                .pending_chats
+                .push(code_combo::Block::ToolResult {
+                    tool_use_id: id,
+                    is_error: Some(!edit.changed()),
+                    content: if edit.changed() {
+                        "User rejects some changes"
+                    } else {
+                        "User rejects all changes"
+                    }
+                    .into(),
+                });
         }
+    }
+
+    /// Handle the "New Session" command
+    /// Optionally saves the current session before clearing
+    fn new_session(&mut self) {
+        // 1. Save current session if there are messages
+        if !self.messages.is_empty() {
+            // TODO: maybe don't save if being in processing state
+            self.save_now();
+        }
+
+        // 2. Clear messages
+        self.messages.clear();
+
+        // 3. Reset state
+        *self.state.write() = Inner {
+            focus: Focus::InputBlur,
+            ..Default::default()
+        };
+
+        // 4. Reset focus to Input from InputBlur to trigger the input component
+        self.update_focus(Focus::Input);
+
+        // 5. Cancel any pending save timer
+        if let Some(token) = self.token_schedule_session_save.take() {
+            token.cancel();
+        }
+
+        debug!("New session started");
+        global::signal_dirty();
     }
 }
 
-impl Component for Chat<'_> {
+impl Persistable for Chat<'static> {
+    fn save(&self) -> Session {
+        // FIXME: Save LLM messages from self.agent
+        session::save_related(&self.state, self.messages.save())
+    }
+
+    fn load(session: Session) -> Result<Self> {
+        let (state, session): (Inner, Session) = session::load_related(session)?;
+        let mut inst = Self::new(global::config_sync());
+        inst.state = State::new(state);
+        inst.messages = Messages::load(session)?;
+        Ok(inst)
+    }
+}
+
+impl Component for Chat<'static> {
     fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
         let children: Vec<&mut dyn Component> = vec![&mut self.input, &mut self.messages];
         Box::new(children.into_iter())
@@ -224,11 +405,11 @@ impl Component for Chat<'_> {
 
     fn on_tick(&mut self) {
         if matches!(
-            self.state.get(),
+            self.state.state,
             ChatState::Procesing | ChatState::ComboDiscovering
         ) {
             self.indicator.calc_next();
-            global::signal_ditry();
+            global::signal_dirty();
         }
     }
 
@@ -244,16 +425,18 @@ impl Component for Chat<'_> {
                 handle_component_event!(self, event);
             }
             Event::Ask(AskEvent::Bot) => {
-                *self.state.write() = ChatState::Procesing;
+                self.state.write().state = ChatState::Procesing;
             }
             Event::Answer(AnswerEvent::Bot(msgs)) => {
-                *self.state.write() = ChatState::Ready;
+                self.state.write().state = ChatState::Ready;
                 self.messages.extend(msgs.iter().cloned().map(|msg| {
                     Message::bot(match msg {
-                        BotMessage::Plain(text) => Plain::new(text).boxed(),
-                        BotMessage::ToolUse(tool_use) => Tool::new(tool_use.to_owned()).boxed(),
+                        BotMessage::Plain(text) => Plain::new(text).into(),
+                        BotMessage::ToolUse(tool_use) => Tool::new(tool_use.to_owned()).into(),
                     })
                 }));
+                // Trigger session save after receiving bot response
+                global::trigger_schedule_session_save();
             }
             Event::Ask(AskEvent::ToolUsePermission(_) | AskEvent::TextEdit { .. }) => {
                 if let Some(idx) = self.messages.on_tool_event(event) {
@@ -261,6 +444,8 @@ impl Component for Chat<'_> {
                     self.update_focus(Focus::Messages);
                     self.messages.focus(idx);
                 }
+                // Trigger session save after ask event
+                global::trigger_schedule_session_save();
             }
             Event::Answer(AnswerEvent::ToolResult {
                 id,
@@ -284,6 +469,8 @@ impl Component for Chat<'_> {
                 }]);
                 let content = self.build_user_content(content);
                 tokio::task::spawn(task_chat(self.agent.clone(), content));
+                // Trigger session save after tool result
+                global::trigger_schedule_session_save();
             }
             _ => {
                 // Handle other kinds of events by default
@@ -297,10 +484,12 @@ impl Component for Chat<'_> {
         use KeyCode::*;
         use KeyModifiers as KM;
 
-        match (self.focus.read(), key.modifiers, key.code) {
+        let focus = &self.state.focus;
+        match (focus, key.modifiers, key.code) {
             // Focus switching
-            (Input, KM::NONE, Esc) => self.update_focus(Focus::InputBlur),
-            (InputBlur, KM::NONE, Enter) => self.update_focus(Focus::Input),
+            (Input, KM::NONE, Esc) => self.update_focus(InputBlur),
+            (InputBlur, KM::NONE, Enter) => self.update_focus(Input),
+            (InputBlur, KM::CONTROL, Char('p')) => self.update_focus(CommandPalette),
             (Messages, KM::NONE, Esc) if !self.messages.is_actionable() => {
                 self.messages.blur();
                 self.update_focus(Focus::InputBlur);
@@ -343,9 +532,11 @@ impl Component for Chat<'_> {
 
             // Handle actionable messages
             (Messages, _, _) => self.messages.handle_key_event(key),
+            (CommandPalette, KM::NONE, Esc) => self.update_focus(InputBlur),
+            (CommandPalette, _, _) => self.command_palette.handle_key_event(key),
 
             (InputBlur, _, _) => {
-                warn!(?key, ?self.focus, "unknown key event");
+                warn!(?key, ?focus, "unknown key event");
             }
         }
     }
@@ -354,12 +545,9 @@ impl Component for Chat<'_> {
         debug!(?action, "updating");
 
         match action {
-            Action::Combo(ComboAction::Discover | ComboAction::Execute { .. }) => {
-                let combo = Combo::default();
-                self.messages.push(Message {
-                    role: Role::User,
-                    content: Box::new(combo),
-                });
+            Action::Combo(ComboAction::Execute { name }) => {
+                let combo = Combo::new(name);
+                self.messages.push(Message::user(combo.into()));
                 debug!("Combo message pushed");
             }
             Action::Tool(action) => match action {
@@ -377,11 +565,16 @@ impl Component for Chat<'_> {
                     }
                     // Await the next user message to avoid the LLM reacting without further user
                     // instructions
-                    self.pending_chats.push(code_combo::Block::ToolResult {
-                        tool_use_id: tool_use.id.clone(),
-                        is_error: Some(true),
-                        content: code_combo::Content::Text("User cancelled".to_string()),
-                    });
+                    self.state
+                        .write()
+                        .pending_chats
+                        .push(code_combo::Block::ToolResult {
+                            tool_use_id: tool_use.id.clone(),
+                            is_error: Some(true),
+                            content: code_combo::Content::Text("User cancelled".to_string()),
+                        });
+                    // Trigger session save after tool cancellation
+                    global::trigger_schedule_session_save();
                 }
                 ToolAction::ApplyTextEdit {
                     id,
@@ -408,8 +601,49 @@ impl Component for Chat<'_> {
                             *hunk_idx,
                         ));
                     }
+                    // Trigger session save after text edit operation
+                    global::trigger_schedule_session_save();
                 }
             },
+            Action::Session(SessionAction::SaveNow) => {
+                // Immediate save
+                self.save_now();
+            }
+            Action::Session(SessionAction::ScheduleSave { save_at }) => {
+                // Schedule a debounced save
+                self.state.write_untracked().updated_at = OffsetDateTime::now_utc();
+                self.trigger_save(save_at.to_owned());
+            }
+            Action::Session(SessionAction::RestoreLastSession) => {
+                self.restore_last_session();
+            }
+            Action::Session(SessionAction::RestoreSession(session)) => {
+                match Self::load(session.clone()) {
+                    Ok(restored) => {
+                        self.state = restored.state;
+                        self.messages = restored.messages;
+                        debug!(name = %self.state.name, "Session restored");
+                        global::signal_dirty();
+                    }
+                    Err(e) => {
+                        warn!(?e, "failed to restore session");
+                    }
+                }
+            }
+            Action::Command(name) => {
+                // Close command palette
+                self.update_focus(Focus::InputBlur);
+
+                // Handle command
+                match name.as_str() {
+                    COMMAND_NEW_SESSION => {
+                        self.new_session();
+                    }
+                    unknown => {
+                        warn!(?unknown, "unknown command");
+                    }
+                }
+            }
             _ => (),
         }
     }
@@ -428,7 +662,7 @@ impl Component for Chat<'_> {
         frame.render_widget(self.block_bottom_with_shortcuts_desc(block), divider);
 
         let mut block = Block::new().borders(Borders::BOTTOM);
-        block = if !matches!(self.focus.read(), Focus::Messages) {
+        block = if !matches!(self.state.focus, Focus::Messages) {
             block.border_set(border::THICK).border_style(Style::reset())
         } else {
             block
@@ -441,7 +675,14 @@ impl Component for Chat<'_> {
                 .title_bottom(self.widget_state_indicator()),
             bottom,
         );
-        self.input.draw(frame, area_input)
+        self.input.draw(frame, area_input)?;
+
+        if self.state.focus == Focus::CommandPalette {
+            // popup floating window
+            self.command_palette.draw(frame, area)?;
+        }
+
+        Ok(())
     }
 }
 
