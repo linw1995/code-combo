@@ -7,7 +7,7 @@ use ratatui::{
     prelude::Rect,
     style::Stylize,
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders},
 };
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -19,6 +19,7 @@ use crate::{
     events::{ComboEvent, Event},
     global::{self, State},
     session::{self, Session},
+    widgets::Paragraph,
 };
 
 #[derive(Serialize, Deserialize)]

@@ -1,11 +1,7 @@
 use coco_macro::{ComponentExt, ContentComponentExt};
 use code_combo::{ToolUse, tools::Final};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{
-    Frame,
-    prelude::Rect,
-    widgets::{Paragraph, Wrap},
-};
+use ratatui::{Frame, prelude::Rect, widgets::Wrap};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -15,6 +11,7 @@ use crate::{
     events::{AnswerEvent, Event},
     global::{self, State},
     session::{self, Session},
+    widgets::Paragraph,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -47,7 +44,7 @@ fn generate_widget<'b>(tool_use: &ToolUse, output: &Option<Final>) -> Paragraph<
         text.push('\n');
         text.push_str(&output);
     }
-    Paragraph::new(text).wrap(Wrap { trim: false })
+    Paragraph::new_wrap(text, Wrap { trim: false })
 }
 
 impl<'a> Raw<'a> {

@@ -31,6 +31,7 @@ futures = "0.3.31"
 ratatui = { version = "0.29.0", features = [
   "serde",
   "unstable-rendered-line-info",
+  "unstable-widget-ref",
 ] }
 code-highlight = { path = "../code-highlight" }
 throbber-widgets-tui = "0.9.0"

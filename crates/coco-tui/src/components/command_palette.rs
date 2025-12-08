@@ -8,7 +8,7 @@ use ratatui::{
     prelude::Rect,
     symbols::border,
     text::Text,
-    widgets::{Block, Borders, Clear, Paragraph, Widget},
+    widgets::{Block, Borders, Clear, Widget},
 };
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +18,7 @@ use crate::{
     error::Result,
     global::{self, State},
     session::{self, Session},
+    widgets::Paragraph,
 };
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -113,8 +114,11 @@ impl CommandPalette {
                     Layout::horizontal([Percentage(50), Percentage(50)]).areas(area);
 
                 frame.render_widget(
-                    Paragraph::new(Text::from(shortcut.to_owned()).style(theme.ui.shortcut))
-                        .right_aligned(),
+                    Paragraph::new(
+                        Text::from(shortcut.to_owned())
+                            .style(theme.ui.shortcut)
+                            .right_aligned(),
+                    ),
                     right,
                 );
 

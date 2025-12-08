@@ -75,6 +75,7 @@ build_theme_type!(FinalizedUiTheme {
     bot_role,
     shortcut,
     shortcut_desc,
+    tab_spaces,
 });
 
 impl Theme {
@@ -100,6 +101,7 @@ impl Theme {
                     bot_role,
                     shortcut,
                     shortcut_desc,
+                    tab_spaces,
                 }
             )?,
             tree_sitter,

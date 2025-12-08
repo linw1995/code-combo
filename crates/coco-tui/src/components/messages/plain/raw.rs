@@ -1,14 +1,11 @@
 use coco_macro::{ComponentExt, ContentComponentExt};
-use ratatui::{
-    Frame,
-    prelude::Rect,
-    widgets::{Paragraph, Wrap},
-};
+use ratatui::{Frame, prelude::Rect, widgets::Wrap};
 
 use crate::{
     components::{Component, Content, ContentComponent, Persistable},
     error::*,
     session::{self, Session},
+    widgets::Paragraph,
 };
 
 #[derive(ComponentExt, ContentComponentExt)]
@@ -23,7 +20,7 @@ impl<'a> RawTextViewer<'a> {
     pub fn new(text: String) -> Self {
         Self {
             text: text.clone(),
-            widget: Paragraph::new(text).wrap(Wrap { trim: false }),
+            widget: Paragraph::new_wrap(text, Wrap { trim: false }),
         }
     }
 }

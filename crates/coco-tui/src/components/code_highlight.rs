@@ -5,7 +5,7 @@ use ratatui::{
     prelude::Rect,
     style::Style,
     text::{Line, Span, Text},
-    widgets::{Paragraph, Wrap},
+    widgets::Wrap,
 };
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -17,6 +17,7 @@ use crate::{
     error::Result,
     global,
     session::{self, Session},
+    widgets::Paragraph,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -78,10 +79,10 @@ impl<'a> CodeHighlight<'a> {
             }
         }
         lines.push(line);
-        let widget = Paragraph::new(Text::from(
-            lines.into_iter().map(Line::from).collect::<Vec<_>>(),
-        ))
-        .wrap(Wrap { trim: false });
+        let widget = Paragraph::new_wrap(
+            Text::from(lines.into_iter().map(Line::from).collect::<Vec<_>>()),
+            Wrap { trim: false },
+        );
         Ok(Self {
             state: State {
                 source: source.to_string(),
