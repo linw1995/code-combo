@@ -692,7 +692,7 @@ async fn task_chat(mut agent: Agent, content: ChatContent) {
     let msg = ChatMessage::user(content);
     tx.send(Event::Ask(AskEvent::Bot)).unwrap();
 
-    let msg = agent.chat(msg).await;
+    let msg = agent.chat(msg).await.expect("failed to chat with LLM");
 
     let mut to_execute: Vec<code_combo::ToolUse> = vec![];
     tx.send(

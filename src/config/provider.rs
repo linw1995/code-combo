@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::config::EnvString;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
@@ -12,7 +14,7 @@ pub enum ProviderKind {
 pub struct ProviderConfig {
     pub name: String,
     pub kind: ProviderKind,
-    pub api_key: String,
+    pub api_key: EnvString,
     pub base_url: String,
 }
 
