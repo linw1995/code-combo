@@ -372,22 +372,23 @@ mod tests {
             .into_iter(),
         );
 
-        let mut terminal = Terminal::new(TestBackend::new(17, 5)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(17, 6)).unwrap();
         terminal
             .draw(|frame| app.draw(frame, frame.area()).unwrap())
             .unwrap();
 
         let mut expected = Buffer::with_lines(vec![
             "                 ",
-            "                 ",
             "│ User:  Hello   ",
+            "│                ",
             "│ User:  Hello   ",
             "│        world   ",
+            "│                ",
         ]);
         let border_style = Style::new().dark_gray();
-        expected.set_style(Rect::new(0, 2, 1, 3), border_style);
+        expected.set_style(Rect::new(0, 1, 1, 5), border_style);
         let role_style = theme().ui.user_role;
-        expected.set_style(Rect::new(1, 2, 7, 1), role_style);
+        expected.set_style(Rect::new(1, 1, 7, 1), role_style);
         expected.set_style(Rect::new(1, 3, 7, 1), role_style);
 
         assert_eq!(terminal.backend().buffer(), &expected);
@@ -404,42 +405,45 @@ mod tests {
             .into_iter(),
         );
 
-        let mut terminal = Terminal::new(TestBackend::new(17, 5)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(17, 6)).unwrap();
         terminal
             .draw(|frame| app.draw(frame, frame.area()).unwrap())
             .unwrap();
         let mut expected = Buffer::with_lines(vec![
             "│ User:  Lorem  │",
-            "│        ipsum  ┃",
+            "│        ipsum  │",
             "│        dolor  ┃",
             "│        sit    ┃",
             "│        amet   ┃",
+            "│               ┃",
         ]);
         let border_style = Style::new().dark_gray();
-        expected.set_style(Rect::new(0, 0, 1, 5), border_style);
+        expected.set_style(Rect::new(0, 0, 1, 6), border_style);
         let scrollbar_style = Style::new().dark_gray();
-        expected.set_style(Rect::new(16, 0, 1, 1), scrollbar_style);
+        expected.set_style(Rect::new(16, 0, 1, 2), scrollbar_style);
         let role_style = theme().ui.user_role;
         expected.set_style(Rect::new(1, 0, 7, 1), role_style);
         assert_eq!(terminal.backend().buffer(), &expected);
 
-        app.scroll_up(1);
+        app.scroll_up(2);
 
         terminal
             .draw(|frame| app.draw(frame, frame.area()).unwrap())
             .unwrap();
         let mut expected = Buffer::with_lines(vec![
             "│ User:  Hello  ┃",
+            "│               ┃",
             "│ User:  Lorem  ┃",
             "│        ipsum  ┃",
             "│        dolor  ┃",
             "│        sit    │",
         ]);
         let border_style = Style::new().dark_gray();
-        expected.set_style(Rect::new(0, 0, 1, 5), border_style);
+        expected.set_style(Rect::new(0, 0, 1, 6), border_style);
         let scrollbar_style = Style::new().dark_gray();
-        expected.set_style(Rect::new(16, 4, 1, 1), scrollbar_style);
-        expected.set_style(Rect::new(1, 0, 7, 2), role_style);
+        expected.set_style(Rect::new(16, 5, 1, 1), scrollbar_style);
+        expected.set_style(Rect::new(1, 0, 7, 1), role_style);
+        expected.set_style(Rect::new(1, 2, 7, 1), role_style);
         assert_eq!(terminal.backend().buffer(), &expected);
 
         app.scroll_up(1);
@@ -461,28 +465,29 @@ mod tests {
             .into_iter(),
         );
 
-        let mut terminal = Terminal::new(TestBackend::new(18, 6)).unwrap();
-        let offset_area = Rect::new(1, 1, 17, 5);
+        let mut terminal = Terminal::new(TestBackend::new(18, 7)).unwrap();
+        let offset_area = Rect::new(1, 1, 17, 6);
         terminal
             .draw(|frame| app.draw(frame, offset_area).unwrap())
             .unwrap();
         let mut expected = Buffer::with_lines(vec![
             "                  ",
             " │ User:  Lorem  │",
-            " │        ipsum  ┃",
+            " │        ipsum  │",
             " │        dolor  ┃",
             " │        sit    ┃",
             " │        amet   ┃",
+            " │               ┃",
         ]);
         let border_style = Style::new().dark_gray();
-        expected.set_style(Rect::new(1, 1, 1, 5), border_style);
+        expected.set_style(Rect::new(1, 1, 1, 6), border_style);
         let scrollbar_style = Style::new().dark_gray();
-        expected.set_style(Rect::new(17, 1, 1, 1), scrollbar_style);
+        expected.set_style(Rect::new(17, 1, 1, 2), scrollbar_style);
         let role_style = theme().ui.user_role;
         expected.set_style(Rect::new(2, 1, 7, 1), role_style);
         assert_eq!(terminal.backend().buffer(), &expected);
 
-        app.scroll_up(1);
+        app.scroll_up(2);
 
         terminal
             .draw(|frame| app.draw(frame, offset_area).unwrap())
@@ -490,16 +495,18 @@ mod tests {
         let mut expected = Buffer::with_lines(vec![
             "                  ",
             " │ User:  Hello  ┃",
+            " │               ┃",
             " │ User:  Lorem  ┃",
             " │        ipsum  ┃",
             " │        dolor  ┃",
             " │        sit    │",
         ]);
         let border_style = Style::new().dark_gray();
-        expected.set_style(Rect::new(1, 1, 1, 5), border_style);
+        expected.set_style(Rect::new(1, 1, 1, 6), border_style);
         let scrollbar_style = Style::new().dark_gray();
-        expected.set_style(Rect::new(17, 5, 1, 1), scrollbar_style);
-        expected.set_style(Rect::new(2, 1, 7, 2), role_style);
+        expected.set_style(Rect::new(17, 6, 1, 1), scrollbar_style);
+        expected.set_style(Rect::new(2, 1, 7, 1), role_style);
+        expected.set_style(Rect::new(2, 3, 7, 1), role_style);
         assert_eq!(terminal.backend().buffer(), &expected);
 
         app.scroll_up(1);
