@@ -2,6 +2,7 @@
 name = "coco-tui"
 version.workspace = true
 edition.workspace = true
+build = "../../build.rs"
 
 [[bin]]
 name = "coco"
@@ -55,7 +56,7 @@ ctor.workspace = true
 lazy_static.workspace = true
 bitflags = "2.10.0"
 indoc.workspace = true
-time = { version = "0.3.44", features = [
+time = { workspace = true, features = [
   "macros",
   "serde",
   "local-offset",
@@ -64,3 +65,6 @@ time = { version = "0.3.44", features = [
 ] }
 
 [dev-dependencies]
+
+[build-dependencies]
+time = { workspace = true, features = ["formatting"] }

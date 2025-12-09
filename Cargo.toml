@@ -26,6 +26,8 @@ tree-sitter = { version = "0.25" }
 tree-sitter-md = { version = "0.3.2" }
 indoc = "2.0.6"
 lazy_static = "1.5.0"
+time = { version = "0.3.44" }
+chrono = { version = "0.4" }
 
 # Core dependencies for CLI and application functionality
 [dependencies]
@@ -33,7 +35,7 @@ lazy_static = "1.5.0"
 anthropic = { path = "./crates/anthropic" }
 
 # Datetime utilities
-chrono = "0.4.42"
+chrono.workspace = true
 
 # Command line argument parsing
 clap = { version = "4.5.47", features = ["derive"] }
@@ -66,7 +68,11 @@ similar = "2.7.0"
 
 [dev-dependencies]
 ctor.workspace = true
+which = "6.0"
 tempfile = "3.22.0"
+
+[build-dependencies]
+time = { workspace = true, features = ["formatting"] }
 
 [patch.crates-io]
 tree-sitter-diff = { git = "https://github.com/tree-sitter-grammars/tree-sitter-diff.git", tag = "v0.1.0" }

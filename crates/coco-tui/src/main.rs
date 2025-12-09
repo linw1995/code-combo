@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::OnceLock};
 
 use clap::{Parser, Subcommand};
 use code_combo::{Config, default_config_dir};
@@ -12,9 +12,31 @@ use coco_tui::{
 };
 use tracing::info;
 
+static LONG_VERSION: OnceLock<String> = OnceLock::new();
+
+fn long_version() -> &'static str {
+    LONG_VERSION
+        .get_or_init(|| {
+            // This closure is executed only once, on the first call to get_or_init
+            let dirty = if env!("GIT_DIRTY") == "true" {
+                "[dirty]"
+            } else {
+                ""
+            };
+            format!(
+                "{} (sha:{:?}, build_time:{:?}){}",
+                env!("CARGO_PKG_VERSION"),
+                env!("GIT_COMMIT_SHA"),
+                env!("BUILT_TIME_UTC"),
+                dirty
+            )
+        })
+        .as_str()
+}
+
 /// Code Combo
 #[derive(Parser)]
-#[command(version, about)]
+#[command(name="coco", version, long_version=long_version(), about)]
 struct Args {
     /// Config file path
     #[arg(long)]
