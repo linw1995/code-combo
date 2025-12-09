@@ -178,12 +178,20 @@ pub fn execute_starter(
 mod test {
     use std::os::unix::fs::PermissionsExt;
 
-    use indoc::indoc;
+    use indoc::formatdoc;
     use tempfile::TempDir;
 
     use crate::{ComboMode, Instruction};
 
     use super::*;
+
+    fn find_bash() -> String {
+        // why not `/usr/bin/env`? Because it is not working in the Nix build sandbox
+        which::which("bash")
+            .expect("failed to find bash")
+            .to_string_lossy()
+            .to_string()
+    }
 
     async fn create_temp_combo(
         name: &str,
@@ -213,10 +221,11 @@ mod test {
 
     #[tokio::test]
     async fn execute_starter_abort() -> Result<(), Box<dyn std::error::Error>> {
+        let bash = find_bash();
         let (_guard, file_path) = create_temp_combo(
             "commit.sh",
-            indoc! {r#"
-            #!/usr/bin/env bash
+            formatdoc! {r#"
+            #!{bash}
 
             cat <<EOF
             ---
@@ -232,7 +241,7 @@ mod test {
 
             # Enter to continue, Ctrl-D to abort
             read -rs || exit
-            "#},
+            "#}.as_str(),
         )
             .await?;
 
@@ -257,10 +266,11 @@ mod test {
 
     #[tokio::test]
     async fn execute_starter_continue() -> Result<(), Box<dyn std::error::Error>> {
+        let bash = find_bash();
         let (_guard, file_path) = create_temp_combo(
             "test.sh",
-            indoc! {r#"
-            #!/usr/bin/env bash
+            formatdoc! {r#"
+            #!{bash}
 
             cat <<-EOF
             ---
@@ -274,7 +284,8 @@ mod test {
             read -rs || exit
 
             echo "Hello world"
-            "#},
+            "#}
+            .as_str(),
         )
         .await?;
 
