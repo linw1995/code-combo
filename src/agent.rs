@@ -5,6 +5,7 @@ use tokio::sync::Mutex;
 use tracing::warn;
 
 use super::Config;
+use crate::Result;
 use executor::PermissionControl;
 
 mod executor;
@@ -28,11 +29,12 @@ impl Agent {
         }
     }
 
-    pub async fn chat(&mut self, message: Message) -> Message {
+    pub async fn chat(&mut self, message: Message) -> Result<Message> {
+        let (_, client) = self.pick_provider()?;
+
         let mut messages = self.messages.lock().await;
         messages.push(message);
 
-        let (_, client) = self.pick_provider();
         let response = client
             .messages()
             .conversations(messages.clone())
@@ -45,11 +47,11 @@ impl Agent {
             .unwrap();
 
         if response.content.is_empty() {
-            Message::assistant(Content::Multiple(Vec::default()))
+            Ok(Message::assistant(Content::Multiple(Vec::default())))
         } else {
             let msg = Message::assistant(Content::Multiple(response.content));
             messages.push(msg.clone());
-            msg
+            Ok(msg)
         }
     }
 
@@ -70,18 +72,18 @@ impl Agent {
             .expect("Failed to execute")
     }
 
-    fn pick_provider(&self) -> (&str, Client) {
+    fn pick_provider(&mut self) -> Result<(&str, Client)> {
         // TODO: pick a provider based on some strategy
-        let first = self.config.providers.first();
+        let first = self.config.providers.first_mut();
         let provider = first.unwrap();
-        (
+        Ok((
             &provider.name,
             Client::builder()
                 .base_url(&provider.base_url)
-                .token(&provider.api_key)
+                .token(provider.api_key.get()?)
                 .model(&provider.name)
                 .build()
                 .expect("Failed to initialize client"),
-        )
+        ))
     }
 }

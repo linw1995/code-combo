@@ -1,8 +1,10 @@
+mod env;
 mod provider;
 mod ui;
 
 use std::path::PathBuf;
 
+pub use env::EnvString;
 pub use provider::{ProviderConfig, ProviderKind};
 pub use ui::{MarkdownRenderEngine, UI};
 
