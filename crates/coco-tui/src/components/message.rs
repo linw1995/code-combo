@@ -110,7 +110,9 @@ impl Content for Message {
             Role::User => 7,
             Role::Bot => 6,
         };
-        self.content.height(width.saturating_sub(role_width))
+        let bottom_padding = 1;
+        let content_height = self.content.height(width.saturating_sub(role_width));
+        content_height + bottom_padding
     }
 
     fn is_actionable(&self) -> bool {
