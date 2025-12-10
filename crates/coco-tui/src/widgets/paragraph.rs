@@ -61,13 +61,12 @@ impl Widget for Paragraph<'static> {
 
 const TAB_STOP: usize = 4;
 
-/// Replace specific characters like `\t` to avoid rendering issues or provide stylized looking in ratatui.
+/// Replace tab character (`\t`) to avoid rendering issues or provide stylized looking in ratatui.
 ///
 /// This function processes a line of text and replaces problematic characters:
 /// - Tab characters (`\t`) are replaced with a visible tab indicator ("▸" followed by spaces)
-/// - Space characters at tab stop boundaries are replaced with "│" (a visible space indicator)
 ///
-/// These replacements prevent visual artifacts that can occur when ratatui renders
+/// This replacement prevents visual artifacts that can occur when ratatui renders
 /// these characters, particularly during scrolling operations.
 ///
 /// # Tab Stop Alignment
@@ -81,17 +80,9 @@ const TAB_STOP: usize = 4;
 ///
 /// This ensures that the next character after a tab starts at the next tab stop boundary.
 ///
-/// # Space Handling
-///
-/// Space characters at tab stop boundaries (every 4 columns) are replaced with "│"
-/// when they are at the start of a line or adjacent to another space character.
-/// This makes indentation levels visible while maintaining proper column alignment.
-/// Single isolated spaces at tab boundaries that are not part of an indentation
-/// sequence are preserved as-is.
-///
 /// # Styling
 ///
-/// The visual markers ("▸" for tabs and "│" for spaces) inherit the `tab_spaces`
+/// The visual markers ("▸" for tabs) inherit the `tab_spaces`
 /// style from the current theme, allowing consistent theming across the application.
 /// Regular text preserves its original style.
 fn safe_line(line: &mut Line) {
@@ -118,24 +109,10 @@ fn safe_line(line: &mut Line) {
                 new_spans.push(Span::styled(sep, tab_spaces_style));
                 i += 1;
                 width += sep_width;
-            } else if chars[i] == ' '
-                && (col + width) % TAB_STOP == 0
-                && (i == 0 || chars[i - 1] == ' ' || (i + 1 < chars.len() && chars[i + 1] == ' '))
-            {
-                new_spans.push(Span::styled("│", tab_spaces_style));
-                i += 1;
-                width += 1;
             } else {
                 // Collect regular characters
                 let start = i;
-                while i < chars.len()
-                    && chars[i] != '\t'
-                    && !(chars[i] == ' '
-                        && (col + width) % TAB_STOP == 0
-                        && (i == 0
-                            || chars[i - 1] == ' '
-                            || (i + 1 < chars.len() && chars[i + 1] == ' ')))
-                {
+                while i < chars.len() && chars[i] != '\t' {
                     i += 1;
                     width += 1;
                 }
@@ -159,19 +136,14 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn simple() {
-        let widget = Paragraph::new("\t\tHello\n\tWorld\n    Hello\n    World");
+        let widget = Paragraph::new("\t\tHello\n\tWorld");
 
-        let mut terminal = Terminal::new(TestBackend::new(17, 4)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(17, 2)).unwrap();
         terminal
             .draw(|frame| widget.render(frame.area(), frame.buffer_mut()))
             .unwrap();
 
-        let mut expected = Buffer::with_lines(vec![
-            "▸   ▸   Hello    ",
-            "▸   World        ",
-            "│   Hello        ",
-            "│   World        ",
-        ]);
+        let mut expected = Buffer::with_lines(vec!["▸   ▸   Hello    ", "▸   World        "]);
 
         // Apply the tab_spaces style to the special symbols
         let tab_spaces_style = global::theme().ui.tab_spaces;
@@ -184,30 +156,19 @@ mod tests {
         // Style the tab symbol on line 1
         expected.set_style(Rect::new(0, 1, 4, 1), tab_spaces_style);
 
-        // Style the space symbol on line 2
-        expected.set_style(Rect::new(0, 2, 1, 1), tab_spaces_style);
-
-        // Style the space symbol on line 3
-        expected.set_style(Rect::new(0, 3, 1, 1), tab_spaces_style);
-
         assert_eq!(terminal.backend().buffer(), &expected);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn tab_stop() {
-        let widget = Paragraph::new("ab\t\tHello\n\tWorld\n     Hello\n+      World");
+        let widget = Paragraph::new("ab\t\tHello\n\tWorld");
 
-        let mut terminal = Terminal::new(TestBackend::new(17, 4)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(17, 2)).unwrap();
         terminal
             .draw(|frame| widget.render(frame.area(), frame.buffer_mut()))
             .unwrap();
 
-        let mut expected = Buffer::with_lines(vec![
-            "ab▸ ▸   Hello    ",
-            "▸   World        ",
-            "│   │Hello       ",
-            "+   │  World     ",
-        ]);
+        let mut expected = Buffer::with_lines(vec!["ab▸ ▸   Hello    ", "▸   World        "]);
 
         // Apply the tab_spaces style to the special symbols
         let tab_spaces_style = global::theme().ui.tab_spaces;
@@ -217,13 +178,6 @@ mod tests {
 
         // Style the tab symbol on line 1
         expected.set_style(Rect::new(0, 1, 4, 1), tab_spaces_style);
-
-        // Style the space symbol on line 2
-        expected.set_style(Rect::new(0, 2, 1, 1), tab_spaces_style);
-        expected.set_style(Rect::new(4, 2, 1, 1), tab_spaces_style);
-
-        // Style the space symbol on line 3
-        expected.set_style(Rect::new(4, 3, 1, 1), tab_spaces_style);
 
         assert_eq!(terminal.backend().buffer(), &expected);
     }
