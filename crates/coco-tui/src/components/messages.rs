@@ -362,6 +362,38 @@ mod tests {
     use super::*;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn simple_system_message() {
+        let mut app = Messages::default();
+        app.extend(
+            [
+                Message::user(Plain::new("Hello".to_string()).into()),
+                Message::system(Plain::new("A message comes from system".to_string()).into()),
+            ]
+            .into_iter(),
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(20, 6)).unwrap();
+        terminal
+            .draw(|frame| app.draw(frame, frame.area()).unwrap())
+            .unwrap();
+
+        let mut expected = Buffer::with_lines(vec![
+            "                    ",
+            "│ User:  Hello      ",
+            "│                   ",
+            "│ A message comes   ",
+            "│ from system       ",
+            "│                   ",
+        ]);
+        let border_style = Style::new().dark_gray();
+        expected.set_style(Rect::new(0, 1, 1, 5), border_style);
+        let role_style = theme().ui.user_role;
+        expected.set_style(Rect::new(1, 1, 7, 1), role_style);
+
+        assert_eq!(terminal.backend().buffer(), &expected);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn simple_overflow() {
         let mut app = Messages::default();
         app.extend(

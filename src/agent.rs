@@ -9,7 +9,7 @@ use crate::Result;
 use executor::PermissionControl;
 
 mod executor;
-pub use anthropic::{Block, Content, Message, Role, ToolUse};
+pub use anthropic::{Block, Content, Message, Role, StopReason, ToolUse};
 pub use executor::{Executor, Input, Output};
 
 #[derive(Clone)]
@@ -18,6 +18,11 @@ pub struct Agent {
     executor: Executor,
     /// Shared messages across cloned instances.
     messages: Arc<Mutex<Vec<Message>>>,
+}
+
+pub struct ChatResponse {
+    pub message: Message,
+    pub stop_reason: Option<StopReason>,
 }
 
 impl Agent {
@@ -37,7 +42,7 @@ impl Agent {
         *self.messages.lock().await = messages.to_vec();
     }
 
-    pub async fn chat(&mut self, message: Message) -> Result<Message> {
+    pub async fn chat(&mut self, message: Message) -> Result<ChatResponse> {
         let (_, client) = self.pick_provider()?;
 
         let mut messages = self.messages.lock().await;
@@ -54,13 +59,17 @@ impl Agent {
             })
             .unwrap();
 
-        if response.content.is_empty() {
-            Ok(Message::assistant(Content::Multiple(Vec::default())))
+        let message = if response.content.is_empty() {
+            Message::assistant(Content::Multiple(Vec::default()))
         } else {
             let msg = Message::assistant(Content::Multiple(response.content));
             messages.push(msg.clone());
-            Ok(msg)
-        }
+            msg
+        };
+        Ok(ChatResponse {
+            message,
+            stop_reason: response.stop_reason,
+        })
     }
 
     pub fn grant_once(&mut self, id: &str, name: &str) {

@@ -1,7 +1,7 @@
 use coco_macro::ComponentExt;
 use code_combo::{
     Agent, Block as ChatBlock, Config, Content as ChatContent, Message as ChatMessage, Output,
-    TextEdit, ToolUse,
+    StopReason, TextEdit, ToolUse,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -445,12 +445,14 @@ impl Component for Chat<'static> {
             }
             Event::Answer(AnswerEvent::Bot(msgs)) => {
                 self.state.write().state = ChatState::Ready;
-                self.messages.extend(msgs.iter().cloned().map(|msg| {
-                    Message::bot(match msg {
-                        BotMessage::Plain(text) => Plain::new(text).into(),
-                        BotMessage::ToolUse(tool_use) => Tool::new(tool_use.to_owned()).into(),
-                    })
-                }));
+                self.messages
+                    .extend(msgs.iter().cloned().map(|msg| match msg {
+                        BotMessage::Plain(text) => Message::bot(Plain::new(text).into()),
+                        BotMessage::ToolUse(tool_use) => {
+                            Message::bot(Tool::new(tool_use.to_owned()).into())
+                        }
+                        BotMessage::System(message) => Message::system(Plain::new(message).into()),
+                    }));
                 // Trigger session save after receiving bot response
                 global::trigger_schedule_session_save();
             }
@@ -707,38 +709,66 @@ async fn task_chat(mut agent: Agent, content: ChatContent) {
     let msg = ChatMessage::user(content);
     tx.send(Event::Ask(AskEvent::Bot)).unwrap();
 
-    let msg = agent.chat(msg).await.expect("failed to chat with LLM");
+    let chat_resp = agent.chat(msg).await.expect("failed to chat with LLM");
 
     let mut to_execute: Vec<code_combo::ToolUse> = vec![];
-    tx.send(
-        AnswerEvent::Bot(match msg.content {
-            ChatContent::Text(text) => {
-                vec![BotMessage::Plain(text)]
+    let mut bot_messages = match chat_resp.message.content {
+        ChatContent::Text(text) => {
+            vec![BotMessage::Plain(text)]
+        }
+        ChatContent::Multiple(blocks) => {
+            to_execute.extend(blocks.iter().filter_map(|b| {
+                if let code_combo::Block::ToolUse(tool_use) = b {
+                    Some(tool_use.clone())
+                } else {
+                    None
+                }
+            }));
+            blocks
+                .into_iter()
+                .map(|m| match m {
+                    code_combo::Block::Text { text } => BotMessage::Plain(text),
+                    code_combo::Block::ToolUse(tool_use) => BotMessage::ToolUse(tool_use),
+                    _ => unreachable!("unknown content type: {:?}", m),
+                })
+                .collect()
+        }
+    };
+    if let Some(reason) = chat_resp.stop_reason {
+        let mut stop_executing = false;
+        match reason {
+            StopReason::MaxTokens => {
+                bot_messages.push(BotMessage::System(
+                    "Maximum token limit reached".to_string(),
+                ));
+                stop_executing = true;
             }
-            ChatContent::Multiple(blocks) => {
-                to_execute.extend(blocks.iter().filter_map(|b| {
-                    if let code_combo::Block::ToolUse(tool_use) = b {
-                        Some(tool_use.clone())
-                    } else {
-                        None
-                    }
-                }));
-                blocks
-                    .into_iter()
-                    .map(|m| match m {
-                        code_combo::Block::Text { text } => BotMessage::Plain(text),
-                        code_combo::Block::ToolUse(tool_use) => BotMessage::ToolUse(tool_use),
-                        _ => unreachable!("unknown content type: {:?}", m),
-                    })
-                    .collect()
+            StopReason::Refusal => {
+                bot_messages.push(BotMessage::System(
+                    "Response refused due to policy restrictions".to_string(),
+                ));
+                stop_executing = true;
             }
-        })
-        .into(),
-    )
-    .unwrap();
+            _ => (),
+        }
+
+        if stop_executing {
+            warn!(
+                executions_cnt = to_execute.len(),
+                ?reason,
+                "Stop reason indicates unsafe execution, cancelling tool executions"
+            );
+            to_execute.clear();
+        }
+    }
+
+    tx.send(AnswerEvent::Bot(bot_messages).into()).unwrap();
 
     if !to_execute.is_empty() {
-        debug!("run {} executions parallelly", to_execute.len());
+        debug!(
+            executions_cnt = to_execute.len(),
+            "run executions parallelly"
+        );
         // Parallel execution
         let handles = to_execute
             .into_iter()

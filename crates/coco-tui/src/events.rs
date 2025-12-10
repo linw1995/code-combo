@@ -69,4 +69,5 @@ impl From<ComboEvent> for Event {
 pub enum BotMessage {
     Plain(String),
     ToolUse(ToolUse),
+    System(String),
 }
