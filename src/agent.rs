@@ -29,6 +29,14 @@ impl Agent {
         }
     }
 
+    pub async fn dump_messages(&self) -> Vec<Message> {
+        self.messages.lock().await.clone()
+    }
+
+    pub async fn restore_messages(&mut self, messages: &[Message]) {
+        *self.messages.lock().await = messages.to_vec();
+    }
+
     pub async fn chat(&mut self, message: Message) -> Result<Message> {
         let (_, client) = self.pick_provider()?;
 

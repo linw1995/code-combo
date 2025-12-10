@@ -183,6 +183,12 @@ where
     }
 }
 
+impl<T: Clone> Clone for State<T> {
+    fn clone(&self) -> Self {
+        Self::new(T::clone(self))
+    }
+}
+
 pub struct WriteGuard<T> {
     inner: T,
 }

@@ -46,8 +46,11 @@ pub struct Chat<'a> {
     token_schedule_session_save: Option<CancellationToken>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Inner {
+    // Placeholder field for serialization
+    messages: Vec<code_combo::Message>,
+
     state: ChatState,
     focus: Focus,
     pending_chats: Vec<ChatBlock>,
@@ -62,6 +65,7 @@ impl Default for Inner {
     fn default() -> Self {
         let now = time::OffsetDateTime::now_utc();
         Self {
+            messages: vec![],
             state: ChatState::Ready,
             focus: Focus::Input,
             pending_chats: Vec::new(),
@@ -384,13 +388,25 @@ impl Chat<'static> {
 
 impl Persistable for Chat<'static> {
     fn save(&self) -> Session {
-        // FIXME: Save LLM messages from self.agent
-        session::save_related(&self.state, self.messages.save())
+        // Save LLM messages
+        let agent_messages = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.agent.dump_messages())
+        });
+        let mut state = self.state.get();
+        state.messages = agent_messages;
+
+        session::save_related(&state, self.messages.save())
     }
 
     fn load(session: Session) -> Result<Self> {
-        let (state, session): (Inner, Session) = session::load_related(session)?;
+        let (mut state, session): (Inner, Session) = session::load_related(session)?;
         let mut inst = Self::new(global::config_sync());
+
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(inst.agent.restore_messages(&state.messages));
+            state.messages.clear();
+        });
         inst.state = State::new(state);
         inst.messages = Messages::load(session)?;
         Ok(inst)
@@ -620,8 +636,7 @@ impl Component for Chat<'static> {
             Action::Session(SessionAction::RestoreSession(session)) => {
                 match Self::load(session.clone()) {
                     Ok(restored) => {
-                        self.state = restored.state;
-                        self.messages = restored.messages;
+                        *self = restored;
                         debug!(name = %self.state.name, "Session restored");
                         global::signal_dirty();
                     }
