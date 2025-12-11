@@ -24,7 +24,6 @@ use crate::{
 struct Inner {
     tool_use: ToolUse,
     edit: Option<TextEdit>,
-    appliable: bool,
 }
 
 #[derive(ComponentExt, ContentComponentExt)]
@@ -47,7 +46,6 @@ impl<'a> StrReplace<'a> {
             state: State::new(Inner {
                 tool_use: tool_use.to_owned(),
                 edit: None,
-                appliable: false,
             }),
             widget: StrReplaceWidget::Paragraph(Paragraph::new("")),
         }
@@ -80,7 +78,6 @@ impl<'a> StrReplace<'a> {
 
         let mut state = self.state.write();
         state.edit = Some(edit);
-        state.appliable = true;
         self.widget = widget;
     }
 }
@@ -94,11 +91,11 @@ impl Content for StrReplace<'_> {
     }
 
     fn is_actionable(&self) -> bool {
-        self.state.appliable
+        self.state.edit.is_some()
     }
 
     fn block_with_shortcuts_desc<'b>(&self, block: Block<'b>) -> Block<'b> {
-        if self.state.appliable {
+        if self.is_actionable() {
             block
                 .title_bottom(shortcuts_desc(&[("Apply", "CR")]))
                 .title_bottom(shortcuts_desc(&[("Reject", "Esc")]))
@@ -123,7 +120,7 @@ impl Persistable for StrReplace<'static> {
 
 impl Component for StrReplace<'static> {
     fn handle_key_event(&mut self, key: &KeyEvent) {
-        if self.state.appliable && self.state.edit.is_some() {
+        if self.state.edit.is_none() {
             return;
         }
 
@@ -135,10 +132,9 @@ impl Component for StrReplace<'static> {
             } // ignore
         };
 
-        let Some(edit) = self.state.edit.clone() else {
+        let Some(edit) = self.state.write().edit.take() else {
             return;
         };
-        self.state.write().appliable = false;
 
         global::action_tx()
             .send(Action::Tool(ToolAction::ApplyTextEdit {

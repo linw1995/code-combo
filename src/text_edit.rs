@@ -16,9 +16,16 @@ pub struct TextEdit {
 
 impl fmt::Debug for TextEdit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TextEdit")
+        let mut builder = f.debug_struct("TextEdit");
+        builder
             .field("path", &self.path)
-            .finish_non_exhaustive()
+            .field("text", &self.text)
+            .field("new_text", &self.new_text);
+        if self.origin.as_str() != self.text {
+            builder.field("origin", &self.origin).finish()
+        } else {
+            builder.finish_non_exhaustive()
+        }
     }
 }
 
@@ -104,20 +111,18 @@ impl TextEdit {
 
         let mut new_text = String::with_capacity(self.new_text.len());
         self.new_text
-            .split('\n') // Use split('\n') instead of String::lines() to preserve original line content
+            .split_inclusive('\n') // Use split_inclusive('\n') instead of String::lines() to preserve original line content
             .take(new_start)
             .chain(
                 self.text
-                    .split('\n')
+                    .split_inclusive('\n')
                     .skip(old_start)
                     .take(old_end - old_start),
             )
-            .chain(self.new_text.split('\n').skip(new_end))
+            .chain(self.new_text.split_inclusive('\n').skip(new_end))
             .for_each(|line| {
                 new_text.push_str(line);
-                new_text.push('\n');
             });
-        new_text.pop(); // Remove the last newline character
         new_text.shrink_to_fit();
 
         if new_text == self.text {
@@ -166,20 +171,18 @@ impl TextEdit {
 
         let mut applied_text = String::with_capacity(self.text.len() + self.new_text.len());
         self.text
-            .split('\n') // Use split('\n') instead of String::lines() to preserve original line content
+            .split_inclusive('\n') // Use split_inclusive('\n') instead of String::lines() to preserve original line content
             .take(old_start)
             .chain(
                 self.new_text
-                    .split('\n')
+                    .split_inclusive('\n')
                     .skip(new_start)
                     .take(new_end - new_start),
             )
-            .chain(self.text.split('\n').skip(old_end))
+            .chain(self.text.split_inclusive('\n').skip(old_end))
             .for_each(|line| {
                 applied_text.push_str(line);
-                applied_text.push('\n');
             });
-        applied_text.pop(); // Remove the last newline character
         applied_text.shrink_to_fit();
 
         let finished = applied_text == self.new_text;
@@ -267,6 +270,43 @@ mod tests {
             ],
             "Text diff should correctly identify the differences between original and new text"
         )
+    }
+
+    #[test]
+    fn apply_newline() {
+        let mut edit = TextEdit::new(
+            "./example.rs".parse().unwrap(),
+            "Hello world".to_string(),
+            "Hello world\n".to_string(),
+        );
+        let diff = edit.text_diff();
+        let hunk = diff
+            .unified_diff()
+            .iter_hunks()
+            .next()
+            .expect("should have at least one hunk");
+        assert_eq!(
+            hunk.ops(),
+            [Replace {
+                old_index: 0,
+                old_len: 1,
+                new_index: 0,
+                new_len: 1
+            }]
+        );
+        let new_text = edit.new_text.clone();
+        let (applied, rest) = edit
+            .apply_hunk(3, 0)
+            .expect("should successfully apply first hunk");
+        debug!(?applied.text, ?rest, "apply change result");
+        assert!(
+            rest.is_none(),
+            "Should return None for rest since all changes are applied in one hunk"
+        );
+        assert_eq!(
+            applied.text, &new_text,
+            "Applied text should match the target new_text after applying all changes"
+        );
     }
 
     #[test]
