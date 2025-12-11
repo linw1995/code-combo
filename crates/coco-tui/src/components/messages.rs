@@ -1,4 +1,4 @@
-use std::cmp::min;
+use std::{cmp::min, ops::Range};
 
 use coco_macro::ComponentExt;
 use crossterm::event::KeyEvent;
@@ -39,6 +39,7 @@ pub struct Messages {
     viewport_height: u16,
     /// Updated during rendering because it depends on viewport width
     total_height: u16,
+    /// offset is relative from bottom
     offset: State<u16>,
 }
 
@@ -64,7 +65,7 @@ impl Messages {
         self.messages.is_empty()
     }
 
-    fn new_scrollstate(&self) -> ScrollbarState {
+    pub fn scroll_position(&self) -> (u16, u16) {
         // N is the viewport sliding range on the whole content.
         // It has double end, so we need to add 1 to fit with position design.
         // position = N - 1: thumb at bottom
@@ -72,7 +73,11 @@ impl Messages {
         let hiden_range = self.total_height - self.viewport_height;
         let position_range = hiden_range + 1;
         let position = (position_range - 1) - self.offset.get();
-        trace!(?position_range, position, "print scroll state");
+        (position, position_range)
+    }
+
+    fn new_scrollstate(&self) -> ScrollbarState {
+        let (position, position_range) = self.scroll_position();
         ScrollbarState::new(position_range as usize).position(position as usize)
     }
 
@@ -189,15 +194,25 @@ impl Messages {
     }
 
     fn virtual_draw(&mut self, frame: &mut Frame, area: Rect, heights: &[usize]) -> Result<()> {
-        // FIXME: CPU intensive, try caching the virtual range result
-        trace!(?self.viewport_height, ?self.total_height, ?self.offset, "virtual draw");
+        let (position, _) = self.scroll_position();
+        let (position, start_idx, end_idx) =
+            find_visible_range(heights, self.viewport_height, position);
+        let total_height = heights
+            .iter()
+            .skip(start_idx)
+            .take(end_idx - start_idx)
+            .to_owned()
+            .sum::<usize>() as u16;
 
-        let v_area = Rect::new(0, 0, area.width, self.total_height);
+        let v_area = Rect::new(0, 0, area.width, total_height);
         let mem = TestBackend::new(v_area.width, v_area.height);
         let mut vtem = Terminal::new(mem).whatever_context("failed to new terminal")?;
 
         let completed_frame = vtem
-            .draw(|frame| self.actual_draw(frame, v_area, heights).unwrap())
+            .draw(|frame| {
+                self.actual_draw(frame, v_area, heights, start_idx..end_idx)
+                    .unwrap()
+            })
             .whatever_context("failed to draw terminal")?;
 
         let buf = frame.buffer_mut();
@@ -205,10 +220,7 @@ impl Messages {
             .buffer
             .content
             .iter()
-            .skip(
-                v_area.width as usize
-                    * ((self.total_height - self.viewport_height - self.offset.get()) as usize),
-            )
+            .skip(v_area.width as usize * (position as usize))
             .take(area.area() as usize);
 
         for (i, cell) in visible_content.enumerate() {
@@ -219,14 +231,27 @@ impl Messages {
         Ok(())
     }
 
-    fn actual_draw(&mut self, frame: &mut Frame, area: Rect, heights: &[usize]) -> Result<()> {
+    fn actual_draw(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        heights: &[usize],
+        range: Range<usize>,
+    ) -> Result<()> {
         use Constraint::Length;
 
-        let chunks = Layout::vertical(heights.iter().map(|h| Length(*h as u16)))
+        let chunks = Layout::vertical(heights[range.clone()].iter().map(|h| Length(*h as u16)))
             .flex(Flex::End)
             .split(area);
 
-        for (idx, message) in self.messages.write_untracked().iter_mut().enumerate() {
+        for (idx, message) in self
+            .messages
+            .write_untracked()
+            .iter_mut()
+            .enumerate()
+            .skip(range.start)
+            .take(range.end - range.start)
+        {
             let mut block = Block::new().borders(Borders::LEFT);
             block = if &Some(idx) == self.focus.read() {
                 block.border_set(border::THICK)
@@ -235,7 +260,7 @@ impl Messages {
                     .border_set(border::PLAIN)
                     .border_style(Style::default().dark_gray())
             };
-            let rect = chunks[idx];
+            let rect = chunks[idx - range.start];
             message.draw(frame, block.inner(rect)).unwrap();
             frame.render_widget(&block, rect);
         }
@@ -328,7 +353,7 @@ impl Component for Messages {
             self.virtual_draw(frame, area_list, &heights)?;
             self.draw_scrollbar(frame, area_bar)?;
         } else {
-            self.actual_draw(frame, area, &heights)?;
+            self.actual_draw(frame, area, &heights, 0..heights.len())?;
         }
 
         Ok(())
@@ -351,6 +376,50 @@ pub(super) fn shortcuts_desc<'a>(pairs: &[(&str, &str)]) -> Line<'a> {
     }
     spans.push(" ".into());
     Line::from(spans)
+}
+
+/// Find visible message index range using binary search
+///
+/// TODO: The result is cached and updated when new messages are added or the viewport is resized.
+fn find_visible_range(
+    heights: &[usize],
+    viewport_height: u16,
+    position: u16,
+) -> (u16, usize, usize) {
+    // Calculate cumulative heights
+    let mut cumulative_heights: Vec<u16> = Vec::with_capacity(heights.len() + 1);
+    let mut last = 0;
+    cumulative_heights.push(0);
+    for &h in heights {
+        last += h;
+        cumulative_heights.push(last as u16);
+    }
+    // The last element is the total height, which is not needed.
+    // Pop it to make array matching the number of messages.
+    cumulative_heights.pop();
+
+    let visible_start = position;
+    let visible_end = position + viewport_height;
+
+    // Binary search for start index - first message that intersects with visible area
+    let start_idx = match cumulative_heights.binary_search_by(|c| c.cmp(&visible_start)) {
+        Ok(idx) => idx,
+        Err(idx) => idx.saturating_sub(1),
+    };
+
+    // Binary search for end index - first message after visible area
+    let end_idx = match cumulative_heights.binary_search_by(|c| c.cmp(&visible_end)) {
+        Ok(idx) => idx + 1,
+        Err(idx) => idx,
+    };
+
+    // Ensure indices are within valid range
+    let start_idx = start_idx.min(cumulative_heights.len().saturating_sub(1));
+    let end_idx = end_idx.min(cumulative_heights.len());
+    // Adjust the position to align with the visible range
+    let position = position - cumulative_heights[start_idx];
+
+    (position, start_idx, end_idx)
 }
 
 #[cfg(test)]
