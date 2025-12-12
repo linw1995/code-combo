@@ -28,11 +28,6 @@ impl Action {
         .into()
     }
 
-    /// Create a Session action with immediate save
-    pub fn save_session_now() -> Self {
-        SessionAction::SaveNow.into()
-    }
-
     /// Restore last Session
     pub fn restore_last_session() -> Self {
         SessionAction::RestoreLastSession.into()
@@ -79,7 +74,6 @@ impl From<ToolAction> for Action {
 #[derive(Debug, Clone)]
 pub enum SessionAction {
     ScheduleSave { save_at: Instant },
-    SaveNow,
     RestoreLastSession,
     RestoreSession(Session),
 }

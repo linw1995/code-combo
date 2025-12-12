@@ -128,7 +128,7 @@ impl Chat<'static> {
         }
     }
 
-    fn trigger_save(&mut self, save_at: Instant) {
+    fn schedule_save_task(&mut self, save_at: Instant) {
         // Cancel existing timer if any
         if let Some(token) = self.token_schedule_session_save.take() {
             token.cancel();
@@ -136,42 +136,48 @@ impl Chat<'static> {
 
         let token = CancellationToken::new();
         self.token_schedule_session_save = Some(token.clone());
-        tokio::spawn(async move {
-            tokio::select! {
-                _ = token.cancelled() => (),
-                _ = tokio::time::sleep_until(save_at) => {
-                    global::action_tx().send(Action::save_session_now()).unwrap();
-                }
-            }
-        });
-    }
 
-    fn save_now(&self) {
-        let session_dir = std::path::Path::new(".coco/sessions");
-        let session = self.save();
-        let name = self.state.name.clone();
-        let created_at = self.state.created_at;
+        let mut state = self.state.get();
+        let messages = self.messages.save();
+        let agent = self.agent.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = tokio::fs::create_dir_all(session_dir).await {
+            // Take a snapshot immediately to avoid persisting later dirty state
+            state.messages = agent.dump_messages().await;
+
+            let session_dir = std::path::Path::new(".coco/sessions").to_path_buf();
+            if let Err(e) = tokio::fs::create_dir_all(&session_dir).await {
                 warn!(?e, "failed to create session directory");
                 return;
             }
 
             let now = time::OffsetDateTime::now_utc();
             let persistent_session = crate::session::PersistentSession {
-                name,
-                inner: session,
-                created_at,
+                name: state.name.clone(),
+                inner: session::save_related(&state, messages),
+                created_at: state.created_at,
                 updated_at: now,
             };
 
-            if let Err(e) = crate::session::save_session(session_dir, persistent_session).await {
-                warn!(?e, "failed to save session");
-            } else {
-                debug!("Session saved successfully");
+            tokio::select! {
+                _ = token.cancelled() => (),
+                _ = tokio::time::sleep_until(save_at) => {
+                    if let Err(e) = crate::session::save_session(&session_dir, persistent_session).await {
+                        warn!(?e, "failed to save session");
+                    } else {
+                        debug!("Session saved successfully");
+                    }
+                }
             }
         });
+    }
+
+    fn save_at(&mut self, save_at: Instant) {
+        self.schedule_save_task(save_at);
+    }
+
+    fn save_now(&mut self) {
+        self.schedule_save_task(Instant::now());
     }
 
     fn restore_last_session(&mut self) {
@@ -623,14 +629,10 @@ impl Component for Chat<'static> {
                     global::trigger_schedule_session_save();
                 }
             },
-            Action::Session(SessionAction::SaveNow) => {
-                // Immediate save
-                self.save_now();
-            }
             Action::Session(SessionAction::ScheduleSave { save_at }) => {
                 // Schedule a debounced save
                 self.state.write_untracked().updated_at = OffsetDateTime::now_utc();
-                self.trigger_save(save_at.to_owned());
+                self.save_at(save_at.to_owned());
             }
             Action::Session(SessionAction::RestoreLastSession) => {
                 self.restore_last_session();
