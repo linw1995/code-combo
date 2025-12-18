@@ -1,17 +1,28 @@
-use std::process::Stdio;
+use std::{
+    io::ErrorKind,
+    path::{Path, PathBuf},
+    pin::Pin,
+    process::Stdio,
+    task::{Context, Poll},
+};
 
-use serde::{Deserialize, Serialize};
+use futures_core::Stream;
+use futures_util::StreamExt;
 use snafu::prelude::*;
+use time::OffsetDateTime;
 use tokio::{
     fs,
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process,
-    sync::broadcast,
+    sync::{mpsc, oneshot},
     task::{self, JoinHandle},
 };
-use tracing::{debug, error, warn};
+use tracing::{debug, info, warn};
 
-use crate::{Combo, parse};
+use crate::{
+    ClientMessage, Combo, ComboMetadata, ComboMode, ControlAction, Instruction, MetadataPayload,
+    MetadataResponse, RecordControl, RecordEndPayload, ServerMessage, SessionEnv,
+    SessionSocketServer, StreamKind,
+    exec::{ChunkConfig, ExecCommand, OutputChunk, ProcessEvent},
+};
 
 #[derive(Debug, Clone, Snafu)]
 pub enum StarterError {
@@ -21,6 +32,8 @@ pub enum StarterError {
     NotExcutable,
     #[snafu(display("Invalid combo: {reason}"))]
     Invalid { reason: String },
+    #[snafu(display("Starter execution was cancelled"))]
+    Cancelled,
 }
 
 #[derive(Debug, Clone)]
@@ -29,14 +42,150 @@ pub struct Starter {
     pub combo: Result<Combo, StarterError>,
 }
 
+#[derive(Debug, Clone)]
+pub enum StarterEvent {
+    Started { command: String, args: Vec<String> },
+    Output { chunk: OutputChunk },
+    Finished { exit_code: Option<i32> },
+    Cancelled,
+    Failed { reason: String },
+}
+
+#[derive(Default, Debug)]
+struct SessionState {
+    metadata: Option<MetadataPayload>,
+    items: Vec<SessionItem>,
+}
+
+#[derive(Debug)]
+enum SessionItem {
+    Record(RecordedCommand),
+    Prompt(String),
+}
+
+#[derive(Debug)]
+struct RecordedCommand {
+    command: Vec<String>,
+    stdout: Vec<String>,
+    stderr: Vec<String>,
+    exit_code: Option<i32>,
+}
+
+#[derive(Debug)]
+pub struct StarterExecution {
+    join_handle: JoinHandle<Starter>,
+    cancel_tx: Option<oneshot::Sender<()>>,
+    events_rx: mpsc::Receiver<StarterEvent>,
+}
+
+impl Stream for StarterExecution {
+    type Item = StarterEvent;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        this.events_rx.poll_recv(cx)
+    }
+}
+
+impl StarterExecution {
+    pub fn cancel(&mut self) {
+        if let Some(cancel_tx) = self.cancel_tx.take() {
+            cancel_tx.send(()).ok();
+        }
+    }
+
+    pub async fn wait(self) -> Result<Starter, tokio::task::JoinError> {
+        self.join_handle.await
+    }
+}
+
+#[derive(Debug)]
+pub struct StarterCommand {
+    command: String,
+    args: Vec<String>,
+    envs: Vec<(String, String)>,
+    discovery: bool,
+    session_env: Option<SessionEnv>,
+}
+
+impl StarterCommand {
+    pub fn new(command: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+            args: Vec::new(),
+            envs: Vec::new(),
+            discovery: false,
+            session_env: None,
+        }
+    }
+
+    pub fn args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.args = args.into_iter().map(Into::into).collect();
+        self
+    }
+
+    pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.envs.push((key.into(), value.into()));
+        self
+    }
+
+    pub fn envs<I, K, V>(mut self, envs: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.envs = envs
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect();
+        self
+    }
+
+    pub fn discovery(mut self, discovery: bool) -> Self {
+        self.discovery = discovery;
+        self
+    }
+
+    pub fn session_env(mut self, session_env: SessionEnv) -> Self {
+        self.session_env = Some(session_env);
+        self
+    }
+
+    pub fn execute(self) -> StarterExecution {
+        execute_command(
+            self.command,
+            self.args,
+            self.envs,
+            self.discovery,
+            self.session_env,
+        )
+    }
+}
+
 pub async fn discover_combo_starters(path: &str) -> Vec<Starter> {
     match fs::read_dir(path).await {
         Ok(mut entries) => {
             let mut starters = vec![];
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let path = entry.path();
-                let (execution, _) = execute_starter(&path.to_string_lossy(), false);
-                starters.push(execution.await.expect("execute_starter success"));
+                let session_env = SessionEnv::builder()
+                    .build()
+                    .expect("failed to build session");
+                let execution = StarterCommand::new(path.to_string_lossy())
+                    .discovery(true)
+                    .session_env(session_env)
+                    .execute();
+                starters.push(
+                    execution
+                        .wait()
+                        .await
+                        .expect("execute_starter task success"),
+                );
             }
             starters
         }
@@ -47,141 +196,640 @@ pub async fn discover_combo_starters(path: &str) -> Vec<Starter> {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum LineContent {
-    Stdout(String),
-    Stderr(String),
+fn parse_combo(command: &str, text: &str) -> Combo {
+    let filtered = text
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("coco record"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let name = Path::new(command)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("combo")
+        .to_string();
+
+    let instructions = if filtered.trim().is_empty() {
+        Vec::new()
+    } else {
+        vec![Instruction::Text(filtered)]
+    };
+
+    Combo {
+        metadata: ComboMetadata {
+            name,
+            description: String::new(),
+            mode: ComboMode::Unknown,
+        },
+        instructions,
+    }
 }
 
-impl std::fmt::Display for LineContent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            LineContent::Stdout(text) => f.write_str(text),
-            LineContent::Stderr(text) => f.write_str(text),
+fn record_to_instruction(record: RecordedCommand) -> Instruction {
+    let mut sections = vec![];
+    if !record.stdout.is_empty() {
+        sections.push(record.stdout.join("\n"));
+    }
+    if !record.stderr.is_empty() {
+        let mut stderr = String::from("STDERR:\n");
+        stderr.push_str(&record.stderr.join("\n"));
+        sections.push(stderr);
+    }
+    if let Some(code) = record.exit_code {
+        sections.push(format!("Exit code: {code}"));
+    }
+
+    Instruction::Command {
+        command: record.command.join(" "),
+        output: sections.join("\n\n"),
+    }
+}
+
+fn build_combo_from_session(
+    command: &str,
+    buffer: &str,
+    session_state: Option<SessionState>,
+) -> Result<Combo, StarterError> {
+    if let Some(state) = session_state {
+        let metadata = state.metadata.ok_or_else(|| {
+            InvalidSnafu {
+                reason: "metadata not received from session".to_string(),
+            }
+            .build()
+        })?;
+        let instructions = if state.items.is_empty() {
+            parse_combo(command, buffer).instructions
+        } else {
+            state
+                .items
+                .into_iter()
+                .map(|item| match item {
+                    SessionItem::Record(record) => record_to_instruction(record),
+                    SessionItem::Prompt(prompt) => Instruction::Text(prompt),
+                })
+                .collect()
+        };
+        return Ok(Combo {
+            metadata: ComboMetadata {
+                name: metadata.name,
+                description: metadata.description.unwrap_or_default(),
+                mode: ComboMode::Unknown,
+            },
+            instructions,
+        });
+    }
+
+    Ok(parse_combo(command, buffer))
+}
+
+fn execute_command(
+    command: String,
+    args: Vec<String>,
+    envs: Vec<(String, String)>,
+    discovery: bool,
+    session_env: Option<SessionEnv>,
+) -> StarterExecution {
+    let session_env_envs = session_env
+        .as_ref()
+        .map(|env| {
+            env.envs().into_iter().map(|(k, v)| {
+                (
+                    k.to_string_lossy().to_string(),
+                    v.to_string_lossy().to_string(),
+                )
+            })
+        })
+        .into_iter()
+        .flatten();
+    let merged_envs = envs.into_iter().chain(session_env_envs).collect::<Vec<_>>();
+    let (event_tx, events_rx) = mpsc::channel(16);
+    let (cancel_tx, cancel_rx) = oneshot::channel();
+
+    let join_handle = task::spawn(async move {
+        let _session_env_guard = session_env;
+        let mut session_server = match _session_env_guard.as_ref() {
+            Some(env) => match spawn_session_server(env, discovery, event_tx.clone()).await {
+                Ok(task) => Some(task),
+                Err(error) => {
+                    event_tx
+                        .send(StarterEvent::Failed {
+                            reason: error.to_string(),
+                        })
+                        .await
+                        .ok();
+                    return Starter {
+                        path: command,
+                        combo: Err(error),
+                    };
+                }
+            },
+            None => {
+                let error = InvalidSnafu {
+                    reason: "session env is required for starter execution".to_string(),
+                }
+                .build();
+                event_tx
+                    .send(StarterEvent::Failed {
+                        reason: error.to_string(),
+                    })
+                    .await
+                    .ok();
+                return Starter {
+                    path: command,
+                    combo: Err(error),
+                };
+            }
+        };
+        let event_tx = event_tx;
+        let mut cancel_rx = cancel_rx;
+
+        let argv = std::iter::once(command.clone())
+            .chain(args.iter().cloned())
+            .collect::<Vec<_>>();
+        let mut proc = match ExecCommand::from_argv(argv)
+            .stdin(Stdio::piped())
+            .envs(merged_envs)
+            .spawn_chunked(ChunkConfig::default())
+        {
+            Ok(proc) => proc,
+            Err(err) => {
+                let error = match err.kind() {
+                    ErrorKind::PermissionDenied => NotExcutableSnafu.build(),
+                    _ => InvalidSnafu {
+                        reason: format!("excuting error: {err}"),
+                    }
+                    .build(),
+                };
+                event_tx
+                    .send(StarterEvent::Failed {
+                        reason: error.to_string(),
+                    })
+                    .await
+                    .ok();
+                return Starter {
+                    path: command,
+                    combo: Err(error),
+                };
+            }
+        };
+
+        event_tx
+            .send(StarterEvent::Started {
+                command: command.clone(),
+                args: args.clone(),
+            })
+            .await
+            .ok();
+
+        let mut buffer = String::new();
+        let mut cancelled = false;
+        let mut exit_code: Option<i32> = None;
+
+        loop {
+            tokio::select! {
+                _ = &mut cancel_rx, if !cancelled => {
+                    cancelled = true;
+                    proc.killer.kill();
+                    info!(?command, "execution cancelled");
+                }
+                event = proc.events.next() => {
+                    let Some(event) = event else { break };
+                    match event {
+                        ProcessEvent::Started { .. } => {}
+                        ProcessEvent::Chunk(chunk) => {
+                            if cancelled {
+                                continue;
+                            }
+                            for line in &chunk.lines {
+                                buffer.push_str(line);
+                                buffer.push('\n');
+                            }
+                            event_tx.send(StarterEvent::Output { chunk }).await.ok();
+                        }
+                        ProcessEvent::Exited { exit_code: code, .. } => {
+                            exit_code = code;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        debug!("wait finished");
+        let wait_result = proc.wait().await;
+        if cancelled {
+            event_tx.send(StarterEvent::Cancelled).await.ok();
+            if let Some(task) = session_server.take() {
+                task.abort();
+            }
+            return Starter {
+                path: command,
+                combo: Err(StarterError::Cancelled),
+            };
+        }
+
+        let combo = match wait_result {
+            Ok(status) => {
+                event_tx
+                    .send(StarterEvent::Finished {
+                        exit_code: exit_code.or_else(|| status.code()),
+                    })
+                    .await
+                    .ok();
+                if discovery && !status.success() {
+                    if let Some(task) = session_server.take() {
+                        task.abort();
+                    }
+                    Err(InvalidSnafu {
+                        reason: format!(
+                            "starter exited with status {:?} during discovery",
+                            status.code()
+                        ),
+                    }
+                    .build())
+                } else {
+                    if discovery {
+                        if let Some(task) = session_server.take() {
+                            task.abort();
+                        }
+                        let combo = parse_combo(&command, &buffer);
+                        return Starter {
+                            path: command,
+                            combo: Ok(combo),
+                        };
+                    }
+                    let session_state = if let Some(mut task) = session_server.take() {
+                        task.shutdown();
+                        match task.handle.await {
+                            Ok(Ok(state)) => Some(state),
+                            Ok(Err(err)) => {
+                                event_tx
+                                    .send(StarterEvent::Failed {
+                                        reason: err.to_string(),
+                                    })
+                                    .await
+                                    .ok();
+                                return Starter {
+                                    path: command,
+                                    combo: Err(err),
+                                };
+                            }
+                            Err(err) => {
+                                let error = InvalidSnafu {
+                                    reason: format!("session server join error: {err}"),
+                                }
+                                .build();
+                                event_tx
+                                    .send(StarterEvent::Failed {
+                                        reason: error.to_string(),
+                                    })
+                                    .await
+                                    .ok();
+                                return Starter {
+                                    path: command,
+                                    combo: Err(error),
+                                };
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    build_combo_from_session(&command, &buffer, session_state)
+                }
+            }
+            Err(err) => {
+                let error = InvalidSnafu {
+                    reason: format!("excuting error: {err}"),
+                }
+                .build();
+                if let Some(task) = session_server.take() {
+                    task.abort();
+                }
+                event_tx
+                    .send(StarterEvent::Failed {
+                        reason: error.to_string(),
+                    })
+                    .await
+                    .ok();
+                Err(error)
+            }
+        };
+
+        Starter {
+            path: command,
+            combo,
+        }
+    });
+
+    StarterExecution {
+        join_handle,
+        cancel_tx: Some(cancel_tx),
+        events_rx,
+    }
+}
+
+struct SessionServerTask {
+    handle: JoinHandle<Result<SessionState, StarterError>>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+}
+
+#[derive(Debug, Snafu)]
+enum SessionServerSetupError {
+    #[snafu(display("failed to clean old session socket {path:?}: {source}"))]
+    RemoveOldSessionSocket {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
+    #[snafu(display("failed to bind session socket {path:?}: {source}"))]
+    BindSessionSocket {
+        path: PathBuf,
+        source: crate::SessionServerError,
+    },
+
+    #[snafu(display("failed to accept session connection: {source}"))]
+    AcceptSessionConnection { source: crate::SessionServerError },
+}
+
+impl From<SessionServerSetupError> for StarterError {
+    fn from(err: SessionServerSetupError) -> Self {
+        Self::Invalid {
+            reason: err.to_string(),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Line {
-    pub timestamp: i64,
-    pub content: LineContent,
+impl SessionServerTask {
+    fn shutdown(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            tx.send(()).ok();
+        }
+    }
+
+    fn abort(&self) {
+        self.handle.abort();
+    }
 }
 
-pub fn execute_starter(
-    path: &str,
-    confirm: bool,
-) -> (JoinHandle<Starter>, broadcast::Receiver<Vec<Line>>) {
-    let path = path.to_string();
+async fn spawn_session_server(
+    env: &SessionEnv,
+    discovery: bool,
+    event_tx: mpsc::Sender<StarterEvent>,
+) -> Result<SessionServerTask, StarterError> {
+    let path = env.socket_path().to_path_buf();
+    if path.exists() {
+        std::fs::remove_file(&path).context(RemoveOldSessionSocketSnafu { path: path.clone() })?;
+    }
+    let server = SessionSocketServer::bind(&path)
+        .await
+        .context(BindSessionSocketSnafu { path: path.clone() })?;
 
-    let (tx, rx) = broadcast::channel(16);
-    (
-        task::spawn(async move {
-            let combo = match process::Command::new(path.clone())
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-            {
-                Err(err) => Err(InvalidSnafu {
-                    reason: format!("excuting error: {err}"),
-                }
-                .build()),
-                Ok(mut cmd) => {
-                    let mut stdin = cmd.stdin.take().unwrap();
-                    let stdout = cmd.stdout.take().unwrap();
-                    let stderr = cmd.stderr.take().unwrap();
-                    let mut stdout_reader = BufReader::new(stdout).lines();
-                    let mut stderr_reader = BufReader::new(stderr).lines();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    Ok(SessionServerTask {
+        handle: tokio::spawn(async move {
+            let rv = run_session_server(server, discovery, event_tx, shutdown_rx).await;
+            match &rv {
+                Ok(state) => info!(?state, "succeed to run session server"),
+                Err(err) => warn!(?err, "failed to run session server"),
+            };
+            rv
+        }),
+        shutdown_tx: Some(shutdown_tx),
+    })
+}
 
-                    let mut buffer = String::new();
+async fn run_session_server(
+    server: SessionSocketServer,
+    discovery: bool,
+    event_tx: mpsc::Sender<StarterEvent>,
+    mut shutdown_rx: oneshot::Receiver<()>,
+) -> Result<SessionState, StarterError> {
+    let mut state = SessionState::default();
+    let mut metadata_seen = false;
+    let mut first_message = true;
 
-                    if confirm {
-                        stdin
-                            .write("\n".as_bytes())
-                            .await
-                            .inspect_err(|err| warn!(?err, "Send confirm error"))
-                            .ok();
-                    }
-                    drop(stdin);
+    loop {
+        let accept = tokio::select! {
+            _ = &mut shutdown_rx => break,
+            accept = server.accept() => accept,
+        };
+        let mut conn = accept.context(AcceptSessionConnectionSnafu)?;
 
-                    let mut stderr_closed = false;
-                    let mut stdout_closed = false;
-                    let mut batch = vec![];
-                    let delay = tokio::time::Duration::from_millis(500);
-                    loop {
-                        tokio::select! {
-                            line = stdout_reader.next_line(), if !stdout_closed => {
-                                match line {
-                                    Ok(Some(line)) => {
-                                        buffer.push_str(&line);
-                                        buffer.push('\n');
-                                        let line = Line {
-                                            timestamp: chrono::Local::now().timestamp(),
-                                            content: LineContent::Stdout(line),
-                                        };
-                                        batch.push(line);
-                                    },
-                                    Ok(None) => {
-                                        debug!("stdout closed");
-                                        stdout_closed = true;
-                                    },
-                                    Err(e) => {
-                                        error!(err = ?e, "Error reading stdout");
-                                        stdout_closed = true;
-                                    }
-                                }
-                            },
-                            line = stderr_reader.next_line(), if !stderr_closed => {
-                                match line {
-                                    Ok(Some(line)) => {
-                                        buffer.push_str(&line);
-                                        buffer.push('\n');
-                                        let line = Line {
-                                            timestamp: chrono::Local::now().timestamp(),
-                                            content: LineContent::Stderr(line),
-                                        };
-                                        batch.push(line);
-                                    },
-                                    Ok(None) => {
-                                        debug!("stderr closed");
-                                        stderr_closed = true;
-                                    },
-                                    Err(e) => {
-                                        error!(err = ?e, "Error reading stderr");
-                                        stderr_closed = true;
-                                    }
-                                }
-                            },
-                            _ = tokio::time::sleep(delay), if !stdout_closed || !stderr_closed => {
-                               tx.send(batch.clone()).ok(); // It's ok that no receiver
-                               batch.clear();
-                            },
-                            else => break, // Both streams exhausted
+        let mut current_record_index: Option<usize> = None;
+
+        loop {
+            let message = tokio::select! {
+                _ = &mut shutdown_rx => {
+                    if !metadata_seen {
+                        return Err(InvalidSnafu {
+                            reason: "metadata not received from session".to_string(),
                         }
+                        .build());
                     }
-                    if !batch.is_empty() {
-                        tx.send(batch).ok(); // It's ok that no receiver
-                    }
-                    debug!(buffer = buffer.as_str(), "combo output");
-                    Ok(parse(&buffer))
-                }
+                    return Ok(state);
+                },
+                message = conn.read_client_message() => message,
             };
 
-            Starter { path, combo }
-        }),
-        rx,
-    )
+            match message {
+                Ok(ClientMessage::Metadata(payload)) => {
+                    if !first_message || metadata_seen {
+                        let _ = conn
+                            .send_server_message(&ServerMessage::RecordControl(RecordControl {
+                                action: ControlAction::Interrupt,
+                            }))
+                            .await;
+                        return Err(InvalidSnafu {
+                            reason: "metadata must be the first and only metadata message"
+                                .to_string(),
+                        }
+                        .build());
+                    }
+                    metadata_seen = true;
+                    state.metadata = Some(payload);
+                    let _ = conn
+                        .send_server_message(&ServerMessage::Metadata(MetadataResponse {
+                            discovery,
+                        }))
+                        .await;
+                    first_message = false;
+                }
+                Ok(ClientMessage::RecordStart(payload)) => {
+                    if discovery || !metadata_seen {
+                        let _ = conn
+                            .send_server_message(&ServerMessage::RecordControl(RecordControl {
+                                action: ControlAction::Interrupt,
+                            }))
+                            .await;
+                        return Err(InvalidSnafu {
+                            reason:
+                                "record commands are not allowed in discovery or before metadata"
+                                    .to_string(),
+                        }
+                        .build());
+                    }
+                    let record_index = state.items.len();
+                    state.items.push(SessionItem::Record(RecordedCommand {
+                        command: payload.command.clone(),
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        exit_code: None,
+                    }));
+                    current_record_index = Some(record_index);
+                    let _ = conn
+                        .send_server_message(&ServerMessage::RecordControl(RecordControl {
+                            action: ControlAction::Allow,
+                        }))
+                        .await;
+                    first_message = false;
+                }
+                Ok(ClientMessage::RecordChunk(chunk)) => {
+                    if discovery {
+                        let _ = conn
+                            .send_server_message(&ServerMessage::RecordControl(RecordControl {
+                                action: ControlAction::Interrupt,
+                            }))
+                            .await;
+                        return Err(InvalidSnafu {
+                            reason: "record chunk is not allowed during discovery".to_string(),
+                        }
+                        .build());
+                    }
+                    let stream = chunk.stream;
+                    let lines = chunk.lines;
+                    let Some(record_index) = current_record_index else {
+                        continue;
+                    };
+                    let Some(SessionItem::Record(record)) = state.items.get_mut(record_index)
+                    else {
+                        continue;
+                    };
+
+                    match stream {
+                        StreamKind::Stdout => record.stdout.extend(lines.clone()),
+                        StreamKind::Stderr => record.stderr.extend(lines.clone()),
+                    }
+                    let _ = event_tx
+                        .send(StarterEvent::Output {
+                            chunk: OutputChunk {
+                                timestamp: OffsetDateTime::now_utc().unix_timestamp(),
+                                stream,
+                                lines,
+                            },
+                        })
+                        .await;
+                }
+                Ok(ClientMessage::RecordEnd(RecordEndPayload {
+                    exit_code,
+                    stdout,
+                    stderr,
+                    ..
+                })) => {
+                    if discovery {
+                        let _ = conn
+                            .send_server_message(&ServerMessage::RecordControl(RecordControl {
+                                action: ControlAction::Interrupt,
+                            }))
+                            .await;
+                        return Err(InvalidSnafu {
+                            reason: "record end is not allowed during discovery".to_string(),
+                        }
+                        .build());
+                    }
+                    let Some(record_index) = current_record_index.take() else {
+                        continue;
+                    };
+                    let Some(SessionItem::Record(record)) = state.items.get_mut(record_index)
+                    else {
+                        continue;
+                    };
+
+                    if let Some(stdout) = stdout {
+                        record.stdout.push(stdout);
+                    }
+                    if let Some(stderr) = stderr {
+                        record.stderr.push(stderr);
+                    }
+                    record.exit_code = exit_code;
+                }
+                Ok(ClientMessage::Prompt(payload)) => {
+                    if !metadata_seen {
+                        return Err(InvalidSnafu {
+                            reason: "prompt is not allowed before metadata".to_string(),
+                        }
+                        .build());
+                    }
+                    if !discovery {
+                        state.items.push(SessionItem::Prompt(payload.prompt));
+                    }
+                    first_message = false;
+                }
+                Err(err) => {
+                    if !metadata_seen {
+                        return Err(InvalidSnafu {
+                            reason: format!("failed before receiving metadata: {err}"),
+                        }
+                        .build());
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    if !metadata_seen {
+        return Err(InvalidSnafu {
+            reason: "metadata not received from session".to_string(),
+        }
+        .build());
+    }
+
+    Ok(state)
 }
 
 #[cfg(test)]
 mod test {
     use std::os::unix::fs::PermissionsExt;
+    use std::{path::PathBuf, sync::OnceLock};
 
     use indoc::formatdoc;
     use tempfile::TempDir;
 
-    use crate::{ComboMode, Instruction};
+    use crate::combo::{RecordStartPayload, SessionSocketClient};
+    use crate::{ComboMode, Instruction, MetadataPayload, SessionEnv};
+    use tokio::sync::mpsc;
+    use tokio::time::Duration;
+
+    static COCO_BIN_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+    fn coco_binary() -> PathBuf {
+        COCO_BIN_PATH
+            .get_or_init(|| {
+                if let Ok(path) = std::env::var("COCO_BIN") {
+                    return PathBuf::from(path);
+                }
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("target")
+                    .join("debug")
+                    .join("coco")
+            })
+            .clone()
+    }
+
+    fn session_env_with_coco() -> SessionEnv {
+        let path = coco_binary();
+        assert!(
+            path.exists(),
+            "coco binary not found at {:?}; build `cargo build -p code-combo --bin coco` first or set COCO_BIN",
+            path
+        );
+        SessionEnv::builder()
+            .binary_path(&path)
+            .command_name("coco")
+            .build()
+            .expect("build session env")
+    }
 
     use super::*;
 
@@ -220,46 +868,55 @@ mod test {
     }
 
     #[tokio::test]
-    async fn execute_starter_abort() -> Result<(), Box<dyn std::error::Error>> {
+    async fn execute_starter_emits_failed_reason_without_session_env()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_guard, file_path) =
+            create_temp_combo("no_session.sh", "#!/bin/sh\n\nexit 0\n").await?;
+
+        let mut execution = StarterCommand::new(file_path).execute();
+        let event = execution.next().await;
+        let Some(StarterEvent::Failed { reason }) = event else {
+            panic!("expected StarterEvent::Failed, got {event:?}");
+        };
+        assert!(
+            reason.contains("session env is required"),
+            "unexpected reason: {reason}"
+        );
+
+        let Starter { combo, .. } = execution.wait().await?;
+        assert!(matches!(combo, Err(StarterError::Invalid { .. })));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn execute_starter_in_discovery() -> Result<(), Box<dyn std::error::Error>> {
         let bash = find_bash();
+        let session_env = session_env_with_coco();
         let (_guard, file_path) = create_temp_combo(
             "commit.sh",
             formatdoc! {r#"
             #!{bash}
 
-            cat <<EOF
-            ---
-            name: commit
-            description: Git Commit with Proper Message
-            mode: bash_xtrace
-            command_prefix: "$ "
-            ---
-            Check the recent commits and adhere to the established commit message format.
+            coco metadata name=commit || exit 0
 
-            Summarize the staged changes and commit them with a clear, concise, and formatted message as a single commit.
-            EOF
-
-            # Enter to continue, Ctrl-D to abort
-            read -rs || exit
-            "#}.as_str(),
+            echo "Instruction line 1"
+            echo "Instruction line 2"
+            "#}
+            .as_str(),
         )
-            .await?;
+        .await?;
 
-        let (execution, _) = execute_starter(&file_path, false);
-        let Starter { path, combo } = execution.await?;
+        let execution = StarterCommand::new(&file_path)
+            .discovery(true)
+            .session_env(session_env)
+            .execute();
+        let Starter { path, combo } = execution.wait().await?;
         debug!(?path, ?combo, "execute_starter success");
         assert_eq!(path, file_path);
         assert!(combo.is_ok());
         let combo = combo.unwrap();
         assert_eq!(combo.metadata.name, "commit");
-        assert_eq!(combo.metadata.description, "Git Commit with Proper Message");
-        assert_eq!(
-            combo.metadata.mode,
-            ComboMode::BashXtrace {
-                command_prefix: "$ ".to_string()
-            }
-        );
-        assert_eq!(combo.instructions.len(), 1);
 
         Ok(())
     }
@@ -267,21 +924,13 @@ mod test {
     #[tokio::test]
     async fn execute_starter_continue() -> Result<(), Box<dyn std::error::Error>> {
         let bash = find_bash();
+        let session_env = session_env_with_coco();
         let (_guard, file_path) = create_temp_combo(
             "test.sh",
             formatdoc! {r#"
             #!{bash}
 
-            cat <<-EOF
-            ---
-            name: test
-            mode: bash_xtrace
-            command_prefix: "$ "
-            ---
-            EOF
-
-            # Enter to continue, Ctrl-D to abort
-            read -rs || exit
+            coco metadata name=test || exit 0
 
             echo "Hello world"
             "#}
@@ -289,25 +938,278 @@ mod test {
         )
         .await?;
 
-        let (execution, _) = execute_starter(&file_path, true);
-        let Starter { path, combo } = execution.await?;
+        let execution = StarterCommand::new(&file_path)
+            .session_env(session_env)
+            .execute();
+        let Starter { path, combo } = execution.wait().await?;
         debug!(?path, ?combo, "execute_starter success");
         assert_eq!(path, file_path);
         assert!(combo.is_ok());
         let combo = combo.unwrap();
         assert_eq!(combo.metadata.name, "test");
         assert_eq!(combo.metadata.description, "");
-        assert_eq!(
-            combo.metadata.mode,
-            ComboMode::BashXtrace {
-                command_prefix: "$ ".to_string()
-            }
-        );
+        assert_eq!(combo.metadata.mode, ComboMode::Unknown);
         assert_eq!(combo.instructions.len(), 1);
         assert_eq!(
             combo.instructions.first(),
             Some(&Instruction::Text("Hello world".to_string()))
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn execute_starter_records_coco_record_output() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let bash = find_bash();
+        let session_env = session_env_with_coco();
+        let (_guard, file_path) = create_temp_combo(
+            "record.sh",
+            formatdoc! {r#"
+            #!{bash}
+
+            coco metadata name=record || exit 0
+
+            coco record "echo out; echo err 1>&2"
+            "#}
+            .as_str(),
+        )
+        .await?;
+
+        let execution = StarterCommand::new(&file_path)
+            .session_env(session_env)
+            .execute();
+        let Starter { combo, .. } = execution.wait().await?;
+        let combo = combo?;
+        assert_eq!(combo.metadata.name, "record");
+        assert_eq!(combo.instructions.len(), 1);
+        debug!(?combo, "print combo");
+
+        let Some(Instruction::Command { command, output }) = combo.instructions.first() else {
+            panic!("expected first instruction to be Instruction::Command");
+        };
+        assert!(
+            command.starts_with("bash -c "),
+            "unexpected command: {command}"
+        );
+        assert!(output.contains("out"), "unexpected output: {output}");
+        assert!(
+            output.contains("STDERR:\nerr"),
+            "unexpected output: {output}"
+        );
+        assert!(
+            output.contains("Exit code: 0"),
+            "unexpected output: {output}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn execute_starter_records_coco_ask_prompt() -> Result<(), Box<dyn std::error::Error>> {
+        let bash = find_bash();
+        let session_env = session_env_with_coco();
+        let (_guard, file_path) = create_temp_combo(
+            "ask.sh",
+            formatdoc! {r#"
+            #!{bash}
+
+            coco metadata name=ask || exit 0
+
+            coco ask "Please do the thing"
+            coco record "echo out"
+            "#}
+            .as_str(),
+        )
+        .await?;
+
+        let execution = StarterCommand::new(&file_path)
+            .session_env(session_env)
+            .execute();
+        let Starter { combo, .. } = execution.wait().await?;
+        let combo = combo?;
+        assert_eq!(combo.metadata.name, "ask");
+        assert_eq!(combo.instructions.len(), 2);
+
+        assert_eq!(
+            combo.instructions.first(),
+            Some(&Instruction::Text("Please do the thing".to_string()))
+        );
+
+        let Some(Instruction::Command { command, output }) = combo.instructions.get(1) else {
+            panic!("expected second instruction to be Instruction::Command");
+        };
+        assert!(
+            command.starts_with("bash -c "),
+            "unexpected command: {command}"
+        );
+        assert!(output.contains("out"), "unexpected output: {output}");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn discovery_server_interrupts_record() -> Result<(), Box<dyn std::error::Error>> {
+        let session_env = session_env_with_coco();
+        let (tx, _) = mpsc::channel(4);
+        let server = spawn_session_server(&session_env, true, tx).await?;
+        let client = SessionSocketClient::connect(session_env.socket_path()).await?;
+
+        let _ = client
+            .send_metadata_with_response(MetadataPayload {
+                name: "interrupt".into(),
+                description: None,
+                model: None,
+                tools: None,
+            })
+            .await?;
+
+        let mut record = client
+            .begin_record(RecordStartPayload {
+                command: vec!["echo".into()],
+                started_at: 0,
+            })
+            .await?;
+
+        let result = record.wait_for_allow().await;
+        assert!(matches!(
+            result,
+            Err(crate::SessionClientError::Interrupted)
+        ));
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn discovery_server_accepts_metadata_once() -> Result<(), Box<dyn std::error::Error>> {
+        let session_env = session_env_with_coco();
+        let (tx, _) = mpsc::channel(4);
+        let server = spawn_session_server(&session_env, true, tx).await?;
+        let client = SessionSocketClient::connect(session_env.socket_path()).await?;
+
+        let response = client
+            .send_metadata_with_response(MetadataPayload {
+                name: "meta".into(),
+                description: None,
+                model: None,
+                tools: None,
+            })
+            .await?;
+        assert!(response.discovery);
+
+        let second = client
+            .send_metadata_with_response(MetadataPayload {
+                name: "again".into(),
+                description: None,
+                model: None,
+                tools: None,
+            })
+            .await;
+        assert!(matches!(
+            second,
+            Err(crate::SessionClientError::UnexpectedServerMessage { .. })
+        ));
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn execute_starter_discovery_fails_on_non_zero_exit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bash = find_bash();
+        let session_env = session_env_with_coco();
+        let (_guard, file_path) = create_temp_combo(
+            "fail.sh",
+            formatdoc! {r#"
+            #!{bash}
+
+            coco metadata name=fail
+            "#}
+            .as_str(),
+        )
+        .await?;
+
+        let execution = StarterCommand::new(&file_path)
+            .session_env(session_env)
+            .discovery(true)
+            .execute();
+        let Starter { combo, .. } = execution.wait().await?;
+        assert!(matches!(combo, Err(StarterError::Invalid { .. })));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn execute_starter_with_envs() -> Result<(), Box<dyn std::error::Error>> {
+        let bash = find_bash();
+        let session_env = session_env_with_coco();
+        let (_guard, file_path) = create_temp_combo(
+            "env.sh",
+            formatdoc! {r#"
+            #!{bash}
+
+            coco metadata name=env || exit 0
+
+            echo "$GREETING"
+            "#}
+            .as_str(),
+        )
+        .await?;
+
+        let execution = StarterCommand::new(&file_path)
+            .env("GREETING", "Hello from envs")
+            .session_env(session_env)
+            .execute();
+        let Starter { combo, .. } = execution.wait().await?;
+        assert!(combo.is_ok());
+        let instructions = combo.unwrap().instructions;
+        assert!(
+            instructions
+                .iter()
+                .any(|inst| inst == &Instruction::Text("Hello from envs".to_string()))
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn execute_starter_cancel() -> Result<(), Box<dyn std::error::Error>> {
+        let bash = find_bash();
+        let session_env = session_env_with_coco();
+        let (_guard, file_path) = create_temp_combo(
+            "cancel.sh",
+            formatdoc! {r#"
+            #!{bash}
+
+            set -e
+
+            coco metadata name=cancel || exit 0
+
+            while true; do
+              echo "waiting"
+              sleep 1
+            done
+            "#}
+            .as_str(),
+        )
+        .await?;
+
+        let mut execution = StarterCommand::new(&file_path)
+            .session_env(session_env)
+            .execute();
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        execution.cancel();
+
+        while let Some(event) = execution.next().await {
+            debug!(?event, "print next event");
+        }
+
+        let Starter { combo, .. } = execution.wait().await?;
+        assert!(matches!(combo, Err(StarterError::Cancelled)));
 
         Ok(())
     }

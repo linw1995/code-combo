@@ -1,7 +1,11 @@
 mod agent;
+pub mod cli;
+pub mod cmd;
 mod combo;
 mod config;
 mod error;
+pub mod exec;
+pub mod logging;
 mod text_edit;
 pub mod tools;
 
@@ -9,6 +13,7 @@ pub use agent::*;
 pub use combo::*;
 pub use config::*;
 pub use error::*;
+pub use exec::*;
 pub use text_edit::*;
 
 #[cfg(test)]

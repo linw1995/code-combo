@@ -1,6 +1,8 @@
 use std::collections::VecDeque;
 
 use coco_macro::{ComponentExt, ContentComponentExt};
+use code_combo::{SessionEnv, StarterCommand};
+use futures::StreamExt;
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout},
@@ -26,8 +28,14 @@ use crate::{
 enum StarterState {
     Discovering,
     NotFound,
-    Executing { output: VecDeque<code_combo::Line> },
+    Executing { output: VecDeque<DisplayedLine> },
     Finalized { output: String },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct DisplayedLine {
+    stream: code_combo::StreamKind,
+    text: String,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -71,7 +79,7 @@ impl Combo {
                     self.state.write().starter_state = StarterState::NotFound
                 }
             }
-            ComboEvent::Output { name, lines } => self.on_ouput_event(name, lines),
+            ComboEvent::Output { name, chunk } => self.on_ouput_event(name, chunk),
             ComboEvent::Executing { name } => {
                 if &self.state.name == name {
                     self.state.write().starter_state = StarterState::Executing {
@@ -97,7 +105,7 @@ impl Combo {
         }
     }
 
-    fn on_ouput_event(&mut self, name: &str, batch: &Vec<code_combo::Line>) {
+    fn on_ouput_event(&mut self, name: &str, chunk: &code_combo::OutputChunk) {
         if self.state.name != name {
             return;
         }
@@ -105,24 +113,18 @@ impl Combo {
         else {
             return;
         };
-        let batch_size = batch.len();
-        let line_count = lines.len();
-        if batch_size > LIMIT {
-            debug!(?LIMIT, ?batch_size, "Batch size exceeds limit, truncating");
-            lines.clear();
-            lines.extend(batch[batch_size - LIMIT..batch_size].to_vec());
-        } else if line_count + batch_size > LIMIT {
-            debug!(
-                ?line_count,
-                ?batch_size,
-                ?LIMIT,
-                "Line count exceeds limit, removing oldest lines"
-            );
-            lines.drain(0..(line_count + batch_size - LIMIT));
-            lines.extend(batch.to_owned());
-        } else {
-            debug!(?line_count, ?batch_size, ?LIMIT, "Adding new lines");
-            lines.extend(batch.to_owned());
+        for text in &chunk.lines {
+            while lines.len() >= LIMIT {
+                debug!(
+                    limit = LIMIT,
+                    "Line count exceeds limit, removing oldest lines"
+                );
+                lines.pop_front();
+            }
+            lines.push_back(DisplayedLine {
+                stream: chunk.stream,
+                text: text.clone(),
+            });
         }
     }
 
@@ -234,10 +236,10 @@ impl Component for Combo {
             plain.draw(frame, output_area)?;
         } else if let StarterState::Executing { output } = &self.state.starter_state {
             let chunks = Layout::vertical(output.iter().map(|_| Length(1))).split(output_area);
-            for (idx, line) in output.iter().enumerate() {
-                let p = Paragraph::new(line.content.to_string());
-                frame.render_widget(&p, chunks[idx]);
-            }
+            output.iter().zip(chunks.iter()).for_each(|(line, chunk)| {
+                let p = Paragraph::new(line.text.clone());
+                frame.render_widget(&p, *chunk);
+            });
         }
 
         Ok(())
@@ -282,21 +284,47 @@ async fn execute(name: String) {
     {
         tx.send(ComboEvent::Executing { name: name.clone() }.into())
             .unwrap();
-        let (starter, mut rx) = code_combo::execute_starter(&starter.path, true);
-        while let Ok(batch) = rx.recv().await {
-            tx.send(
-                ComboEvent::Output {
-                    name: name.clone(),
-                    lines: batch,
+
+        let session_env = SessionEnv::builder()
+            .build()
+            .expect("failed to build session");
+        let mut execution = StarterCommand::new(&starter.path)
+            .session_env(session_env)
+            .execute();
+        while let Some(event) = execution.next().await {
+            match event {
+                code_combo::StarterEvent::Output { chunk } => {
+                    tx.send(
+                        ComboEvent::Output {
+                            name: name.clone(),
+                            chunk,
+                        }
+                        .into(),
+                    )
+                    .unwrap();
                 }
-                .into(),
-            )
-            .unwrap();
+                code_combo::StarterEvent::Failed { reason } => {
+                    tx.send(
+                        ComboEvent::Executed {
+                            name: name.clone(),
+                            starter: code_combo::Starter {
+                                path: starter.path.clone(),
+                                combo: Err(code_combo::StarterError::Invalid { reason }),
+                            },
+                        }
+                        .into(),
+                    )
+                    .unwrap();
+                    return;
+                }
+                _ => (),
+            }
         }
+        let starter = execution.wait().await.unwrap();
         tx.send(
             ComboEvent::Executed {
                 name: name.clone(),
-                starter: starter.await.unwrap(),
+                starter,
             }
             .into(),
         )

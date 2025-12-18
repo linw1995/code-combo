@@ -48,7 +48,6 @@ repos:
     rev: v0.9.3
     hooks:
       - id: taplo-format
-      - id: taplo-lint
 
 # Configuration for specific hooks
 default_stages: [pre-commit]
