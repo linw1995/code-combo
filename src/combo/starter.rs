@@ -9,7 +9,6 @@ use std::{
 use futures_core::Stream;
 use futures_util::StreamExt;
 use snafu::prelude::*;
-use time::OffsetDateTime;
 use tokio::{
     fs,
     sync::{mpsc, oneshot},
@@ -308,7 +307,7 @@ fn execute_command(
     let join_handle = task::spawn(async move {
         let _session_env_guard = session_env;
         let mut session_server = match _session_env_guard.as_ref() {
-            Some(env) => match spawn_session_server(env, discovery, event_tx.clone()).await {
+            Some(env) => match spawn_session_server(env, discovery).await {
                 Ok(task) => Some(task),
                 Err(error) => {
                     event_tx
@@ -575,7 +574,6 @@ impl SessionServerTask {
 async fn spawn_session_server(
     env: &SessionEnv,
     discovery: bool,
-    event_tx: mpsc::Sender<StarterEvent>,
 ) -> Result<SessionServerTask, StarterError> {
     let path = env.socket_path().to_path_buf();
     if path.exists() {
@@ -588,7 +586,7 @@ async fn spawn_session_server(
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     Ok(SessionServerTask {
         handle: tokio::spawn(async move {
-            let rv = run_session_server(server, discovery, event_tx, shutdown_rx).await;
+            let rv = run_session_server(server, discovery, shutdown_rx).await;
             match &rv {
                 Ok(state) => info!(?state, "succeed to run session server"),
                 Err(err) => warn!(?err, "failed to run session server"),
@@ -602,7 +600,6 @@ async fn spawn_session_server(
 async fn run_session_server(
     server: SessionSocketServer,
     discovery: bool,
-    event_tx: mpsc::Sender<StarterEvent>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<SessionState, StarterError> {
     let mut state = SessionState::default();
@@ -710,15 +707,6 @@ async fn run_session_server(
                         StreamKind::Stdout => record.stdout.extend(lines.clone()),
                         StreamKind::Stderr => record.stderr.extend(lines.clone()),
                     }
-                    let _ = event_tx
-                        .send(StarterEvent::Output {
-                            chunk: OutputChunk {
-                                timestamp: OffsetDateTime::now_utc().unix_timestamp(),
-                                stream,
-                                lines,
-                            },
-                        })
-                        .await;
                 }
                 Ok(ClientMessage::RecordEnd(RecordEndPayload {
                     exit_code,
@@ -798,7 +786,6 @@ mod test {
 
     use crate::combo::{RecordStartPayload, SessionSocketClient};
     use crate::{ComboMode, Instruction, MetadataPayload, SessionEnv};
-    use tokio::sync::mpsc;
     use tokio::time::Duration;
 
     static COCO_BIN_PATH: OnceLock<PathBuf> = OnceLock::new();
@@ -1051,8 +1038,7 @@ mod test {
     #[tokio::test]
     async fn discovery_server_interrupts_record() -> Result<(), Box<dyn std::error::Error>> {
         let session_env = session_env_with_coco();
-        let (tx, _) = mpsc::channel(4);
-        let server = spawn_session_server(&session_env, true, tx).await?;
+        let server = spawn_session_server(&session_env, true).await?;
         let client = SessionSocketClient::connect(session_env.socket_path()).await?;
 
         let _ = client
@@ -1084,8 +1070,7 @@ mod test {
     #[tokio::test]
     async fn discovery_server_accepts_metadata_once() -> Result<(), Box<dyn std::error::Error>> {
         let session_env = session_env_with_coco();
-        let (tx, _) = mpsc::channel(4);
-        let server = spawn_session_server(&session_env, true, tx).await?;
+        let server = spawn_session_server(&session_env, true).await?;
         let client = SessionSocketClient::connect(session_env.socket_path()).await?;
 
         let response = client
