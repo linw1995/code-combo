@@ -72,6 +72,10 @@
               };
               cargoBuildFlags = ["-p" "coco-tui"];
 
+              preCheck = ''
+                cargo build --bin coco
+              '';
+
               nativeCheckInputs = with pkgs; [
                 bash
               ];
