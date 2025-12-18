@@ -1,4 +1,4 @@
-use code_combo::{Line, Starter, TextEdit, ToolUse, tools::Final};
+use code_combo::{OutputChunk, Starter, TextEdit, ToolUse, tools::Final};
 use crossterm::event::{KeyEvent, MouseEvent};
 
 #[derive(Debug, Clone)]
@@ -53,7 +53,7 @@ pub enum ComboEvent {
     Discovered { starters: Vec<Starter> },
 
     Executing { name: String },
-    Output { name: String, lines: Vec<Line> },
+    Output { name: String, chunk: OutputChunk },
     Executed { name: String, starter: Starter },
 
     NotFound { name: String },

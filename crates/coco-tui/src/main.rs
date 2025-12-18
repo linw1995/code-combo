@@ -1,7 +1,11 @@
 use std::{path::PathBuf, sync::OnceLock};
 
 use clap::{Parser, Subcommand};
-use code_combo::{Config, default_config_dir};
+use code_combo::{
+    Config,
+    cli::{ClientCommand, handle_client_command, init_client_logging},
+    default_config_dir,
+};
 use snafu::prelude::*;
 
 use coco_tui::{
@@ -36,7 +40,7 @@ fn long_version() -> &'static str {
 
 /// Code Combo
 #[derive(Parser)]
-#[command(name="coco", version, long_version=long_version(), about)]
+#[command(name="coco-tui", version, long_version=long_version(), about)]
 struct Args {
     /// Config file path
     #[arg(long)]
@@ -54,23 +58,75 @@ struct Args {
     command: Option<Commands>,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 enum Commands {
+    Metadata {
+        /// Metadata entries in key=value format (name required)
+        #[arg(value_name = "key=value")]
+        fields: Vec<String>,
+    },
+    Ask {
+        /// Prompt text to send via session socket (or read from stdin when omitted)
+        #[arg(trailing_var_arg = true)]
+        prompt: Vec<String>,
+    },
+    Record {
+        /// Capture and emit wrapped JSON result
+        #[arg(long)]
+        wrap_result: bool,
+
+        /// Command to execute and record
+        #[arg(required = true, trailing_var_arg = true)]
+        command: Vec<String>,
+    },
     #[command(subcommand)]
     Combo(ComboCommands),
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 enum ComboCommands {
     Run { name: String },
+}
+
+impl TryFrom<Commands> for ClientCommand {
+    type Error = Commands;
+
+    fn try_from(value: Commands) -> std::result::Result<Self, Self::Error> {
+        match value {
+            Commands::Metadata { fields } => Ok(ClientCommand::Metadata { fields }),
+            Commands::Ask { prompt } => Ok(ClientCommand::Ask { prompt }),
+            Commands::Record {
+                wrap_result,
+                command,
+            } => Ok(ClientCommand::Record {
+                wrap_result,
+                command,
+            }),
+            _ => Err(value),
+        }
+    }
 }
 
 #[snafu::report]
 #[tokio::main]
 async fn main() -> Result<()> {
+    let mut args = Args::parse();
+    if let Some(command) = args.command.take() {
+        match ClientCommand::try_from(command) {
+            Ok(command) => {
+                init_client_logging("coco", &command);
+                return handle_client_command(command)
+                    .await
+                    .whatever_context("failed to handle client command");
+            }
+            Err(command) => {
+                args.command.replace(command);
+            }
+        }
+    }
+
     coco_tui::logging::init()?;
 
-    let mut args = Args::parse();
     let config_dir: PathBuf = args.config_dir.parse().expect("Invalid config dir");
 
     if args.config_path.is_none() {
@@ -89,6 +145,9 @@ async fn main() -> Result<()> {
                 app.send_action(ComboAction::Execute { name }.into());
             }
         },
+        Some(Commands::Metadata { .. } | Commands::Ask { .. } | Commands::Record { .. }) => {
+            panic!("combo command should have been handled earlier");
+        }
         None => {
             if args.restore {
                 info!("restoring last session");

@@ -3,6 +3,10 @@ name = "code-combo"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "coco"
+path = "src/main.rs"
+
 [workspace]
 resolver = "2"
 members = ["crates/*"]
@@ -22,12 +26,14 @@ serde_yaml = "0.9.34"
 snafu = "0.8.9"
 ctor = "0.5.0"
 bon = "3.8.1"
-tree-sitter = { version = "0.25" }
-tree-sitter-md = { version = "0.3.2" }
 indoc = "2.0.6"
 lazy_static = "1.5.0"
 time = { version = "0.3.44" }
-chrono = { version = "0.4" }
+tempfile = "3.22.0"
+tree-sitter = { version = "0.25" }
+tree-sitter-md = { version = "0.3.2" }
+futures-core = "0.3.31"
+futures-util = "0.3.31"
 
 # Core dependencies for CLI and application functionality
 [dependencies]
@@ -35,7 +41,7 @@ chrono = { version = "0.4" }
 anthropic = { path = "./crates/anthropic" }
 
 # Datetime utilities
-chrono.workspace = true
+time.workspace = true
 
 # Command line argument parsing
 clap = { version = "4.5.47", features = ["derive"] }
@@ -52,24 +58,23 @@ snafu.workspace = true
 # Async runtime
 tokio.workspace = true
 async-trait = "0.1.89"
+futures-core.workspace = true
+futures-util.workspace = true
 
 # Logging and tracing
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
-# Code parsing and analysis
-tree-sitter.workspace = true
-tree-sitter-md.workspace = true
-
 # Other
 lazy_static.workspace = true
 indoc.workspace = true
 similar = "2.7.0"
+tempfile.workspace = true
 
 [dev-dependencies]
 ctor.workspace = true
+uuid = { version = "1.11.0", features = ["v4"] }
 which = "6.0"
-tempfile = "3.22.0"
 
 [build-dependencies]
 time = { workspace = true, features = ["formatting"] }

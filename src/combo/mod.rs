@@ -69,8 +69,17 @@ impl Combo {
     }
 }
 
-mod parser;
+mod session;
+mod session_env;
 mod starter;
 
-pub use parser::parse;
-pub use starter::{Line, LineContent, Starter, discover_combo_starters, execute_starter};
+pub use session::{
+    ClientMessage, ControlAction, MetadataPayload, MetadataResponse, PromptPayload,
+    RecordChunkPayload, RecordControl, RecordEndPayload, RecordSession, RecordStartPayload,
+    ServerMessage, SessionClientError, SessionServerError, SessionSocketClient,
+    SessionSocketServer,
+};
+pub use session_env::{SessionEnv, SessionEnvBuilder, SessionEnvError};
+pub use starter::{
+    Starter, StarterCommand, StarterError, StarterEvent, StarterExecution, discover_combo_starters,
+};
