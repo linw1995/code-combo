@@ -38,7 +38,7 @@
         packages = rec {
           default = code-combo;
           code-combo = let
-            inherit (pkgs.fenix.stable) toolchain;
+            toolchain = (pkgs.fenix.stable).minimalToolchain;
             rustPlatform = pkgs.makeRustPlatform {
               cargo = toolchain;
               rustc = toolchain;
