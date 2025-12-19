@@ -14,7 +14,6 @@ use ratatui::{
 };
 
 use serde::{Deserialize, Serialize};
-use throbber_widgets_tui::{Throbber, ThrobberState};
 use time::OffsetDateTime;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -29,6 +28,7 @@ use crate::{
     error::*,
     global::{self, State},
     session::{self, Session},
+    widgets::{BRAILLE_EIGHT_DOUBLE, Throbber, ThrobberState},
 };
 
 #[derive(ComponentExt)]
@@ -314,9 +314,9 @@ impl Chat<'static> {
             ChatState::Procesing | ChatState::ComboDiscovering => Line::from(vec![
                 " ".into(),
                 Throbber::default()
-                    .throbber_set(throbber_widgets_tui::BRAILLE_EIGHT_DOUBLE)
+                    .throbber_set(BRAILLE_EIGHT_DOUBLE)
                     .to_symbol_span(&self.indicator),
-                format!("{state} ").yellow(),
+                format!(" {state} ").yellow(),
             ]),
         })
         .bold()
