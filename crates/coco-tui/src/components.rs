@@ -19,7 +19,7 @@ use crate::{actions::*, error::*, events::*, session::Session};
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,ignore
 /// handle_component_event!(self, event);
 /// ```
 ///

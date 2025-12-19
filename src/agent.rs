@@ -93,14 +93,12 @@ impl Agent {
         // TODO: pick a provider based on some strategy
         let first = self.config.providers.first_mut();
         let provider = first.unwrap();
-        Ok((
-            &provider.name,
-            Client::builder()
-                .base_url(&provider.base_url)
-                .token(provider.api_key.get()?)
-                .model(&provider.name)
-                .build()
-                .expect("Failed to initialize client"),
-        ))
+        let builder = Client::builder()
+            .base_url(&provider.base_url)
+            .token(provider.api_key.get()?)
+            .model(&provider.name)
+            .user_agent(crate::version::user_agent().to_string());
+        let client = builder.build().expect("Failed to initialize client");
+        Ok((&provider.name, client))
     }
 }

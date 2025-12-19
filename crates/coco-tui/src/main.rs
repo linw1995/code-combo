@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::OnceLock};
+use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use code_combo::{
@@ -12,35 +12,13 @@ use coco_tui::{
     actions::{Action, ComboAction},
     app,
     error::Result,
-    global,
+    global, version,
 };
 use tracing::info;
 
-static LONG_VERSION: OnceLock<String> = OnceLock::new();
-
-fn long_version() -> &'static str {
-    LONG_VERSION
-        .get_or_init(|| {
-            // This closure is executed only once, on the first call to get_or_init
-            let dirty = if env!("GIT_DIRTY") == "true" {
-                "[dirty]"
-            } else {
-                ""
-            };
-            format!(
-                "{} (sha:{:?}, build_time:{:?}){}",
-                env!("CARGO_PKG_VERSION"),
-                env!("GIT_COMMIT_SHA"),
-                env!("BUILT_TIME_UTC"),
-                dirty
-            )
-        })
-        .as_str()
-}
-
 /// Code Combo
 #[derive(Parser)]
-#[command(name="coco-tui", version, long_version=long_version(), about)]
+#[command(name="coco", version, long_version=version::long_versions(), about)]
 struct Args {
     /// Config file path
     #[arg(long)]

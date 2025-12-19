@@ -9,6 +9,7 @@ pub mod components;
 pub mod events;
 pub mod logging;
 pub mod theme;
+pub mod version;
 
 #[cfg(test)]
 #[ctor::ctor]
