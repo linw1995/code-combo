@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 
 use coco_macro::{ComponentExt, ContentComponentExt};
 use code_combo::{SessionEnv, StarterCommand};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use futures::StreamExt;
 use ratatui::{
     Frame,
@@ -38,16 +39,29 @@ struct DisplayedLine {
     text: String,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct Inner {
     name: String,
     is_error: bool,
     starter_state: StarterState,
+    #[serde(default = "default_collapsed")]
+    collapsed: bool,
 }
 
 impl Default for StarterState {
     fn default() -> Self {
         Self::Discovering
+    }
+}
+
+impl Default for Inner {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            is_error: false,
+            starter_state: StarterState::default(),
+            collapsed: default_collapsed(),
+        }
     }
 }
 
@@ -61,6 +75,10 @@ pub struct Combo {
 
 const LIMIT: usize = 10;
 
+fn default_collapsed() -> bool {
+    true
+}
+
 impl Combo {
     pub fn new(name: &str) -> Self {
         Self {
@@ -70,6 +88,10 @@ impl Combo {
             }),
             widget: None,
         }
+    }
+
+    fn has_collapsible_body(&self) -> bool {
+        self.widget.is_some()
     }
 
     fn on_combo_event(&mut self, event: &ComboEvent) {
@@ -82,9 +104,11 @@ impl Combo {
             ComboEvent::Output { name, chunk } => self.on_ouput_event(name, chunk),
             ComboEvent::Executing { name } => {
                 if &self.state.name == name {
-                    self.state.write().starter_state = StarterState::Executing {
+                    let mut state = self.state.write();
+                    state.starter_state = StarterState::Executing {
                         output: VecDeque::new(),
                     };
+                    state.collapsed = false;
                 }
             }
             ComboEvent::Executed { name, starter, .. } => {
@@ -99,6 +123,7 @@ impl Combo {
                     };
                     self.widget = Some(Plain::new(output.clone()));
                     state.starter_state = StarterState::Finalized { output };
+                    state.collapsed = true;
                 }
             }
             _ => (),
@@ -128,6 +153,10 @@ impl Combo {
         }
     }
 
+    fn toggle_collapsed(&mut self) {
+        self.state.write().collapsed = !self.state.collapsed;
+    }
+
     fn get_title_spans(&self) -> Vec<Span<'_>> {
         // Use block title to show progress message and indicator with simple loading character
         let mut spans = vec![" 󱐋 ".yellow(), " Combo:".into()];
@@ -150,6 +179,9 @@ impl Combo {
                 });
             }
         }
+        if self.has_collapsible_body() && self.state.collapsed {
+            spans.push(" (folded)".dark_gray());
+        }
         spans.push(" ".into());
         spans
     }
@@ -158,6 +190,9 @@ impl Combo {
 impl Content for Combo {
     fn height(&self, width: u16) -> usize {
         let border_height = 1;
+        if self.has_collapsible_body() && self.state.collapsed {
+            return border_height;
+        }
         if let Some(plain) = &self.widget {
             plain.height(width) + border_height
         } else {
@@ -166,6 +201,22 @@ impl Content for Combo {
                 _ => 0,
             }) + border_height
         }
+    }
+
+    fn is_actionable(&self) -> bool {
+        self.has_collapsible_body()
+    }
+
+    fn block_with_shortcuts_desc<'a>(&self, block: Block<'a>) -> Block<'a> {
+        if !self.has_collapsible_body() {
+            return block;
+        }
+        let toggle_text = if self.state.collapsed {
+            ("Unfold", "e")
+        } else {
+            ("Fold", "e")
+        };
+        block.title_bottom(crate::components::shortcuts_desc(&[toggle_text]))
     }
 }
 
@@ -196,6 +247,23 @@ impl Component for Combo {
                 .map(|m| m as &mut dyn Component)
                 .into_iter(),
         )
+    }
+
+    fn handle_key_event(&mut self, key: &KeyEvent) {
+        if !self.has_collapsible_body() {
+            return;
+        }
+
+        if let (KeyModifiers::NONE, KeyCode::Char('e')) = (key.modifiers, key.code) {
+            self.toggle_collapsed();
+            return;
+        }
+
+        if !self.state.collapsed
+            && let Some(widget) = &mut self.widget
+        {
+            widget.handle_key_event(key);
+        }
     }
 
     fn handle_event(&mut self, event: &Event) {
@@ -230,6 +298,11 @@ impl Component for Combo {
             .title(Line::from(title_spans))
             .title_alignment(Alignment::Left);
         frame.render_widget(&block, area);
+
+        if self.has_collapsible_body() && self.state.collapsed {
+            return Ok(());
+        }
+
         let output_area = block.inner(area);
 
         if let Some(plain) = &mut self.widget {
@@ -332,5 +405,82 @@ async fn execute(name: String) {
     } else {
         tx.send(ComboEvent::NotFound { name: name.clone() }.into())
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::events::{ComboEvent, Event};
+
+    use super::*;
+
+    fn test_key_e() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)
+    }
+
+    fn make_starter(name: &str) -> code_combo::Starter {
+        code_combo::Starter {
+            path: "/tmp/demo".to_string(),
+            combo: Ok(code_combo::Combo {
+                metadata: code_combo::ComboMetadata {
+                    name: name.to_string(),
+                    description: String::new(),
+                    mode: code_combo::ComboMode::Unknown,
+                },
+                instructions: vec![code_combo::Instruction::Text(
+                    "line1\nline2\nline3".to_string(),
+                )],
+            }),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn combo_is_collapsed_by_default_and_toggles_with_e() {
+        let mut combo = Combo::new("demo");
+        combo.handle_event(&Event::Combo(ComboEvent::Executed {
+            name: "demo".to_string(),
+            starter: make_starter("demo"),
+        }));
+
+        assert_eq!(combo.height(80), 1);
+        combo.handle_key_event(&test_key_e());
+        assert!(combo.height(80) > 1);
+        combo.handle_key_event(&test_key_e());
+        assert_eq!(combo.height(80), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn combo_is_visible_while_executing() {
+        let mut combo = Combo::new("demo");
+        combo.handle_event(&Event::Combo(ComboEvent::Executing {
+            name: "demo".to_string(),
+        }));
+        combo.handle_event(&Event::Combo(ComboEvent::Output {
+            name: "demo".to_string(),
+            chunk: code_combo::OutputChunk {
+                timestamp: 0,
+                stream: code_combo::StreamKind::Stdout,
+                lines: vec!["line1".to_string(), "line2".to_string()],
+            },
+        }));
+
+        assert_eq!(combo.height(80), 3);
+        combo.handle_key_event(&test_key_e());
+        assert_eq!(combo.height(80), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn combo_persists_collapsed_state() {
+        let mut combo = Combo::new("demo");
+        combo.handle_event(&Event::Combo(ComboEvent::Executed {
+            name: "demo".to_string(),
+            starter: make_starter("demo"),
+        }));
+        combo.handle_key_event(&test_key_e());
+        assert!(combo.height(80) > 1);
+
+        let session = combo.save();
+        let loaded = Combo::load(session).unwrap();
+        assert!(loaded.height(80) > 1);
     }
 }
