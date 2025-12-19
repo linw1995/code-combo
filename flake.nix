@@ -106,7 +106,7 @@
           packages = with pkgs; [
             # Development
             grcov
-            pre-commit
+            prek
 
             cargo-nextest
           ];
