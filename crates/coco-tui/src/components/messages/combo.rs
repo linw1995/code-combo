@@ -25,12 +25,17 @@ use crate::{
     widgets::Paragraph,
 };
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default)]
 enum StarterState {
+    #[default]
     Discovering,
     NotFound,
-    Executing { output: VecDeque<DisplayedLine> },
-    Finalized { output: String },
+    Executing {
+        output: VecDeque<DisplayedLine>,
+    },
+    Finalized {
+        output: String,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -46,12 +51,6 @@ struct Inner {
     starter_state: StarterState,
     #[serde(default = "default_collapsed")]
     collapsed: bool,
-}
-
-impl Default for StarterState {
-    fn default() -> Self {
-        Self::Discovering
-    }
 }
 
 impl Default for Inner {

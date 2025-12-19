@@ -296,7 +296,7 @@ impl Content for Messages {
 
 impl Persistable for Messages {
     fn save(&self) -> Session {
-        let messages = self.messages.iter().map(|m| (m.save())).collect::<Vec<_>>();
+        let messages = self.messages.iter().map(|m| m.save()).collect::<Vec<_>>();
         session::save(messages)
     }
 

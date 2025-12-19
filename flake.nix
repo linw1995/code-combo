@@ -61,8 +61,6 @@
                 GIT_DIRTY = git_dirty;
                 SOURCE_DATE_EPOCH = git_last_modified;
               };
-              nativeBuildInputs = lib.optionals pkgs.stdenv.isLinux (with pkgs; [pkg-config]);
-              buildInputs = lib.optionals pkgs.stdenv.isLinux (with pkgs; [openssl]);
               cargoLock = {
                 lockFile = ./Cargo.lock;
 
@@ -119,11 +117,6 @@
                 (fenix.stable.withComponents components)
               ]
               ++ lib.optionals stdenv.isLinux [pkg-config]);
-
-            buildInputs = with pkgs; ([]
-              ++ lib.optionals stdenv.isLinux [
-                openssl
-              ]);
 
             inherit packages;
 
