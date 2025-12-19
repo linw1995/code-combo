@@ -438,24 +438,29 @@ mod tests {
 
     use super::*;
 
-    fn unique_socket_path(name: &str) -> Result<(tempfile::TempDir, PathBuf)> {
+    fn unique_socket_path() -> Result<(tempfile::TempDir, String)> {
         let dir = tempfile::Builder::new()
-            .prefix(&format!("coco-skt-{name}-"))
+            .prefix("coco-")
             .tempdir_in(std::env::temp_dir())
             .whatever_context("failed to create tempdir")?;
         let path = dir
             .path()
-            .join(format!("skt-{}.sock", uuid::Uuid::new_v4().as_simple()));
+            .join(format!("{}.sock", uuid::Uuid::new_v4().as_simple()));
         if path.exists() {
             std::fs::remove_file(&path).ok();
         }
+        let path = path.to_string_lossy().to_string();
+        ensure_whatever!(
+            path.len() < 100,
+            "socket path length must be less than SUN_LEN"
+        );
         Ok((dir, path))
     }
 
     #[tokio::test]
     #[snafu::report]
     async fn send_metadata_over_socket() -> Result<()> {
-        let (_dir, socket_path) = unique_socket_path("meta")?;
+        let (_dir, socket_path) = unique_socket_path()?;
         let server = SessionSocketServer::bind(&socket_path)
             .await
             .whatever_context("failed to bind socket")?;
@@ -500,7 +505,7 @@ mod tests {
     #[tokio::test]
     #[snafu::report]
     async fn record_waits_for_allow_then_sends_end() -> Result<()> {
-        let (_dir, socket_path) = unique_socket_path("allow")?;
+        let (_dir, socket_path) = unique_socket_path()?;
         let server = SessionSocketServer::bind(&socket_path)
             .await
             .whatever_context("failed to bind socket")?;
@@ -571,7 +576,7 @@ mod tests {
     #[tokio::test]
     #[snafu::report]
     async fn record_interrupt_returns_error() -> Result<()> {
-        let (_dir, socket_path) = unique_socket_path("interrupt")?;
+        let (_dir, socket_path) = unique_socket_path()?;
         let server = SessionSocketServer::bind(&socket_path)
             .await
             .whatever_context("failed to bind socket")?;
@@ -613,7 +618,7 @@ mod tests {
     #[tokio::test]
     #[snafu::report]
     async fn server_accepts_and_replies_allow() -> Result<()> {
-        let (_dir, socket_path) = unique_socket_path("server")?;
+        let (_dir, socket_path) = unique_socket_path()?;
         let server = SessionSocketServer::bind(&socket_path)
             .await
             .whatever_context("failed to bind socket")?;
