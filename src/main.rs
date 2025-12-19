@@ -1,9 +1,12 @@
 use clap::{Parser, Subcommand};
-use code_combo::cli::{ClientCommand, handle_client_command, init_client_logging};
+use code_combo::{
+    cli::{ClientCommand, handle_client_command, init_client_logging},
+    version,
+};
 
 /// Code Combo client
 #[derive(Debug, Parser)]
-#[command(name = "coco", version, about)]
+#[command(name = "coco", version, long_version = version::long_version(), about)]
 struct Args {
     #[command(subcommand)]
     command: Commands,

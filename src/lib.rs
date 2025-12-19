@@ -8,6 +8,7 @@ pub mod exec;
 pub mod logging;
 mod text_edit;
 pub mod tools;
+pub mod version;
 
 pub use agent::*;
 pub use combo::*;
