@@ -8,7 +8,10 @@ edition.workspace = true
 bon.workspace = true
 
 # HTTP
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "rustls-tls-webpki-roots",
+] }
 
 # Serialization and data handling
 serde.workspace = true

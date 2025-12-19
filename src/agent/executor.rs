@@ -19,11 +19,11 @@ pub struct Executor {
 }
 
 lazy_static! {
-    static ref BASH_TOOL: Arc<(dyn Tool + 'static)> = Arc::new(BashTool::default());
-    static ref READ_TOOL: Arc<(dyn Tool + 'static)> = Arc::new(ReadTool::default());
-    static ref STR_REPLACE_TOOL: Arc<(dyn Tool + 'static)> = Arc::new(StrReplaceTool::default());
-    static ref DEFAULT_TOOLS: HashMap<String, Arc<(dyn Tool + 'static)>> = {
-        let mut m = HashMap::<String, Arc<(dyn Tool + 'static)>>::new();
+    static ref BASH_TOOL: Arc<dyn Tool + 'static> = Arc::new(BashTool::default());
+    static ref READ_TOOL: Arc<dyn Tool + 'static> = Arc::new(ReadTool::default());
+    static ref STR_REPLACE_TOOL: Arc<dyn Tool + 'static> = Arc::new(StrReplaceTool::default());
+    static ref DEFAULT_TOOLS: HashMap<String, Arc<dyn Tool + 'static>> = {
+        let mut m = HashMap::<String, Arc<dyn Tool + 'static>>::new();
         m.extend(
             [
                 BASH_TOOL.clone(),
