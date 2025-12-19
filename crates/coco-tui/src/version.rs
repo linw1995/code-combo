@@ -25,14 +25,19 @@ fn long_version() -> &'static str {
 pub fn long_versions() -> &'static str {
     LONG_VERSIONS
         .get_or_init(|| {
-            let platform = format!("{}; {}", std::env::consts::OS, std::env::consts::ARCH);
             let coco_tui = long_version();
             let code_combo = code_combo::version::long_version();
-            if coco_tui == code_combo {
-                coco_tui.to_string()
-            } else {
-                format!("{coco_tui}\n- code_combo {code_combo}\n- platform: {platform}")
-            }
+
+            let mut lines = vec![coco_tui.to_string()];
+
+            if coco_tui != code_combo {
+                lines.push(format!("- code_combo: {code_combo}"));
+            };
+
+            let platform = format!("{}; {}", std::env::consts::OS, std::env::consts::ARCH);
+            lines.push(format!("- platform: {platform}"));
+
+            lines.join("\n")
         })
         .as_str()
 }
