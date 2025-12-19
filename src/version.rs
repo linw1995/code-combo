@@ -32,7 +32,7 @@ pub fn user_agent() -> &'static str {
                 ""
             };
             format!(
-                "code-combo/{} ({platform}) (sha:{}; built:{}){}",
+                "code-combo/{} ({platform}) (sha:{}; built:{}{})",
                 env!("CARGO_PKG_VERSION"),
                 env!("GIT_COMMIT_SHA"),
                 env!("BUILT_TIME_UTC"),
