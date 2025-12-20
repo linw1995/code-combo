@@ -1,7 +1,7 @@
 use coco_macro::{ComponentExt, ContentComponentExt};
 use code_combo::{
     ToolUse,
-    tools::{BASH_TOOL_NAME, READ_TOOL_NAME, STR_REPLACE_TOOL_NAME},
+    tools::{BASH_TOOL_NAME, LIST_TOOL_NAME, READ_TOOL_NAME, STR_REPLACE_TOOL_NAME},
 };
 use crossterm::event::KeyEvent;
 use ratatui::{
@@ -28,10 +28,12 @@ use crate::{
 };
 
 mod bash;
+mod list;
 mod raw;
 mod read;
 mod str_replace;
 use bash::Bash;
+use list::List;
 use raw::Raw;
 use read::Read;
 use str_replace::StrReplace;
@@ -68,6 +70,7 @@ impl Tool {
     pub fn new(tool_use: ToolUse) -> Self {
         let widget = match tool_use.name.as_str() {
             READ_TOOL_NAME => Some(Read::new(&tool_use).into()),
+            LIST_TOOL_NAME => Some(List::new(&tool_use).into()),
             BASH_TOOL_NAME => match Bash::try_new().tool_use(&tool_use).call() {
                 Ok(widget) => Some(widget.into()),
                 Err(err) => {
@@ -145,6 +148,7 @@ impl Persistable for Tool {
         let widget = match name.as_str() {
             BASH_TOOL_NAME => Bash::load(child)?.into(),
             READ_TOOL_NAME => Read::load(child)?.into(),
+            LIST_TOOL_NAME => List::load(child)?.into(),
             STR_REPLACE_TOOL_NAME => StrReplace::load(child)?.into(),
             _ => whatever!("Unknown tool {name:?}"),
         };

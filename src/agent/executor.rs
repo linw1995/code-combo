@@ -6,8 +6,8 @@ use snafu::prelude::*;
 use crate::{
     TextEdit, error,
     tools::{
-        self, BashTool, Final, READ_TOOL_NAME, ReadTool, STR_REPLACE_TOOL_NAME, StrReplaceTool,
-        Tool,
+        self, BashTool, Final, LIST_TOOL_NAME, ListTool, READ_TOOL_NAME, ReadTool,
+        STR_REPLACE_TOOL_NAME, StrReplaceTool, Tool,
     },
 };
 
@@ -21,6 +21,7 @@ pub struct Executor {
 lazy_static! {
     static ref BASH_TOOL: Arc<dyn Tool + 'static> = Arc::new(BashTool::default());
     static ref READ_TOOL: Arc<dyn Tool + 'static> = Arc::new(ReadTool::default());
+    static ref LIST_TOOL: Arc<dyn Tool + 'static> = Arc::new(ListTool::default());
     static ref STR_REPLACE_TOOL: Arc<dyn Tool + 'static> = Arc::new(StrReplaceTool::default());
     static ref DEFAULT_TOOLS: HashMap<String, Arc<dyn Tool + 'static>> = {
         let mut m = HashMap::<String, Arc<dyn Tool + 'static>>::new();
@@ -28,6 +29,7 @@ lazy_static! {
             [
                 BASH_TOOL.clone(),
                 READ_TOOL.clone(),
+                LIST_TOOL.clone(),
                 STR_REPLACE_TOOL.clone(),
             ]
             .into_iter()
@@ -128,7 +130,10 @@ impl Executor {
                 unimplemented!("Permission control list validation not yet implemented")
             } else {
                 // Some tools can execute without explicit permission
-                if !matches!(name, STR_REPLACE_TOOL_NAME | READ_TOOL_NAME) {
+                if !matches!(
+                    name,
+                    STR_REPLACE_TOOL_NAME | READ_TOOL_NAME | LIST_TOOL_NAME
+                ) {
                     // For other tools, request permission if no permission control entries are found
                     return Ok(Output::AskPermission);
                 }
