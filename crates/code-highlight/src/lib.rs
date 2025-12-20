@@ -22,6 +22,6 @@ fn init() {
 
     tracing_subscriber::registry()
         .with(vec![console_log])
-        .with(EnvFilter::from_default_env())
+        .with(EnvFilter::from_env("COCO_LOG"))
         .init();
 }
