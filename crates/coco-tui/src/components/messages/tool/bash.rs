@@ -10,7 +10,7 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout},
     prelude::Rect,
-    style::Stylize,
+    style::{Style, Stylize},
     text::{Line, Span},
     widgets::{Block, Wrap},
 };
@@ -35,6 +35,10 @@ struct Inner {
     tool_use: ToolUse,
     requiring_confirmation: bool,
     output: Option<BashOutput>,
+    #[serde(default)]
+    view: BashOutputView,
+    #[serde(default)]
+    collapsed: bool,
 }
 
 #[derive(ComponentExt, ContentComponentExt)]
@@ -43,26 +47,143 @@ pub struct Bash<'a> {
     state: State<Inner>,
 
     input: CodeHighlight<'a>,
-    output: Paragraph<'a>,
+    output_text: Paragraph<'a>,
+    output_markers: Option<Paragraph<'a>>,
 }
 
-fn generate_output<'a>(output: Option<BashOutput>) -> Paragraph<'a> {
-    let mut lines = vec![];
-    let (stderr, stdout) = output
-        .map(|output| (output.stderr, output.stdout))
-        .unwrap_or_default();
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BashOutputView {
+    Stdout,
+    Stderr,
+    #[default]
+    Mixed,
+}
 
-    for (prompt, output) in [("2> ".red(), &stderr), ("1> ".blue(), &stdout)] {
-        if output.is_empty() {
-            continue;
-        }
-        let mut iter = output.lines().map(String::from); // Convert to owned String
-        lines.push(Line::from(vec![prompt, Span::raw(iter.next().unwrap())]));
-        for line in iter {
-            lines.push(Line::from(line));
+impl BashOutputView {
+    fn index(self) -> usize {
+        match self {
+            Self::Stdout => 0,
+            Self::Stderr => 1,
+            Self::Mixed => 2,
         }
     }
-    Paragraph::new_wrap(lines, Wrap { trim: false })
+}
+
+fn tab_panel_width(total_width: u16) -> u16 {
+    let min_total_width = 24u16;
+    if total_width < min_total_width {
+        return 0;
+    }
+    3
+}
+
+fn output_marker_width(view: BashOutputView) -> u16 {
+    match view {
+        BashOutputView::Mixed => 1,
+        _ => 0,
+    }
+}
+
+fn render_tabs_panel(view: BashOutputView) -> Paragraph<'static> {
+    let highlight = Style::default().reversed();
+    let items = [
+        (BashOutputView::Stdout, " 1 ", Style::default().blue()),
+        (BashOutputView::Stderr, " 2 ", Style::default().red()),
+        (BashOutputView::Mixed, " 3 ", Style::default().dark_gray()),
+    ];
+    let lines = items
+        .into_iter()
+        .map(|(v, digit, base_style)| {
+            let style = if v.index() == view.index() {
+                highlight
+            } else {
+                Style::default()
+            };
+            Line::from(Span::styled(digit, base_style.patch(style)))
+        })
+        .collect::<Vec<_>>();
+    Paragraph::new(lines)
+}
+
+fn generate_output<'a>(output: Option<&BashOutput>, view: BashOutputView) -> Paragraph<'a> {
+    let mut lines: Vec<Line<'a>> = Vec::new();
+    let Some(output) = output else {
+        return Paragraph::new_wrap(lines, Wrap { trim: false });
+    };
+
+    match view {
+        BashOutputView::Stdout => {
+            for line in output.stdout.lines() {
+                lines.push(Line::from(line.to_string()));
+            }
+            Paragraph::new_wrap(lines, Wrap { trim: false })
+        }
+        BashOutputView::Stderr => {
+            for line in output.stderr.lines() {
+                lines.push(Line::from(line.to_string()));
+            }
+            Paragraph::new_wrap(lines, Wrap { trim: false })
+        }
+        BashOutputView::Mixed => {
+            if output.chunks.is_empty() {
+                for text in [&output.stderr, &output.stdout] {
+                    if text.is_empty() {
+                        continue;
+                    }
+                    for line in text.lines() {
+                        lines.push(Line::from(line.to_string()));
+                    }
+                }
+            } else {
+                for chunk in &output.chunks {
+                    for line in &chunk.lines {
+                        lines.push(Line::from(line.clone()));
+                    }
+                }
+            }
+            Paragraph::new(lines)
+        }
+    }
+}
+
+fn generate_output_markers<'a>(
+    output: Option<&BashOutput>,
+    view: BashOutputView,
+) -> Option<Paragraph<'a>> {
+    if view != BashOutputView::Mixed {
+        return None;
+    }
+    let Some(output) = output else {
+        return Some(Paragraph::new(Vec::<Line>::new()));
+    };
+
+    let mut lines: Vec<Line<'a>> = Vec::new();
+    if output.chunks.is_empty() {
+        for (marker_style, text) in [
+            (Style::default().red(), &output.stderr),
+            (Style::default().blue(), &output.stdout),
+        ] {
+            if text.is_empty() {
+                continue;
+            }
+            for _ in text.lines() {
+                lines.push(Line::from(Span::styled("▌", marker_style)));
+            }
+        }
+    } else {
+        for chunk in &output.chunks {
+            let marker_style = match chunk.stream {
+                code_combo::StreamKind::Stdout => Style::default().blue(),
+                code_combo::StreamKind::Stderr => Style::default().red(),
+            };
+            for _ in &chunk.lines {
+                lines.push(Line::from(Span::styled("▌", marker_style)));
+            }
+        }
+    }
+
+    Some(Paragraph::new(lines))
 }
 
 fn generate_input<'b>(tool_use: &ToolUse) -> CodeHighlight<'b> {
@@ -80,24 +201,34 @@ impl<'a> Bash<'a> {
             .map(serde_json::from_value)
             .transpose()
             .whatever_context("failed to parse BashOutput")?;
-        let output_widget = generate_output(output.clone());
+        let output_text = generate_output(output.as_ref(), BashOutputView::default());
+        let output_markers = generate_output_markers(output.as_ref(), BashOutputView::default());
 
         Ok(Self {
             state: State::new(Inner {
                 tool_use: tool_use.to_owned(),
                 requiring_confirmation: false,
                 output,
+                view: BashOutputView::default(),
+                collapsed: false,
             }),
             input,
-            output: output_widget,
+            output_text,
+            output_markers,
         })
+    }
+
+    fn rebuild_output(&mut self) {
+        self.output_text = generate_output(self.state.output.as_ref(), self.state.view);
+        self.output_markers = generate_output_markers(self.state.output.as_ref(), self.state.view);
     }
 
     pub fn update_output(&mut self, output: Option<Final>) -> Result<()> {
         if let Some(Final::Json(value)) = output {
             let output =
                 serde_json::from_value(value).whatever_context("failed to parse BashOutput")?;
-            self.output = generate_output(output);
+            self.state.write().output = Some(output);
+            self.rebuild_output();
         }
         Ok(())
     }
@@ -105,17 +236,53 @@ impl<'a> Bash<'a> {
 
 impl<'a> Content for Bash<'a> {
     fn height(&self, width: u16) -> usize {
-        self.input.height(width) + self.output.line_count(width)
+        if self.state.collapsed {
+            return 0;
+        }
+        if self.state.requiring_confirmation {
+            return self.input.height(width);
+        }
+        if self.state.output.is_none() {
+            return self.input.height(width);
+        }
+        let height_input = self.input.height(width);
+        let tab_width = tab_panel_width(width);
+        let body_width = width.saturating_sub(tab_width).max(1);
+        let marker_width = output_marker_width(self.state.view);
+        let text_width = body_width.saturating_sub(marker_width).max(1);
+        let height_output = self.output_text.line_count(text_width).max(1);
+        height_input + height_output
     }
 
     fn is_actionable(&self) -> bool {
-        self.state.requiring_confirmation
+        true
     }
 
     fn block_with_shortcuts_desc<'b>(&self, block: Block<'b>) -> Block<'b> {
+        if self.state.requiring_confirmation {
+            return block
+                .title_bottom(shortcuts_desc(&[("Run", "CR")]))
+                .title_bottom(shortcuts_desc(&[("Cancel", "Esc")]));
+        }
+
+        if self.state.output.is_none() {
+            return block;
+        }
+
+        let toggle_text = if self.state.collapsed {
+            ("Unfold", "e")
+        } else {
+            ("Fold", "e")
+        };
+
+        let view = match self.state.view {
+            BashOutputView::Stdout => "Stdout",
+            BashOutputView::Stderr => "Stderr",
+            BashOutputView::Mixed => "Mixed",
+        };
         block
-            .title_bottom(shortcuts_desc(&[("Run", "CR")]))
-            .title_bottom(shortcuts_desc(&[("Cancel", "Esc")]))
+            .title_bottom(shortcuts_desc(&[(view, "1/2/3")]))
+            .title_bottom(shortcuts_desc(&[toggle_text]))
     }
 }
 
@@ -128,7 +295,8 @@ impl Persistable for Bash<'static> {
         let state: Inner = session::load(session)?;
         Ok(Self {
             input: generate_input(&state.tool_use),
-            output: generate_output(state.output.clone()),
+            output_text: generate_output(state.output.as_ref(), state.view),
+            output_markers: generate_output_markers(state.output.as_ref(), state.view),
             state: global::State::new(state),
         })
     }
@@ -138,12 +306,47 @@ impl Component for Bash<'static> {
     fn handle_event(&mut self, event: &Event) {
         match event {
             Event::Ask(AskEvent::ToolUsePermission(_)) => {
-                self.state.write().requiring_confirmation = true
+                let mut state = self.state.write();
+                state.requiring_confirmation = true;
+                state.collapsed = false;
             }
-            Event::Answer(AnswerEvent::ToolResult { output, .. }) => {
+            Event::Answer(AnswerEvent::ToolOutput { id, chunk }) => {
+                if id != &self.state.tool_use.id {
+                    return;
+                }
+                let mut state = self.state.write();
+                let output = state.output.get_or_insert_with(|| BashOutput {
+                    exit_code: 255,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    chunks: Vec::new(),
+                    timed_out: false,
+                });
+                for line in &chunk.lines {
+                    match chunk.stream {
+                        code_combo::StreamKind::Stdout => {
+                            output.stdout.push_str(line);
+                            output.stdout.push('\n');
+                        }
+                        code_combo::StreamKind::Stderr => {
+                            output.stderr.push_str(line);
+                            output.stderr.push('\n');
+                        }
+                    }
+                }
+                output.chunks.push(chunk.clone());
+                drop(state);
+                self.rebuild_output();
+            }
+            Event::Answer(AnswerEvent::ToolResult {
+                is_error, output, ..
+            }) => {
                 if let Err(err) = self.update_output(Some(output.to_owned())) {
                     warn!(?err, "failed to update tool output");
                 };
+                let mut state = self.state.write();
+                state.collapsed = !*is_error;
+                state.requiring_confirmation = false;
             }
             _ => (),
         }
@@ -151,13 +354,44 @@ impl Component for Bash<'static> {
 
     fn handle_key_event(&mut self, key: &KeyEvent) {
         match (key.modifiers, key.code) {
+            (KeyModifiers::NONE, KeyCode::Char('1')) => {
+                let mut state = self.state.write();
+                state.view = BashOutputView::Stdout;
+                state.collapsed = false;
+                drop(state);
+                self.rebuild_output();
+            }
+            (KeyModifiers::NONE, KeyCode::Char('2')) => {
+                let mut state = self.state.write();
+                state.view = BashOutputView::Stderr;
+                state.collapsed = false;
+                drop(state);
+                self.rebuild_output();
+            }
+            (KeyModifiers::NONE, KeyCode::Char('3')) => {
+                let mut state = self.state.write();
+                state.view = BashOutputView::Mixed;
+                state.collapsed = false;
+                drop(state);
+                self.rebuild_output();
+            }
+            (KeyModifiers::NONE, KeyCode::Char('e')) => {
+                self.state.write().collapsed = !self.state.collapsed;
+            }
             (KeyModifiers::NONE, KeyCode::Enter) => {
+                if !self.state.requiring_confirmation {
+                    return;
+                }
+                self.state.write().collapsed = false;
                 global::action_tx()
                     .send(ToolAction::Grant(self.state.tool_use.to_owned()).into())
                     .unwrap();
                 self.state.write().requiring_confirmation = false;
             }
             (KeyModifiers::NONE, KeyCode::Esc) => {
+                if !self.state.requiring_confirmation {
+                    return;
+                }
                 global::action_tx()
                     .send(ToolAction::Cancel(self.state.tool_use.to_owned()).into())
                     .unwrap();
@@ -168,18 +402,195 @@ impl Component for Bash<'static> {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        use Constraint::Length;
-        let width = area.width;
-        let height_input = self.input.height(width);
-        let height_output = self.output.line_count(width);
+        if self.state.collapsed || area.height == 0 {
+            return Ok(());
+        }
 
+        use Constraint::Length;
+
+        let width = area.width.max(1);
+        let height_input = self.input.height(width);
+
+        if self.state.requiring_confirmation || self.state.output.is_none() {
+            let [area_input] = Layout::vertical([Length(height_input as u16)]).areas(area);
+            self.input.draw(frame, area_input)?;
+            return Ok(());
+        }
+
+        let tab_width = tab_panel_width(width);
+        let marker_width = output_marker_width(self.state.view);
+        let body_width = width.saturating_sub(tab_width).max(1);
+        let text_width = body_width.saturating_sub(marker_width).max(1);
+        let height_output = self.output_text.line_count(text_width).max(1);
         let [area_input, area_output] =
             Layout::vertical([Length(height_input as u16), Length(height_output as u16)])
                 .areas(area);
+
         self.input.draw(frame, area_input)?;
-        frame.render_widget(&self.output, area_output);
+
+        let (area_output_view, area_output_tabs) = if tab_width == 0 {
+            (area_output, None)
+        } else {
+            let [view, tabs] =
+                Layout::horizontal([Constraint::Min(1), Constraint::Length(tab_width)])
+                    .areas(area_output);
+            (view, Some(tabs))
+        };
+
+        if marker_width == 0 {
+            frame.render_widget(&self.output_text, area_output_view);
+        } else {
+            let [area_text, area_markers] =
+                Layout::horizontal([Constraint::Min(1), Constraint::Length(marker_width)])
+                    .areas(area_output_view);
+            frame.render_widget(&self.output_text, area_text);
+            if let Some(markers) = &self.output_markers {
+                frame.render_widget(markers, area_markers);
+            }
+        }
+
+        if let Some(area_tabs) = area_output_tabs {
+            let tabs_panel = render_tabs_panel(self.state.view);
+            frame.render_widget(tabs_panel, area_tabs);
+        }
         Ok(())
     }
 }
 
 impl ContentComponent for Bash<'static> {}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::events::Event;
+
+    fn tool_use() -> ToolUse {
+        ToolUse {
+            id: "tool_1".to_string(),
+            name: "bash".to_string(),
+            input: json!({
+                "command": "echo hi",
+                "timeout": 1000,
+            }),
+        }
+    }
+
+    fn bash_output() -> BashOutput {
+        BashOutput {
+            exit_code: 0,
+            stdout: "out\n".to_string(),
+            stderr: "err\n".to_string(),
+            chunks: vec![
+                code_combo::OutputChunk {
+                    timestamp: 0,
+                    stream: code_combo::StreamKind::Stdout,
+                    lines: vec!["out".to_string()],
+                },
+                code_combo::OutputChunk {
+                    timestamp: 0,
+                    stream: code_combo::StreamKind::Stderr,
+                    lines: vec!["err".to_string()],
+                },
+            ],
+            timed_out: false,
+        }
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bash_auto_collapses_on_success_and_stays_open_on_failure() {
+        let tool_use = tool_use();
+        let mut bash = Bash::try_new().tool_use(&tool_use).call().unwrap();
+        assert!(!bash.state.collapsed);
+
+        let value = serde_json::to_value(bash_output()).unwrap();
+        bash.handle_event(&Event::Answer(AnswerEvent::ToolResult {
+            id: "tool_1".to_string(),
+            is_error: false,
+            output: Final::Json(value),
+        }));
+        assert!(bash.state.collapsed);
+
+        let value = serde_json::to_value(bash_output()).unwrap();
+        bash.handle_event(&Event::Answer(AnswerEvent::ToolResult {
+            id: "tool_1".to_string(),
+            is_error: true,
+            output: Final::Json(value),
+        }));
+        assert!(!bash.state.collapsed);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bash_switch_view_unfolds() {
+        let tool_use = tool_use();
+        let value = serde_json::to_value(bash_output()).unwrap();
+        let mut bash = Bash::try_new()
+            .tool_use(&tool_use)
+            .output(value)
+            .call()
+            .unwrap();
+
+        bash.state.write().collapsed = true;
+        bash.handle_key_event(&key(KeyCode::Char('1')));
+        assert!(!bash.state.collapsed);
+        assert_eq!(bash.state.view.index(), 0);
+
+        bash.state.write().collapsed = true;
+        bash.handle_key_event(&key(KeyCode::Char('2')));
+        assert!(!bash.state.collapsed);
+        assert_eq!(bash.state.view.index(), 1);
+
+        bash.state.write().collapsed = true;
+        bash.handle_key_event(&key(KeyCode::Char('3')));
+        assert!(!bash.state.collapsed);
+        assert_eq!(bash.state.view.index(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bash_appends_streaming_chunks() {
+        let tool_use = tool_use();
+        let mut bash = Bash::try_new().tool_use(&tool_use).call().unwrap();
+
+        bash.handle_event(&Event::Answer(AnswerEvent::ToolOutput {
+            id: "tool_1".to_string(),
+            chunk: code_combo::OutputChunk {
+                timestamp: 0,
+                stream: code_combo::StreamKind::Stdout,
+                lines: vec!["out1".to_string(), "out2".to_string()],
+            },
+        }));
+
+        let output = bash.state.output.clone().unwrap();
+        assert_eq!(output.stdout, "out1\nout2\n");
+        assert_eq!(output.stderr, "");
+        assert_eq!(output.chunks.len(), 1);
+        assert_eq!(
+            output.chunks[0].lines,
+            vec!["out1".to_string(), "out2".to_string()]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bash_hides_tabs_while_requiring_confirmation() {
+        let tool_use = tool_use();
+        let value = serde_json::to_value(bash_output()).unwrap();
+        let mut bash = Bash::try_new()
+            .tool_use(&tool_use)
+            .output(value)
+            .call()
+            .unwrap();
+
+        let height_with_output = bash.height(80);
+        bash.handle_event(&Event::Ask(AskEvent::ToolUsePermission(
+            "tool_1".to_string(),
+        )));
+        let height_confirm = bash.height(80);
+
+        assert!(height_with_output > height_confirm);
+    }
+}

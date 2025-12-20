@@ -77,6 +77,10 @@ impl Agent {
             .update_pcl(name, PermissionControl::Once(id.to_string()))
     }
 
+    pub fn take_once_permission(&mut self, id: &str, name: &str) -> bool {
+        self.executor.take_once_permission(name, id)
+    }
+
     pub async fn execute<'a>(
         &mut self,
         id: &str,

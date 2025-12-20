@@ -90,23 +90,8 @@ pub enum PermissionControl {
 }
 
 impl Executor {
-    pub async fn execute<'a>(
-        &mut self,
-        id: &str,
-        name: &str,
-        input: Input<'a>,
-    ) -> error::Result<Output> {
-        // Check tool
-        let Some(tool) = self.tools.get(name) else {
-            return Err(NotFoundSnafu {
-                name: name.to_string(),
-            }
-            .build())
-            .whatever_context("try get tool error");
-        };
-
-        // Check Permission
-        let granted_once = if let Some(pcl) = self.tools_once_pcl.get_mut(name) {
+    pub fn take_once_permission(&mut self, name: &str, id: &str) -> bool {
+        if let Some(pcl) = self.tools_once_pcl.get_mut(name) {
             let mut granted_idx: Option<usize> = None;
             for (idx, granted) in pcl.iter().enumerate() {
                 if granted == id {
@@ -115,13 +100,29 @@ impl Executor {
             }
             if let Some(idx) = granted_idx {
                 pcl.remove(idx);
-                true
-            } else {
-                false
+                return true;
             }
-        } else {
-            false
+        }
+        false
+    }
+
+    pub async fn execute<'a>(
+        &mut self,
+        id: &str,
+        name: &str,
+        input: Input<'a>,
+    ) -> error::Result<Output> {
+        // Check tool
+        let Some(tool) = self.tools.get(name).cloned() else {
+            return Err(NotFoundSnafu {
+                name: name.to_string(),
+            }
+            .build())
+            .whatever_context("try get tool error");
         };
+
+        // Check Permission
+        let granted_once = self.take_once_permission(name, id);
 
         if !granted_once {
             // Check if the tool has permission control entries for this session

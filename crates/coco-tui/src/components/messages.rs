@@ -116,6 +116,14 @@ impl Messages {
         self.focus.get()
     }
 
+    pub fn forward_key_to_selected(&mut self, key: &KeyEvent) -> bool {
+        let Some(idx) = self.focus.get() else {
+            return false;
+        };
+        self.messages.write_untracked()[idx].handle_key_event(key);
+        true
+    }
+
     pub fn blur(&mut self) {
         *self.focus.write() = None
     }
@@ -179,6 +187,7 @@ impl Messages {
         match event {
             Event::Ask(AskEvent::ToolUsePermission(id))
             | Event::Ask(AskEvent::TextEdit { id, .. })
+            | Event::Answer(AnswerEvent::ToolOutput { id, .. })
             | Event::Answer(AnswerEvent::ToolResult { id, .. }) => {
                 if let Some(idx) = self.locate_tool_message(id) {
                     // Pass through the relative event to its component.
@@ -296,9 +305,7 @@ impl Content for Messages {
     fn block_with_shortcuts_desc<'a>(&self, mut block: Block<'a>) -> Block<'a> {
         if let Some(idx) = self.focus.get() {
             let component = &self.messages.read()[idx];
-            if component.is_actionable() {
-                block = component.block_with_shortcuts_desc(block);
-            }
+            block = component.block_with_shortcuts_desc(block);
         }
         block
     }
@@ -333,6 +340,8 @@ impl Component for Messages {
     }
 
     fn handle_key_event(&mut self, key: &KeyEvent) {
+        // NOTE: By default, only actionable messages receive key events to avoid interfering with
+        // global navigation/escape semantics in `Chat` (e.g. Esc leaving Messages focus).
         match (self.focus.read(), key.modifiers, key.code) {
             (Some(idx), _, _) if self.messages[*idx].is_actionable() => {
                 self.messages.write_untracked()[*idx].handle_key_event(key);

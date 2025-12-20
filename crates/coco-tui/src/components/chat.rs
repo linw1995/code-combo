@@ -298,6 +298,9 @@ impl Chat<'static> {
                 .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")])),
             Focus::Messages => {
                 block = self.messages.block_with_shortcuts_desc(block);
+                if !self.messages.is_actionable() {
+                    block = block.title_bottom(shortcuts_desc(&[("Back", "Esc")]));
+                }
                 block
                     .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")]))
                     .title_bottom(shortcuts_desc(&[("Scroll Up", "C-y"), ("Down", "C-e")]))
@@ -495,6 +498,9 @@ impl Component for Chat<'static> {
                 tokio::task::spawn(task_chat(self.agent.clone(), content));
                 // Trigger session save after tool result
                 global::trigger_schedule_session_save();
+            }
+            Event::Answer(AnswerEvent::ToolOutput { .. }) => {
+                let _ = self.messages.on_tool_event(event);
             }
             _ => {
                 // Handle other kinds of events by default
@@ -786,6 +792,78 @@ async fn task_chat(mut agent: Agent, content: ChatContent) {
 async fn task_tool_use(mut agent: Agent, tool_use: ToolUse) {
     let tx = global::event_tx();
     let code_combo::ToolUse { id, name, input } = tool_use;
+
+    if name == code_combo::tools::BASH_TOOL_NAME {
+        if !agent.take_once_permission(&id, &name) {
+            tx.send(AskEvent::ToolUsePermission(id).into()).unwrap();
+            return;
+        }
+
+        let input: code_combo::tools::BashInput = match serde_json::from_value(input) {
+            Ok(value) => value,
+            Err(err) => {
+                let output = code_combo::tools::BashOutput {
+                    exit_code: 255,
+                    stdout: String::new(),
+                    stderr: format!("Invalid input format: {err}"),
+                    chunks: Vec::new(),
+                    timed_out: false,
+                };
+                tx.send(
+                    AnswerEvent::ToolResult {
+                        id,
+                        is_error: true,
+                        output: code_combo::tools::Final::Json(
+                            serde_json::to_value(output).unwrap(),
+                        ),
+                    }
+                    .into(),
+                )
+                .unwrap();
+                return;
+            }
+        };
+
+        let id_for_chunk = id.clone();
+        let output = match code_combo::tools::run_bash_chunked(input, |chunk| {
+            tx.send(
+                AnswerEvent::ToolOutput {
+                    id: id_for_chunk.clone(),
+                    chunk: chunk.clone(),
+                }
+                .into(),
+            )
+            .unwrap();
+        })
+        .await
+        {
+            Ok(output) => output,
+            Err(err) => {
+                warn!(?err, "failed to run bash process");
+                code_combo::tools::BashOutput {
+                    exit_code: 255,
+                    stdout: String::new(),
+                    stderr: err,
+                    chunks: Vec::new(),
+                    timed_out: false,
+                }
+            }
+        };
+
+        let is_error = output.exit_code != 0;
+        let output = code_combo::tools::Final::Json(serde_json::to_value(output).unwrap());
+        tx.send(
+            AnswerEvent::ToolResult {
+                id,
+                is_error,
+                output,
+            }
+            .into(),
+        )
+        .unwrap();
+        return;
+    }
+
     // It will be executed if permission check pass
     let rv = agent
         .execute(&id, &name, code_combo::Input::Starter(input))
