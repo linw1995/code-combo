@@ -15,6 +15,7 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    actions::Action,
     components::{Component, Content, ContentComponent, Persistable},
     error::Result,
     events::{AnswerEvent, Event},
@@ -27,7 +28,15 @@ use crate::{
 struct Inner {
     input: ReadInput,
     output: Option<String>,
-    collapsed: bool,
+    #[serde(default = "default_display_state")]
+    display_state: DisplayState,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+enum DisplayState {
+    Omitted,
+    Collapsed,
+    Expanded,
 }
 
 #[derive(ComponentExt, ContentComponentExt)]
@@ -40,7 +49,11 @@ pub struct Read<'a> {
     output_line_cnt: usize,
 }
 
-const COLLAPSED_PREVIEW_LINES: usize = 5;
+const OMITTED_PREVIEW_LINES: usize = 5;
+
+fn default_display_state() -> DisplayState {
+    DisplayState::Omitted
+}
 
 fn generate_input_widget<'a>(input: ReadInput) -> Paragraph<'a> {
     let mut lines = vec![];
@@ -88,7 +101,7 @@ impl Read<'_> {
             state: State::new(Inner {
                 input,
                 output: None,
-                collapsed: true,
+                display_state: DisplayState::Omitted,
             }),
         }
     }
@@ -104,8 +117,29 @@ impl Read<'_> {
         self.output_widget = Some(generate_output_widget(text));
     }
 
-    fn toggle_collapsed(&mut self) {
-        self.state.write().collapsed = !self.state.collapsed;
+    fn toggle_display_state(&mut self) {
+        let mut state = self.state.write();
+        state.display_state = match state.display_state {
+            DisplayState::Collapsed => DisplayState::Expanded,
+            DisplayState::Expanded => DisplayState::Collapsed,
+            DisplayState::Omitted => DisplayState::Omitted,
+        };
+    }
+
+    fn on_blur(&mut self) {
+        if self.state.display_state == DisplayState::Omitted {
+            self.state.write().display_state = DisplayState::Collapsed;
+        }
+    }
+
+    fn omitted_indicator(&self) -> Paragraph<'static> {
+        Paragraph::new(
+            format!(
+                "... (omitted, showing first part of {} lines)",
+                self.output_line_cnt
+            )
+            .dark_gray(),
+        )
     }
 }
 
@@ -115,13 +149,19 @@ impl Content for Read<'_> {
         let output_height = self
             .output_widget
             .as_ref()
-            .map(|x| {
-                let mut height = x.line_count(width);
-                if self.state.collapsed && height > COLLAPSED_PREVIEW_LINES {
-                    // Add 1 for the collapsed indicator at the bottom.
-                    height = COLLAPSED_PREVIEW_LINES + 1
-                };
-                height
+            .map(|widget| match self.state.display_state {
+                DisplayState::Collapsed => 0,
+                DisplayState::Expanded => widget.line_count(width),
+                DisplayState::Omitted => {
+                    let height = widget.line_count(width);
+                    let indicator = self.omitted_indicator();
+                    let indicator_height = indicator.line_count(width);
+                    if height > OMITTED_PREVIEW_LINES + indicator_height {
+                        OMITTED_PREVIEW_LINES + indicator_height
+                    } else {
+                        height
+                    }
+                }
             })
             .unwrap_or_default();
         input_height + output_height
@@ -129,19 +169,22 @@ impl Content for Read<'_> {
 
     fn is_actionable(&self) -> bool {
         self.output_widget.is_some()
+            && matches!(
+                self.state.display_state,
+                DisplayState::Collapsed | DisplayState::Expanded
+            )
     }
 
     fn block_with_shortcuts_desc<'b>(&self, block: Block<'b>) -> Block<'b> {
-        if self.output_widget.is_some() {
-            let toggle_text = if self.state.collapsed {
-                ("Unfold", "z")
-            } else {
-                ("Fold", "z")
-            };
-            block.title_bottom(crate::components::shortcuts_desc(&[toggle_text]))
-        } else {
-            block
+        if !self.is_actionable() {
+            return block;
         }
+        let toggle_text = match self.state.display_state {
+            DisplayState::Collapsed => ("Unfold", "e"),
+            DisplayState::Expanded => ("Fold", "e"),
+            DisplayState::Omitted => return block,
+        };
+        block.title_bottom(crate::components::shortcuts_desc(&[toggle_text]))
     }
 }
 
@@ -178,10 +221,16 @@ impl Component for Read<'static> {
     }
 
     fn handle_key_event(&mut self, key: &KeyEvent) {
-        if let (KeyModifiers::NONE, KeyCode::Char('z')) = (key.modifiers, key.code)
-            && self.output_widget.is_some()
+        if let (KeyModifiers::NONE, KeyCode::Char('e')) = (key.modifiers, key.code)
+            && self.is_actionable()
         {
-            self.toggle_collapsed();
+            self.toggle_display_state();
+        }
+    }
+
+    fn update(&mut self, action: &Action) {
+        if matches!(action, Action::Blur) {
+            self.on_blur();
         }
     }
 
@@ -190,30 +239,42 @@ impl Component for Read<'static> {
         let width = area.width;
         let height_input = self.input_widget.line_count(width);
 
-        if let Some(output_widget) = &self.output_widget {
-            let width = area.width;
-            let [area_input, area_output] =
-                Layout::vertical([Length(height_input as u16), Min(1)]).areas(area);
+        let Some(output_widget) = &self.output_widget else {
+            frame.render_widget(&self.input_widget, area);
+            return Ok(());
+        };
 
-            // Draw input area
-            frame.render_widget(&self.input_widget, area_input);
+        if self.state.display_state == DisplayState::Collapsed {
+            frame.render_widget(&self.input_widget, area);
+            return Ok(());
+        }
 
-            // Draw output area
-            let height = output_widget.line_count(width);
-            let indicator = Paragraph::new(
-                format!("... (showing first part of {} lines)", self.output_line_cnt).dark_gray(),
-            );
-            let indicator_height = indicator.line_count(width);
-            if self.state.collapsed && height > COLLAPSED_PREVIEW_LINES + indicator_height {
-                let [area_output, area_indicator] =
-                    Layout::vertical([Min(1), Length(indicator_height as u16)]).areas(area_output);
-                frame.render_widget(indicator, area_indicator);
-                frame.render_widget(output_widget, area_output);
-            } else {
+        let [area_input, area_output] =
+            Layout::vertical([Length(height_input as u16), Min(1)]).areas(area);
+
+        // Draw input area
+        frame.render_widget(&self.input_widget, area_input);
+
+        // Draw output area
+        match self.state.display_state {
+            DisplayState::Expanded => {
                 frame.render_widget(output_widget, area_output);
             }
-        } else {
-            frame.render_widget(&self.input_widget, area);
+            DisplayState::Omitted => {
+                let height = output_widget.line_count(width);
+                let indicator = self.omitted_indicator();
+                let indicator_height = indicator.line_count(width);
+                if height > OMITTED_PREVIEW_LINES + indicator_height {
+                    let [area_output, area_indicator] =
+                        Layout::vertical([Min(1), Length(indicator_height as u16)])
+                            .areas(area_output);
+                    frame.render_widget(indicator, area_indicator);
+                    frame.render_widget(output_widget, area_output);
+                } else {
+                    frame.render_widget(output_widget, area_output);
+                }
+            }
+            DisplayState::Collapsed => (),
         }
 
         Ok(())
@@ -221,3 +282,55 @@ impl Component for Read<'static> {
 }
 
 impl ContentComponent for Read<'static> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::to_value;
+
+    fn make_tool_use() -> ToolUse {
+        let input = ReadInput {
+            path: "demo.txt".to_string(),
+            line_offset: DEFAULT_LINE_OFFSET,
+            line_limit: DEFAULT_LINE_LIMIT,
+        };
+        ToolUse {
+            id: "tool_1".to_string(),
+            name: "read".to_string(),
+            input: to_value(input).expect("failed to serialize ReadInput"),
+        }
+    }
+
+    fn make_output() -> Final {
+        Final::Message(["line1", "line2", "line3", "line4", "line5", "line6"].join("\n"))
+    }
+
+    #[test]
+    fn read_omitted_then_blur_collapses() {
+        let mut read: Read<'static> = Read::new(&make_tool_use());
+        read.update_output(make_output());
+
+        assert_eq!(read.state.display_state, DisplayState::Omitted);
+        assert!(!read.is_actionable());
+
+        read.update(&Action::Blur);
+        assert_eq!(read.state.display_state, DisplayState::Collapsed);
+        assert!(read.is_actionable());
+    }
+
+    #[test]
+    fn read_toggle_only_between_collapsed_and_expanded() {
+        let mut read: Read<'static> = Read::new(&make_tool_use());
+        read.update_output(make_output());
+
+        let key = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE);
+        read.handle_key_event(&key);
+        assert_eq!(read.state.display_state, DisplayState::Omitted);
+
+        read.update(&Action::Blur);
+        read.handle_key_event(&key);
+        assert_eq!(read.state.display_state, DisplayState::Expanded);
+        read.handle_key_event(&key);
+        assert_eq!(read.state.display_state, DisplayState::Collapsed);
+    }
+}
