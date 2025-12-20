@@ -54,6 +54,7 @@ pub fn init_file_logging(log_name: &str) -> Result<PathBuf> {
 
     let env_filter = EnvFilter::builder()
         .with_default_directive(tracing::Level::INFO.into())
+        .with_env_var("COCO_LOG")
         .from_env()
         .whatever_context("failed to load filter from env")?;
 

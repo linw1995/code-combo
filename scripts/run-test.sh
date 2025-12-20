@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euxo pipefail
 
-export RUST_LOG=${RUST_LOG-debug}
+export COCO_LOG=${COCO_LOG-debug}
 
 cargo build --bin coco
 cargo nextest run "$@"
