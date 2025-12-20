@@ -792,101 +792,62 @@ async fn task_chat(mut agent: Agent, content: ChatContent) {
 async fn task_tool_use(mut agent: Agent, tool_use: ToolUse) {
     let tx = global::event_tx();
     let code_combo::ToolUse { id, name, input } = tool_use;
-
-    if name == code_combo::tools::BASH_TOOL_NAME {
-        if !agent.take_once_permission(&id, &name) {
-            tx.send(AskEvent::ToolUsePermission(id).into()).unwrap();
-            return;
-        }
-
-        let input: code_combo::tools::BashInput = match serde_json::from_value(input) {
-            Ok(value) => value,
-            Err(err) => {
-                let output = code_combo::tools::BashOutput {
-                    exit_code: 255,
-                    stdout: String::new(),
-                    stderr: format!("Invalid input format: {err}"),
-                    chunks: Vec::new(),
-                    timed_out: false,
-                };
-                tx.send(
-                    AnswerEvent::ToolResult {
-                        id,
-                        is_error: true,
-                        output: code_combo::tools::Final::Json(
-                            serde_json::to_value(output).unwrap(),
-                        ),
-                    }
-                    .into(),
-                )
-                .unwrap();
-                return;
-            }
-        };
-
-        let id_for_chunk = id.clone();
-        let output = match code_combo::tools::run_bash_chunked(input, |chunk| {
-            tx.send(
-                AnswerEvent::ToolOutput {
-                    id: id_for_chunk.clone(),
-                    chunk: chunk.clone(),
+    let _ = agent
+        .execute_with_output(
+            &id,
+            &name,
+            code_combo::Input::Starter(input),
+            |out| match out {
+                Output::ToolOutput(chunk) => {
+                    tx.send(
+                        AnswerEvent::ToolOutput {
+                            id: id.clone(),
+                            chunk,
+                        }
+                        .into(),
+                    )
+                    .unwrap();
                 }
-                .into(),
-            )
-            .unwrap();
-        })
-        .await
-        {
-            Ok(output) => output,
-            Err(err) => {
-                warn!(?err, "failed to run bash process");
-                code_combo::tools::BashOutput {
-                    exit_code: 255,
-                    stdout: String::new(),
-                    stderr: err,
-                    chunks: Vec::new(),
-                    timed_out: false,
+                Output::AskPermission => {
+                    tx.send(AskEvent::ToolUsePermission(id.clone()).into())
+                        .unwrap();
                 }
-            }
-        };
-
-        let is_error = output.exit_code != 0;
-        let output = code_combo::tools::Final::Json(serde_json::to_value(output).unwrap());
-        tx.send(
-            AnswerEvent::ToolResult {
-                id,
-                is_error,
-                output,
-            }
-            .into(),
+                Output::TextEdit(edit) => {
+                    tx.send(
+                        AskEvent::TextEdit {
+                            id: id.clone(),
+                            edit,
+                        }
+                        .into(),
+                    )
+                    .unwrap();
+                }
+                Output::Success(output) => {
+                    tx.send(
+                        AnswerEvent::ToolResult {
+                            id: id.clone(),
+                            is_error: false,
+                            output,
+                        }
+                        .into(),
+                    )
+                    .unwrap();
+                }
+                Output::Failure(output) => {
+                    tx.send(
+                        AnswerEvent::ToolResult {
+                            id: id.clone(),
+                            is_error: true,
+                            output,
+                        }
+                        .into(),
+                    )
+                    .unwrap();
+                }
+                Output::Denied => (),
+            },
         )
-        .unwrap();
-        return;
-    }
-
-    // It will be executed if permission check pass
-    let rv = agent
-        .execute(&id, &name, code_combo::Input::Starter(input))
         .await;
-    let is_error = matches!(rv, Output::Failure(_));
-    match rv {
-        Output::AskPermission => tx.send(AskEvent::ToolUsePermission(id).into()).unwrap(),
-        Output::Success(output) | Output::Failure(output) => {
-            tx.send(
-                AnswerEvent::ToolResult {
-                    id,
-                    is_error,
-                    output,
-                }
-                .into(),
-            )
-            .unwrap();
-        }
-        Output::TextEdit(edit) => {
-            tx.send(AskEvent::TextEdit { id, edit }.into()).unwrap();
-        }
-        Output::Denied => (),
-    }
 }
 
 async fn task_apply_text_edit(

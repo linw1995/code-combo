@@ -4,10 +4,10 @@ use lazy_static::lazy_static;
 use snafu::prelude::*;
 
 use crate::{
-    TextEdit, error,
+    OutputChunk, TextEdit, error,
     tools::{
-        self, BashTool, Final, LIST_TOOL_NAME, ListTool, READ_TOOL_NAME, ReadTool,
-        STR_REPLACE_TOOL_NAME, StrReplaceTool, Tool,
+        self, BASH_TOOL_NAME, BashInput, BashOutput, BashTool, Final, LIST_TOOL_NAME, ListTool,
+        READ_TOOL_NAME, ReadTool, STR_REPLACE_TOOL_NAME, StrReplaceTool, Tool, run_bash_chunked,
     },
 };
 
@@ -66,6 +66,7 @@ pub enum Output {
     Success(Final),
     Failure(Final),
     TextEdit(TextEdit),
+    ToolOutput(OutputChunk),
     Denied,
     AskPermission,
 }
@@ -112,6 +113,26 @@ impl Executor {
         name: &str,
         input: Input<'a>,
     ) -> error::Result<Output> {
+        let mut final_output: Option<Output> = None;
+        self.execute_with_output(id, name, input, |out| {
+            if !matches!(out, Output::ToolOutput(_)) {
+                final_output = Some(out);
+            }
+        })
+        .await?;
+        Ok(final_output.unwrap_or(Output::Denied))
+    }
+
+    pub async fn execute_with_output<'a, F>(
+        &mut self,
+        id: &str,
+        name: &str,
+        input: Input<'a>,
+        mut on_output: F,
+    ) -> error::Result<()>
+    where
+        F: FnMut(Output) + Send,
+    {
         // Check tool
         let Some(tool) = self.tools.get(name).cloned() else {
             return Err(NotFoundSnafu {
@@ -135,13 +156,56 @@ impl Executor {
                     name,
                     STR_REPLACE_TOOL_NAME | READ_TOOL_NAME | LIST_TOOL_NAME
                 ) {
-                    // For other tools, request permission if no permission control entries are found
-                    return Ok(Output::AskPermission);
+                    on_output(Output::AskPermission);
+                    return Ok(());
                 }
             };
         }
-        // Just execute the tool
-        Ok(tool.execute(input).await.into())
+
+        if name == BASH_TOOL_NAME {
+            match input {
+                Input::Starter(value) => {
+                    let parsed: Result<BashInput, _> = serde_json::from_value(value.clone());
+                    match parsed {
+                        Ok(input) => {
+                            let output = match run_bash_chunked(input, |chunk| {
+                                on_output(Output::ToolOutput(chunk.clone()));
+                            })
+                            .await
+                            {
+                                Ok(output) => output,
+                                Err(err) => BashOutput {
+                                    exit_code: 255,
+                                    stdout: String::new(),
+                                    stderr: err,
+                                    chunks: Vec::new(),
+                                    timed_out: false,
+                                },
+                            };
+                            let is_error = output.exit_code != 0;
+                            let final_output = Final::Json(serde_json::to_value(output).unwrap());
+                            on_output(if is_error {
+                                Output::Failure(final_output)
+                            } else {
+                                Output::Success(final_output)
+                            });
+                            return Ok(());
+                        }
+                        Err(_) => {
+                            on_output(tool.execute(Input::Starter(value)).await.into());
+                            return Ok(());
+                        }
+                    }
+                }
+                _ => {
+                    on_output(tool.execute(input).await.into());
+                    return Ok(());
+                }
+            }
+        }
+
+        on_output(tool.execute(input).await.into());
+        Ok(())
     }
 
     /// Update Permission Control List
