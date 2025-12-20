@@ -20,7 +20,7 @@ use crate::{
     session::{self, Session},
 };
 
-use super::{AnswerEvent, AskEvent, Component, Content, Event, Message};
+use super::{Action, AnswerEvent, AskEvent, Component, Content, Event, Message};
 
 mod combo;
 mod plain;
@@ -45,11 +45,21 @@ pub struct Messages {
 
 impl Messages {
     pub fn extend(&mut self, iter: impl Iterator<Item = Message>) {
-        self.messages.write().extend(iter);
+        let mut messages = self.messages.write();
+        for message in iter {
+            if let Some(last) = messages.last_mut() {
+                last.handle_action(&Action::Blur);
+            }
+            messages.push(message);
+        }
     }
 
     pub fn push(&mut self, message: Message) {
-        self.messages.write().push(message);
+        let mut messages = self.messages.write();
+        if let Some(last) = messages.last_mut() {
+            last.handle_action(&Action::Blur);
+        }
+        messages.push(message);
     }
 
     /// Clear all messages
@@ -304,7 +314,9 @@ impl Persistable for Messages {
         let messages: Vec<Session> = session::load(session)?;
         let mut inst = Self::default();
         for message in messages {
-            inst.push(Message::load(message)?);
+            inst.messages
+                .write_untracked()
+                .push(Message::load(message)?);
         }
         Ok(inst)
     }
