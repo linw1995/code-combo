@@ -236,13 +236,8 @@ impl<'a> Bash<'a> {
 
 impl<'a> Content for Bash<'a> {
     fn height(&self, width: u16) -> usize {
-        if self.state.collapsed {
-            return 0;
-        }
-        if self.state.requiring_confirmation {
-            return self.input.height(width);
-        }
-        if self.state.output.is_none() {
+        if self.state.requiring_confirmation || self.state.output.is_none() || self.state.collapsed
+        {
             return self.input.height(width);
         }
         let height_input = self.input.height(width);
@@ -402,7 +397,7 @@ impl Component for Bash<'static> {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        if self.state.collapsed || area.height == 0 {
+        if area.height == 0 {
             return Ok(());
         }
 
@@ -411,7 +406,8 @@ impl Component for Bash<'static> {
         let width = area.width.max(1);
         let height_input = self.input.height(width);
 
-        if self.state.requiring_confirmation || self.state.output.is_none() {
+        if self.state.collapsed || self.state.requiring_confirmation || self.state.output.is_none()
+        {
             let [area_input] = Layout::vertical([Length(height_input as u16)]).areas(area);
             self.input.draw(frame, area_input)?;
             return Ok(());
@@ -592,5 +588,23 @@ mod tests {
         let height_confirm = bash.height(80);
 
         assert!(height_with_output > height_confirm);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bash_collapsed_shows_input_only() {
+        let tool_use = tool_use();
+        let value = serde_json::to_value(bash_output()).unwrap();
+        let mut bash = Bash::try_new()
+            .tool_use(&tool_use)
+            .output(value)
+            .call()
+            .unwrap();
+
+        bash.state.write().collapsed = true;
+        let height = bash.height(80);
+        let input_height = bash.input.height(80);
+
+        assert_eq!(height, input_height);
+        assert!(height > 0);
     }
 }
