@@ -305,8 +305,8 @@ mod tests {
         Final::Message(["line1", "line2", "line3", "line4", "line5", "line6"].join("\n"))
     }
 
-    #[test]
-    fn read_omitted_then_blur_collapses() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_omitted_then_blur_collapses() {
         let mut read: Read<'static> = Read::new(&make_tool_use());
         read.update_output(make_output());
 
@@ -318,8 +318,8 @@ mod tests {
         assert!(read.is_actionable());
     }
 
-    #[test]
-    fn read_toggle_only_between_collapsed_and_expanded() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_toggle_only_between_collapsed_and_expanded() {
         let mut read: Read<'static> = Read::new(&make_tool_use());
         read.update_output(make_output());
 

@@ -89,6 +89,21 @@ impl Agent {
             .expect("Failed to execute")
     }
 
+    pub async fn execute_with_output<'a, F>(
+        &mut self,
+        id: &str,
+        name: &str,
+        input: executor::Input<'a>,
+        on_output: F,
+    ) -> Result<()>
+    where
+        F: FnMut(Output) + Send,
+    {
+        self.executor
+            .execute_with_output(id, name, input, on_output)
+            .await
+    }
+
     fn pick_provider(&mut self) -> Result<(&str, Client)> {
         // TODO: pick a provider based on some strategy
         let first = self.config.providers.first_mut();

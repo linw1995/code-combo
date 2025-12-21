@@ -298,6 +298,9 @@ impl Chat<'static> {
                 .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")])),
             Focus::Messages => {
                 block = self.messages.block_with_shortcuts_desc(block);
+                if !self.messages.is_actionable() {
+                    block = block.title_bottom(shortcuts_desc(&[("Back", "Esc")]));
+                }
                 block
                     .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")]))
                     .title_bottom(shortcuts_desc(&[("Scroll Up", "C-y"), ("Down", "C-e")]))
@@ -495,6 +498,9 @@ impl Component for Chat<'static> {
                 tokio::task::spawn(task_chat(self.agent.clone(), content));
                 // Trigger session save after tool result
                 global::trigger_schedule_session_save();
+            }
+            Event::Answer(AnswerEvent::ToolOutput { .. }) => {
+                let _ = self.messages.on_tool_event(event);
             }
             _ => {
                 // Handle other kinds of events by default
@@ -786,29 +792,62 @@ async fn task_chat(mut agent: Agent, content: ChatContent) {
 async fn task_tool_use(mut agent: Agent, tool_use: ToolUse) {
     let tx = global::event_tx();
     let code_combo::ToolUse { id, name, input } = tool_use;
-    // It will be executed if permission check pass
-    let rv = agent
-        .execute(&id, &name, code_combo::Input::Starter(input))
-        .await;
-    let is_error = matches!(rv, Output::Failure(_));
-    match rv {
-        Output::AskPermission => tx.send(AskEvent::ToolUsePermission(id).into()).unwrap(),
-        Output::Success(output) | Output::Failure(output) => {
-            tx.send(
-                AnswerEvent::ToolResult {
-                    id,
-                    is_error,
-                    output,
+    let _ = agent
+        .execute_with_output(
+            &id,
+            &name,
+            code_combo::Input::Starter(input),
+            |out| match out {
+                Output::ToolOutput(chunk) => {
+                    tx.send(
+                        AnswerEvent::ToolOutput {
+                            id: id.clone(),
+                            chunk,
+                        }
+                        .into(),
+                    )
+                    .unwrap();
                 }
-                .into(),
-            )
-            .unwrap();
-        }
-        Output::TextEdit(edit) => {
-            tx.send(AskEvent::TextEdit { id, edit }.into()).unwrap();
-        }
-        Output::Denied => (),
-    }
+                Output::AskPermission => {
+                    tx.send(AskEvent::ToolUsePermission(id.clone()).into())
+                        .unwrap();
+                }
+                Output::TextEdit(edit) => {
+                    tx.send(
+                        AskEvent::TextEdit {
+                            id: id.clone(),
+                            edit,
+                        }
+                        .into(),
+                    )
+                    .unwrap();
+                }
+                Output::Success(output) => {
+                    tx.send(
+                        AnswerEvent::ToolResult {
+                            id: id.clone(),
+                            is_error: false,
+                            output,
+                        }
+                        .into(),
+                    )
+                    .unwrap();
+                }
+                Output::Failure(output) => {
+                    tx.send(
+                        AnswerEvent::ToolResult {
+                            id: id.clone(),
+                            is_error: true,
+                            output,
+                        }
+                        .into(),
+                    )
+                    .unwrap();
+                }
+                Output::Denied => (),
+            },
+        )
+        .await;
 }
 
 async fn task_apply_text_edit(

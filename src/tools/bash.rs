@@ -1,11 +1,13 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::{process::Command, time::timeout as tokio_timeout};
+use tokio::time::sleep;
 
 use super::{ExecuteResult, Final, Input, Tool};
+use crate::exec::{ChunkConfig, ExecCommand, OutputChunk, ProcessEvent, StreamKind};
 
 #[derive(Default)]
 pub struct BashTool {}
@@ -20,8 +22,14 @@ pub struct BashInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BashOutput {
     pub exit_code: u8,
+    #[serde(default)]
     pub stdout: String,
+    #[serde(default)]
     pub stderr: String,
+    #[serde(default)]
+    pub chunks: Vec<OutputChunk>,
+    #[serde(default)]
+    pub timed_out: bool,
 }
 
 fn default_timeout_ms() -> u64 {
@@ -29,6 +37,86 @@ fn default_timeout_ms() -> u64 {
 }
 
 pub const BASH_TOOL_NAME: &str = "bash";
+
+pub async fn run_bash_chunked<F>(input: BashInput, mut on_chunk: F) -> Result<BashOutput, String>
+where
+    F: FnMut(&OutputChunk) + Send,
+{
+    let BashInput { command, timeout } = input;
+
+    let argv = vec!["bash".to_string(), "-c".to_string(), command];
+    let mut proc = ExecCommand::from_argv(argv)
+        .spawn_chunked(ChunkConfig {
+            interval: Duration::ZERO,
+        })
+        .map_err(|err| format!("Failed to execute command: {err}"))?;
+
+    let mut output = BashOutput {
+        exit_code: 255,
+        stdout: String::new(),
+        stderr: String::new(),
+        chunks: Vec::new(),
+        timed_out: false,
+    };
+
+    let timeout_sleep = sleep(Duration::from_millis(timeout));
+    tokio::pin!(timeout_sleep);
+
+    loop {
+        tokio::select! {
+            _ = &mut timeout_sleep => {
+                output.timed_out = true;
+                output.exit_code = 124;
+                proc.killer.kill();
+                proc.abort();
+                break;
+            }
+            ev = proc.events.next() => {
+                let Some(ev) = ev else {
+                    break;
+                };
+                match ev {
+                    ProcessEvent::Started { .. } => (),
+                    ProcessEvent::Chunk(chunk) => {
+                        output.chunks.push(chunk);
+                        let last = output.chunks.last().expect("chunk pushed");
+                        for line in &last.lines {
+                            match last.stream {
+                                StreamKind::Stdout => {
+                                    output.stdout.push_str(line);
+                                    output.stdout.push('\n');
+                                }
+                                StreamKind::Stderr => {
+                                    output.stderr.push_str(line);
+                                    output.stderr.push('\n');
+                                }
+                            }
+                        }
+                        on_chunk(last);
+                    }
+                    ProcessEvent::Exited { exit_code, .. } => {
+                        output.exit_code = exit_code.unwrap_or(255) as u8;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if !output.timed_out {
+        let status = proc
+            .wait()
+            .await
+            .map_err(|err| format!("Failed to execute command: {err}"))?;
+        output.exit_code = status.code().unwrap_or(255) as u8;
+    }
+
+    Ok(output)
+}
+
+pub async fn run_bash(input: BashInput) -> Result<BashOutput, String> {
+    run_bash_chunked(input, |_| {}).await
+}
 
 #[async_trait]
 impl Tool for BashTool {
@@ -55,34 +143,35 @@ impl Tool for BashTool {
         let Input::Starter(input) = input else {
             return err_msg!("Input should be Starter variant, not other variants");
         };
-        let BashInput { command, timeout } =
-            serde_json::from_value(input).map_err(|err| format!("Invalid input format: {err}"))?;
+        let input: BashInput = match serde_json::from_value(input) {
+            Ok(value) => value,
+            Err(err) => {
+                let output = BashOutput {
+                    exit_code: 255,
+                    stdout: String::new(),
+                    stderr: format!("Invalid input format: {err}"),
+                    chunks: Vec::new(),
+                    timed_out: false,
+                };
+                let value = serde_json::to_value(&output)
+                    .map_err(|err| format!("Failed to serialize tool output: {err}"))?;
+                return Final::Json(value).err();
+            }
+        };
 
-        let result = tokio_timeout(
-            Duration::from_millis(timeout),
-            Command::new("bash")
-                .arg("-c")
-                .arg(command)
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await
-        .map_err(|err| format!("Exceeded command execution timeout: {err}"))?;
-
-        let std::process::Output {
-            status,
-            stdout,
-            stderr,
-        } = result.map_err(|err| format!("Failed to execute command: {err}"))?;
-
-        let output = BashOutput {
-            exit_code: status.code().unwrap_or(255) as u8,
-            stdout: String::from_utf8_lossy(&stdout).to_string(),
-            stderr: String::from_utf8_lossy(&stderr).to_string(),
+        let output = match run_bash(input).await {
+            Ok(output) => output,
+            Err(err) => BashOutput {
+                exit_code: 255,
+                stdout: String::new(),
+                stderr: err,
+                chunks: Vec::new(),
+                timed_out: false,
+            },
         };
 
         let exit_code = output.exit_code;
-        let output = serde_json::to_value(output)
+        let output = serde_json::to_value(&output)
             .map_err(|err| format!("Failed to serialize tool output: {err}"))?;
         let output = Final::from(output);
         if exit_code == 0 {
@@ -90,5 +179,70 @@ impl Tool for BashTool {
         } else {
             output.err()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::tools::Output;
+
+    use super::*;
+
+    fn stream_lines(output: &BashOutput, stream: StreamKind) -> Vec<&str> {
+        output
+            .chunks
+            .iter()
+            .filter(|c| c.stream == stream)
+            .flat_map(|c| c.lines.iter())
+            .map(|s| s.as_str())
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bash_output_contains_chunks_and_split_streams() {
+        let tool = BashTool::default();
+        let input = Input::Starter(json!({
+            "command": "printf \"out1\\nout2\\n\"; printf \"err1\\nerr2\\n\" 1>&2",
+            "timeout": 60_000,
+        }));
+
+        let output = tool.execute(input).await.unwrap();
+        let Output::Final(Final::Json(value)) = output else {
+            panic!("expected JSON Final output");
+        };
+        let output: BashOutput = serde_json::from_value(value).unwrap();
+
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.stdout, "out1\nout2\n");
+        assert_eq!(output.stderr, "err1\nerr2\n");
+        assert!(!output.chunks.is_empty());
+        assert_eq!(
+            stream_lines(&output, StreamKind::Stdout),
+            vec!["out1", "out2"]
+        );
+        assert_eq!(
+            stream_lines(&output, StreamKind::Stderr),
+            vec!["err1", "err2"]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bash_timeout_sets_timed_out_and_nonzero_exit() {
+        let tool = BashTool::default();
+        let input = Input::Starter(json!({
+            "command": "sleep 10; echo out",
+            "timeout": 10,
+        }));
+
+        let err = tool.execute(input).await.unwrap_err();
+        let Final::Json(value) = err else {
+            panic!("expected JSON Final error output");
+        };
+        let output: BashOutput = serde_json::from_value(value).unwrap();
+
+        assert!(output.timed_out);
+        assert_eq!(output.exit_code, 124);
     }
 }

@@ -98,6 +98,10 @@ impl RunningProcess {
             Err(err) => Err(io::Error::other(err.to_string())),
         }
     }
+
+    pub fn abort(&self) {
+        self.handle.abort();
+    }
 }
 
 #[derive(Debug)]
