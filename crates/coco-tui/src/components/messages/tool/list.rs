@@ -166,8 +166,8 @@ impl Content for List<'_> {
             return block;
         }
         let toggle_text = match self.state.display_state {
-            DisplayState::Collapsed => ("Unfold", "e"),
-            DisplayState::Expanded => ("Fold", "e"),
+            DisplayState::Collapsed => ("Unfold", "z"),
+            DisplayState::Expanded => ("Fold", "z"),
             DisplayState::Omitted => return block,
         };
         block.title_bottom(crate::components::shortcuts_desc(&[toggle_text]))
@@ -207,7 +207,7 @@ impl Component for List<'static> {
     }
 
     fn handle_key_event(&mut self, key: &KeyEvent) {
-        if let (KeyModifiers::NONE, KeyCode::Char('e')) = (key.modifiers, key.code)
+        if let (KeyModifiers::NONE, KeyCode::Char('z')) = (key.modifiers, key.code)
             && self.is_actionable()
         {
             self.toggle_display_state();

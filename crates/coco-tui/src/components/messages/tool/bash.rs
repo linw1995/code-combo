@@ -270,9 +270,9 @@ impl<'a> Content for Bash<'a> {
         }
 
         let toggle_text = if self.state.collapsed {
-            ("Unfold", "e")
+            ("Unfold", "z")
         } else {
-            ("Fold", "e")
+            ("Fold", "z")
         };
 
         let view = match self.state.view {
@@ -375,7 +375,7 @@ impl Component for Bash<'static> {
                 drop(state);
                 self.rebuild_output();
             }
-            (KeyModifiers::NONE, KeyCode::Char('e')) => {
+            (KeyModifiers::NONE, KeyCode::Char('z')) => {
                 self.state.write().collapsed = !self.state.collapsed;
             }
             (KeyModifiers::NONE, KeyCode::Enter) => {

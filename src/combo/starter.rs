@@ -777,7 +777,7 @@ async fn run_session_server(
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::{path::PathBuf, sync::OnceLock};
 

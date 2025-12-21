@@ -180,8 +180,8 @@ impl Content for Read<'_> {
             return block;
         }
         let toggle_text = match self.state.display_state {
-            DisplayState::Collapsed => ("Unfold", "e"),
-            DisplayState::Expanded => ("Fold", "e"),
+            DisplayState::Collapsed => ("Unfold", "z"),
+            DisplayState::Expanded => ("Fold", "z"),
             DisplayState::Omitted => return block,
         };
         block.title_bottom(crate::components::shortcuts_desc(&[toggle_text]))
@@ -221,7 +221,7 @@ impl Component for Read<'static> {
     }
 
     fn handle_key_event(&mut self, key: &KeyEvent) {
-        if let (KeyModifiers::NONE, KeyCode::Char('e')) = (key.modifiers, key.code)
+        if let (KeyModifiers::NONE, KeyCode::Char('z')) = (key.modifiers, key.code)
             && self.is_actionable()
         {
             self.toggle_display_state();
@@ -323,7 +323,7 @@ mod tests {
         let mut read: Read<'static> = Read::new(&make_tool_use());
         read.update_output(make_output());
 
-        let key = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE);
+        let key = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
         read.handle_key_event(&key);
         assert_eq!(read.state.display_state, DisplayState::Omitted);
 

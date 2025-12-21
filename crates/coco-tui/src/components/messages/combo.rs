@@ -211,9 +211,9 @@ impl Content for Combo {
             return block;
         }
         let toggle_text = if self.state.collapsed {
-            ("Unfold", "e")
+            ("Unfold", "z")
         } else {
-            ("Fold", "e")
+            ("Fold", "z")
         };
         block.title_bottom(crate::components::shortcuts_desc(&[toggle_text]))
     }
@@ -253,7 +253,7 @@ impl Component for Combo {
             return;
         }
 
-        if let (KeyModifiers::NONE, KeyCode::Char('e')) = (key.modifiers, key.code) {
+        if let (KeyModifiers::NONE, KeyCode::Char('z')) = (key.modifiers, key.code) {
             self.toggle_collapsed();
             return;
         }
@@ -413,8 +413,8 @@ mod tests {
 
     use super::*;
 
-    fn test_key_e() -> KeyEvent {
-        KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)
+    fn test_key_z() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE)
     }
 
     fn make_starter(name: &str) -> code_combo::Starter {
@@ -434,7 +434,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn combo_is_collapsed_by_default_and_toggles_with_e() {
+    async fn combo_is_collapsed_by_default_and_toggles_with_z() {
         let mut combo = Combo::new("demo");
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
             name: "demo".to_string(),
@@ -442,9 +442,9 @@ mod tests {
         }));
 
         assert_eq!(combo.height(80), 1);
-        combo.handle_key_event(&test_key_e());
+        combo.handle_key_event(&test_key_z());
         assert!(combo.height(80) > 1);
-        combo.handle_key_event(&test_key_e());
+        combo.handle_key_event(&test_key_z());
         assert_eq!(combo.height(80), 1);
     }
 
@@ -464,7 +464,7 @@ mod tests {
         }));
 
         assert_eq!(combo.height(80), 3);
-        combo.handle_key_event(&test_key_e());
+        combo.handle_key_event(&test_key_z());
         assert_eq!(combo.height(80), 3);
     }
 
@@ -475,7 +475,7 @@ mod tests {
             name: "demo".to_string(),
             starter: make_starter("demo"),
         }));
-        combo.handle_key_event(&test_key_e());
+        combo.handle_key_event(&test_key_z());
         assert!(combo.height(80) > 1);
 
         let session = combo.save();
