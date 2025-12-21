@@ -194,11 +194,13 @@ fn render_tabs_panel(view: ResultView) -> Paragraph<'static> {
 }
 
 fn has_result_tabs(state: &Inner) -> bool {
-    !state.applied_diffs.is_empty() || !state.rejected_diffs.is_empty()
+    !state.applied_diffs.is_empty() && !state.rejected_diffs.is_empty()
 }
 
 fn has_result_content(state: &Inner) -> bool {
-    has_result_tabs(state) || state.result_message.is_some()
+    !state.applied_diffs.is_empty()
+        || !state.rejected_diffs.is_empty()
+        || state.result_message.is_some()
 }
 
 fn build_header(state: &Inner) -> Paragraph<'static> {
@@ -267,16 +269,33 @@ fn build_preview_widget(state: &Inner) -> StrReplaceWidget<'static> {
 }
 
 fn build_result_widget(state: &Inner) -> StrReplaceWidget<'static> {
-    let diffs = match state.result_view {
-        ResultView::Applied => &state.applied_diffs,
-        ResultView::Unapplied => &state.rejected_diffs,
-    };
-    let diff_text = join_diffs(diffs);
+    // If there's no tab view (only one type of diff), show all available diffs
+    if !has_result_tabs(state) {
+        let diffs = if !state.applied_diffs.is_empty() {
+            &state.applied_diffs
+        } else {
+            &state.rejected_diffs
+        };
+        let diff_text = join_diffs(diffs);
 
-    if diff_text.is_empty() {
-        StrReplaceWidget::Paragraph(Paragraph::new("No diffs"))
+        if diff_text.is_empty() {
+            StrReplaceWidget::Paragraph(Paragraph::new("No diffs"))
+        } else {
+            build_diff_widget(diff_text)
+        }
     } else {
-        build_diff_widget(diff_text)
+        // Has tab view, display based on current selected view
+        let diffs = match state.result_view {
+            ResultView::Applied => &state.applied_diffs,
+            ResultView::Unapplied => &state.rejected_diffs,
+        };
+        let diff_text = join_diffs(diffs);
+
+        if diff_text.is_empty() {
+            StrReplaceWidget::Paragraph(Paragraph::new("No diffs"))
+        } else {
+            build_diff_widget(diff_text)
+        }
     }
 }
 
@@ -808,5 +827,65 @@ mod tests {
         assert_eq!(widget.state.applied_diffs.len(), 1);
         assert!(widget.state.pending_apply_diff.is_none());
         assert_eq!(widget.state.display_state, DisplayState::Preview);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn str_replace_no_tabs_when_only_one_diff_type() {
+        let tool_use1 = tool_use();
+        let mut widget1 = StrReplace::new(&tool_use1);
+
+        // Test case: only applied diffs exist
+        {
+            let mut state = widget1.state.write();
+            state.applied_diffs.push("@@ -1 +1 @@".to_string());
+            state.applied_diffs.push("@@ -3 +3 @@".to_string());
+            // rejected_diffs is empty
+        }
+
+        widget1.handle_event(&Event::Answer(AnswerEvent::ToolResult {
+            id: "tool_1".to_string(),
+            is_error: false,
+            output: Final::Message("Success".to_string()),
+        }));
+
+        assert_eq!(widget1.state.display_state, DisplayState::Result);
+        assert!(widget1.state.collapsed);
+        assert_eq!(widget1.state.result_view, ResultView::Applied);
+
+        // Verify no tab view (since only one diff type exists)
+        let state = widget1.state.read();
+        assert!(!has_result_tabs(state));
+        let _ = state;
+
+        // '1'/'2' keys should not respond (no tab view)
+        widget1.handle_key_event(&key(KeyCode::Char('1')));
+        widget1.handle_key_event(&key(KeyCode::Char('2')));
+
+        // Verify result_view hasn't changed
+        assert_eq!(widget1.state.result_view, ResultView::Applied);
+
+        // Test case: only rejected diffs exist
+        let tool_use2 = tool_use();
+        let mut widget2 = StrReplace::new(&tool_use2);
+
+        {
+            let mut state = widget2.state.write();
+            // applied_diffs is empty
+            state.rejected_diffs.push("@@ -1 +1 @@".to_string());
+        }
+
+        widget2.handle_event(&Event::Answer(AnswerEvent::ToolResult {
+            id: "tool_2".to_string(),
+            is_error: true,
+            output: Final::Message("Failed".to_string()),
+        }));
+
+        assert_eq!(widget2.state.display_state, DisplayState::Result);
+        assert_eq!(widget2.state.result_view, ResultView::Unapplied);
+
+        // Verify no tab view
+        let state = widget2.state.read();
+        assert!(!has_result_tabs(state));
+        let _ = state;
     }
 }
