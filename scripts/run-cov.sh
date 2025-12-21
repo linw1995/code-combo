@@ -8,7 +8,7 @@ export RUSTFLAGS="-Cinstrument-coverage -Ccodegen-units=1 -Copt-level=0 -Clink-d
 # Nightly
 # export RUSTFLAGS="-Cinstrument-coverage -Ccodegen-units=1 -Copt-level=0 -Clink-dead-code -Zpanic_abort_tests -Cpanic=abort"
 # export RUSTDOCFLAGS="-Cpanic=abort"
-export CARGO_TARGET_DIR="./target/coverage"
+export CARGO_TARGET_DIR="$(pwd)/target/coverage"
 export LLVM_PROFILE_FILE="${CARGO_TARGET_DIR}/data/coco-%p-%m.profraw"
 
 rm -rf ${CARGO_TARGET_DIR}/data/
@@ -16,7 +16,7 @@ mkdir -p ${CARGO_TARGET_DIR}/data/
 
 cargo clean --package coco-tui # Make sure to clean previous builds (Force build.rs to be reruned)
 cargo build --package coco-tui --bin coco
-cargo test "$@"
+cargo nextest run "$@"
 
 echo "Generating code coverage report..."
 
