@@ -34,6 +34,7 @@ tree-sitter = { version = "0.25" }
 tree-sitter-md = { version = "0.3.2" }
 futures-core = "0.3.31"
 futures-util = "0.3.31"
+tokio-util = "0.7.16"
 
 # Core dependencies for CLI and application functionality
 [dependencies]
@@ -57,6 +58,7 @@ snafu.workspace = true
 
 # Async runtime
 tokio.workspace = true
+tokio-util.workspace = true
 async-trait = "0.1.89"
 futures-core.workspace = true
 futures-util.workspace = true

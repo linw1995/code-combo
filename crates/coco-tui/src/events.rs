@@ -33,6 +33,7 @@ impl From<AskEvent> for Event {
 #[derive(Debug, Clone)]
 pub enum AnswerEvent {
     Bot(Vec<BotMessage>),
+    Cancelled,
     // Below events come from User
     ToolOutput {
         id: String,
@@ -61,6 +62,7 @@ pub enum ComboEvent {
     Executed { name: String, starter: Starter },
 
     NotFound { name: String },
+    Cancelled { name: Option<String> },
 }
 
 impl From<ComboEvent> for Event {

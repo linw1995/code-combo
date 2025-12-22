@@ -5,6 +5,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 
 use super::{ExecuteResult, Final, Input, Tool};
 use crate::exec::{ChunkConfig, ExecCommand, OutputChunk, ProcessEvent, StreamKind};
@@ -38,7 +39,11 @@ fn default_timeout_ms() -> u64 {
 
 pub const BASH_TOOL_NAME: &str = "bash";
 
-pub async fn run_bash_chunked<F>(input: BashInput, mut on_chunk: F) -> Result<BashOutput, String>
+pub async fn run_bash_chunked<F>(
+    input: BashInput,
+    cancel_token: CancellationToken,
+    mut on_chunk: F,
+) -> Result<BashOutput, String>
 where
     F: FnMut(&OutputChunk) + Send,
 {
@@ -64,6 +69,11 @@ where
 
     loop {
         tokio::select! {
+            _ = cancel_token.cancelled() => {
+                output.exit_code = 130;
+                proc.killer.kill();
+                break;
+            }
             _ = &mut timeout_sleep => {
                 output.timed_out = true;
                 output.exit_code = 124;
@@ -115,7 +125,7 @@ where
 }
 
 pub async fn run_bash(input: BashInput) -> Result<BashOutput, String> {
-    run_bash_chunked(input, |_| {}).await
+    run_bash_chunked(input, CancellationToken::new(), |_| {}).await
 }
 
 #[async_trait]

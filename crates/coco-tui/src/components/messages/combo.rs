@@ -1,9 +1,7 @@
 use std::collections::VecDeque;
 
 use coco_macro::{ComponentExt, ContentComponentExt};
-use code_combo::{SessionEnv, StarterCommand};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use futures::StreamExt;
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout},
@@ -13,14 +11,14 @@ use ratatui::{
     widgets::{Block, Borders},
 };
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::{
-    actions::{Action, ComboAction},
+    actions::Action,
     components::{Component, Content, ContentComponent, Persistable, Plain},
     error::*,
     events::{ComboEvent, Event},
-    global::{self, State},
+    global::State,
     session::{self, Session},
     widgets::Paragraph,
 };
@@ -30,6 +28,7 @@ enum StarterState {
     #[default]
     Discovering,
     NotFound,
+    Cancelled,
     Executing {
         output: VecDeque<DisplayedLine>,
     },
@@ -112,17 +111,32 @@ impl Combo {
             }
             ComboEvent::Executed { name, starter, .. } => {
                 if &self.state.name == name {
-                    let mut state = self.state.write();
-                    let output = match &starter.combo {
-                        Ok(combo) => combo.to_markdown(),
-                        Err(err) => {
-                            state.is_error = true;
-                            format!("Failed to execute starter: {err}")
-                        }
-                    };
-                    self.widget = Some(Plain::new(output.clone()));
-                    state.starter_state = StarterState::Finalized { output };
-                    state.collapsed = false;
+                    {
+                        let mut state = self.state.write();
+                        let output = match &starter.combo {
+                            Ok(combo) => combo.to_markdown(),
+                            Err(err) => {
+                                state.is_error = true;
+                                format!("Failed to execute starter: {err}")
+                            }
+                        };
+                        self.widget = Some(Plain::new(output.clone()));
+                        state.starter_state = StarterState::Finalized { output };
+                        state.collapsed = false;
+                    }
+                }
+            }
+            ComboEvent::Cancelled { name } => {
+                if name
+                    .as_ref()
+                    .map(|name| name == &self.state.name)
+                    .unwrap_or(true)
+                {
+                    {
+                        let mut state = self.state.write();
+                        state.starter_state = StarterState::Cancelled;
+                        state.collapsed = false;
+                    }
                 }
             }
             _ => (),
@@ -170,6 +184,10 @@ impl Combo {
             StarterState::NotFound => {
                 spans.push(self.state.name.clone().cyan());
                 spans.push("   Not found".red())
+            }
+            StarterState::Cancelled => {
+                spans.push(self.state.name.clone().cyan());
+                spans.push("   Cancelled".red());
             }
             StarterState::Executing { .. } => {
                 spans.push(self.state.name.clone().cyan());
@@ -289,17 +307,8 @@ impl Component for Combo {
 
     fn update(&mut self, action: &Action) {
         debug!(?action, "updating");
-        match action {
-            Action::Combo(combo) => match combo {
-                ComboAction::Discover => {
-                    tokio::task::spawn(discover());
-                }
-                ComboAction::Execute { name } => {
-                    tokio::task::spawn(execute(name.to_owned()));
-                }
-            },
-            Action::Blur => self.on_blur(),
-            _ => (),
+        if let Action::Blur = action {
+            self.on_blur()
         }
     }
 
@@ -335,93 +344,6 @@ impl Component for Combo {
 }
 
 impl ContentComponent for Combo {}
-
-async fn discover() {
-    let tx = global::event_tx();
-    let config = global::config().await;
-    let combo_dir = config.combo_dir();
-
-    tx.send(ComboEvent::Discovering.into()).unwrap();
-    let starters = code_combo::discover_combo_starters(&combo_dir.to_string_lossy()).await;
-    tx.send(ComboEvent::Discovered { starters }.into()).unwrap();
-}
-
-async fn execute(name: String) {
-    let tx = global::event_tx();
-    let config = global::config().await;
-    let combo_dir = config.combo_dir();
-    let starters = {
-        tx.send(ComboEvent::Discovering.into()).unwrap();
-        let starters = code_combo::discover_combo_starters(&combo_dir.to_string_lossy()).await;
-        tx.send(
-            ComboEvent::Discovered {
-                starters: starters.clone(),
-            }
-            .into(),
-        )
-        .unwrap();
-        starters
-    };
-    if let Some(starter) = starters.into_iter().find(|starter| match &starter.combo {
-        Ok(combo) => combo.metadata.name == name,
-        Err(err) => {
-            warn!(?starter.path, ?err,"Failed to load combo");
-            false
-        }
-    }) && let Ok(_combo) = &starter.combo
-    {
-        tx.send(ComboEvent::Executing { name: name.clone() }.into())
-            .unwrap();
-
-        let session_env = SessionEnv::builder()
-            .build()
-            .expect("failed to build session");
-        let mut execution = StarterCommand::new(&starter.path)
-            .session_env(session_env)
-            .execute();
-        while let Some(event) = execution.next().await {
-            match event {
-                code_combo::StarterEvent::Output { chunk } => {
-                    tx.send(
-                        ComboEvent::Output {
-                            name: name.clone(),
-                            chunk,
-                        }
-                        .into(),
-                    )
-                    .unwrap();
-                }
-                code_combo::StarterEvent::Failed { reason } => {
-                    tx.send(
-                        ComboEvent::Executed {
-                            name: name.clone(),
-                            starter: code_combo::Starter {
-                                path: starter.path.clone(),
-                                combo: Err(code_combo::StarterError::Invalid { reason }),
-                            },
-                        }
-                        .into(),
-                    )
-                    .unwrap();
-                    return;
-                }
-                _ => (),
-            }
-        }
-        let starter = execution.wait().await.unwrap();
-        tx.send(
-            ComboEvent::Executed {
-                name: name.clone(),
-                starter,
-            }
-            .into(),
-        )
-        .unwrap();
-    } else {
-        tx.send(ComboEvent::NotFound { name: name.clone() }.into())
-            .unwrap();
-    }
-}
 
 #[cfg(test)]
 mod tests {

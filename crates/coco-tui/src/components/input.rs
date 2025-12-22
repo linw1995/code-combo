@@ -37,7 +37,9 @@ impl Input<'_> {
     pub fn clear(&mut self) -> String {
         self.textarea.select_all();
         self.textarea.cut();
-        self.textarea.yank_text()
+        let ans = self.textarea.yank_text();
+        self.textarea.set_yank_text("");
+        ans
     }
 }
 
