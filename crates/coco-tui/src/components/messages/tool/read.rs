@@ -186,6 +186,14 @@ impl Content for Read<'_> {
         };
         block.title_bottom(crate::components::shortcuts_desc(&[toggle_text]))
     }
+
+    fn reminder_line(&self) -> Option<Line<'static>> {
+        if self.state.display_state == DisplayState::Collapsed {
+            Some(Line::from(Span::raw(" (folded)").dark_gray()))
+        } else {
+            None
+        }
+    }
 }
 
 impl Persistable for Read<'static> {

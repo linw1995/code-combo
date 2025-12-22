@@ -492,6 +492,15 @@ impl Content for StrReplace<'_> {
 
         block
     }
+
+    fn reminder_line(&self) -> Option<Line<'static>> {
+        let state = self.state.read();
+        if state.display_state == DisplayState::Result && state.collapsed {
+            Some(Line::from(Span::raw(" (folded)").dark_gray()))
+        } else {
+            None
+        }
+    }
 }
 
 impl Persistable for StrReplace<'static> {
