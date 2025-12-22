@@ -184,8 +184,8 @@ impl Combo {
                 });
             }
         }
-        if self.has_collapsible_body() && self.state.collapsed {
-            spans.push(" (folded)".dark_gray());
+        if let Some(line) = self.reminder_line() {
+            spans.extend(line.spans);
         }
         spans.push(" ".into());
         spans
@@ -222,6 +222,14 @@ impl Content for Combo {
             ("Fold", "z")
         };
         block.title_bottom(crate::components::shortcuts_desc(&[toggle_text]))
+    }
+
+    fn reminder_line(&self) -> Option<Line<'static>> {
+        if self.has_collapsible_body() && self.state.collapsed {
+            Some(Line::from(Span::raw(" (folded)").dark_gray()))
+        } else {
+            None
+        }
     }
 }
 

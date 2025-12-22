@@ -300,8 +300,18 @@ impl<'a> Content for Bash<'a> {
     }
 
     fn reminder_line(&self) -> Option<Line<'static>> {
-        let summary = self.empty_output_summary()?;
-        Some(Line::from(Span::raw(format!(" - {summary}")).dark_gray()))
+        let mut spans = Vec::new();
+        if let Some(summary) = self.empty_output_summary() {
+            spans.push(Span::raw(format!(" - {summary}")).dark_gray());
+        }
+        if self.state.collapsed && self.has_output_content() {
+            spans.push(Span::raw(" (folded)").dark_gray());
+        }
+        if spans.is_empty() {
+            None
+        } else {
+            Some(Line::from(spans))
+        }
     }
 }
 
