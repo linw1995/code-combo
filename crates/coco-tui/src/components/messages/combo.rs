@@ -122,7 +122,7 @@ impl Combo {
                     };
                     self.widget = Some(Plain::new(output.clone()));
                     state.starter_state = StarterState::Finalized { output };
-                    state.collapsed = true;
+                    state.collapsed = false;
                 }
             }
             _ => (),
@@ -154,6 +154,12 @@ impl Combo {
 
     fn toggle_collapsed(&mut self) {
         self.state.write().collapsed = !self.state.collapsed;
+    }
+
+    fn on_blur(&mut self) {
+        if self.has_collapsible_body() {
+            self.state.write().collapsed = true;
+        }
     }
 
     fn get_title_spans(&self) -> Vec<Span<'_>> {
@@ -275,15 +281,17 @@ impl Component for Combo {
 
     fn update(&mut self, action: &Action) {
         debug!(?action, "updating");
-        if let Action::Combo(combo) = action {
-            match combo {
+        match action {
+            Action::Combo(combo) => match combo {
                 ComboAction::Discover => {
                     tokio::task::spawn(discover());
                 }
                 ComboAction::Execute { name } => {
                     tokio::task::spawn(execute(name.to_owned()));
                 }
-            }
+            },
+            Action::Blur => self.on_blur(),
+            _ => (),
         }
     }
 
@@ -409,6 +417,7 @@ async fn execute(name: String) {
 
 #[cfg(test)]
 mod tests {
+    use crate::actions::Action;
     use crate::events::{ComboEvent, Event};
 
     use super::*;
@@ -441,6 +450,8 @@ mod tests {
             starter: make_starter("demo"),
         }));
 
+        assert!(combo.height(80) > 1);
+        combo.handle_action(&Action::Blur);
         assert_eq!(combo.height(80), 1);
         combo.handle_key_event(&test_key_z());
         assert!(combo.height(80) > 1);
@@ -475,6 +486,7 @@ mod tests {
             name: "demo".to_string(),
             starter: make_starter("demo"),
         }));
+        combo.handle_action(&Action::Blur);
         combo.handle_key_event(&test_key_z());
         assert!(combo.height(80) > 1);
 
