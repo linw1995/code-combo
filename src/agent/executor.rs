@@ -4,6 +4,7 @@ use lazy_static::lazy_static;
 use snafu::prelude::*;
 use tokio_util::sync::CancellationToken;
 
+use super::bash_executor;
 use crate::{
     OutputChunk, TextEdit, error,
     tools::{
@@ -169,10 +170,21 @@ impl Executor {
                 unimplemented!("Permission control list validation not yet implemented")
             } else {
                 // Some tools can execute without explicit permission
-                if !matches!(
-                    name,
-                    STR_REPLACE_TOOL_NAME | READ_TOOL_NAME | LIST_TOOL_NAME
-                ) {
+                let bypass_permission = match (&input, name) {
+                    (Input::Starter(value), BASH_TOOL_NAME) => {
+                        serde_json::from_value::<BashInput>(value.clone())
+                            .ok()
+                            .map(|input| bash_executor::should_bypass_permission(&input))
+                            .unwrap_or(false)
+                    }
+                    _ => false,
+                };
+                if !bypass_permission
+                    && !matches!(
+                        name,
+                        STR_REPLACE_TOOL_NAME | READ_TOOL_NAME | LIST_TOOL_NAME
+                    )
+                {
                     on_output(Output::AskPermission);
                     return Ok(ExecuteStatus::Completed);
                 }
