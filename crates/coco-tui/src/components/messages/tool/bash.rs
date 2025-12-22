@@ -192,17 +192,6 @@ fn generate_input<'b>(tool_use: &ToolUse) -> CodeHighlight<'b> {
     CodeHighlight::try_new(&input.command, Lang::Bash).expect("failed to new CodeHighlight")
 }
 
-fn has_output_content(output: &BashOutput) -> bool {
-    !(output.stdout.is_empty() && output.stderr.is_empty() && output.chunks.is_empty())
-}
-
-fn state_has_output_content(state: &Inner) -> bool {
-    match state.output.as_ref() {
-        Some(output) => has_output_content(output),
-        None => false,
-    }
-}
-
 #[bon]
 impl<'a> Bash<'a> {
     #[builder]
@@ -244,12 +233,20 @@ impl<'a> Bash<'a> {
         Ok(())
     }
 
+    fn has_output_content(&self) -> bool {
+        match self.state.output.as_ref() {
+            Some(output) => {
+                !(output.stdout.is_empty() && output.stderr.is_empty() && output.chunks.is_empty())
+            }
+            None => false,
+        }
+    }
+
     pub fn empty_output_summary(&self) -> Option<String> {
-        let state = self.state.read();
-        let output = state.output.as_ref()?;
-        if has_output_content(output) {
+        if self.has_output_content() {
             return None;
         }
+        let output = self.state.output.as_ref()?;
         if output.timed_out {
             return Some(format!("Timed out (exit {}, no output)", output.exit_code));
         }
@@ -259,10 +256,7 @@ impl<'a> Bash<'a> {
 
 impl<'a> Content for Bash<'a> {
     fn height(&self, width: u16) -> usize {
-        if self.state.requiring_confirmation
-            || self.state.collapsed
-            || !state_has_output_content(self.state.read())
-        {
+        if self.state.requiring_confirmation || self.state.collapsed || !self.has_output_content() {
             return self.input.height(width);
         }
         let height_input = self.input.height(width);
@@ -285,7 +279,7 @@ impl<'a> Content for Bash<'a> {
                 .title_bottom(shortcuts_desc(&[("Cancel", "Esc")]));
         }
 
-        if !state_has_output_content(self.state.read()) {
+        if !self.has_output_content() {
             return block;
         }
 
@@ -303,6 +297,11 @@ impl<'a> Content for Bash<'a> {
         block
             .title_bottom(shortcuts_desc(&[(view, "1/2/3")]))
             .title_bottom(shortcuts_desc(&[toggle_text]))
+    }
+
+    fn reminder_line(&self) -> Option<Line<'static>> {
+        let summary = self.empty_output_summary()?;
+        Some(Line::from(Span::raw(format!(" - {summary}")).dark_gray()))
     }
 }
 
@@ -373,7 +372,7 @@ impl Component for Bash<'static> {
     fn handle_key_event(&mut self, key: &KeyEvent) {
         match (key.modifiers, key.code) {
             (KeyModifiers::NONE, KeyCode::Char('1')) => {
-                if !state_has_output_content(self.state.read()) {
+                if !self.has_output_content() {
                     return;
                 }
                 let mut state = self.state.write();
@@ -383,7 +382,7 @@ impl Component for Bash<'static> {
                 self.rebuild_output();
             }
             (KeyModifiers::NONE, KeyCode::Char('2')) => {
-                if !state_has_output_content(self.state.read()) {
+                if !self.has_output_content() {
                     return;
                 }
                 let mut state = self.state.write();
@@ -393,7 +392,7 @@ impl Component for Bash<'static> {
                 self.rebuild_output();
             }
             (KeyModifiers::NONE, KeyCode::Char('3')) => {
-                if !state_has_output_content(self.state.read()) {
+                if !self.has_output_content() {
                     return;
                 }
                 let mut state = self.state.write();
@@ -403,7 +402,7 @@ impl Component for Bash<'static> {
                 self.rebuild_output();
             }
             (KeyModifiers::NONE, KeyCode::Char('z')) => {
-                if !state_has_output_content(self.state.read()) {
+                if !self.has_output_content() {
                     return;
                 }
                 self.state.write().collapsed = !self.state.collapsed;
@@ -438,13 +437,13 @@ impl Component for Bash<'static> {
         if self.state.requiring_confirmation {
             return;
         }
+        if !self.has_output_content() {
+            return;
+        }
         let Some(output) = self.state.output.as_ref() else {
             return;
         };
         if output.exit_code != 0 {
-            return;
-        }
-        if !has_output_content(output) {
             return;
         }
         self.state.write().collapsed = true;
@@ -460,10 +459,7 @@ impl Component for Bash<'static> {
         let width = area.width.max(1);
         let height_input = self.input.height(width);
 
-        if self.state.collapsed
-            || self.state.requiring_confirmation
-            || !state_has_output_content(self.state.read())
-        {
+        if self.state.collapsed || self.state.requiring_confirmation || !self.has_output_content() {
             let [area_input] = Layout::vertical([Length(height_input as u16)]).areas(area);
             self.input.draw(frame, area_input)?;
             return Ok(());

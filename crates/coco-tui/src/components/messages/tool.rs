@@ -133,17 +133,12 @@ impl Tool {
             }
         }
         if matches!(self.inner.state, ToolState::Completed | ToolState::Failed)
-            && let Some(summary) = self.bash_title_summary()
+            && let Some(line) = self.widget.reminder_line()
         {
-            spans.push(Span::raw(format!(" - {summary}")).dark_gray());
+            spans.extend(line.spans);
         }
         spans.push(" ".into());
         spans
-    }
-
-    fn bash_title_summary(&self) -> Option<String> {
-        let bash = self.widget.as_any().downcast_ref::<Bash<'static>>()?;
-        bash.empty_output_summary()
     }
 }
 
