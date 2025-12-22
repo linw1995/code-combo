@@ -1,0 +1,95 @@
+[[commands]]
+name = "cat"
+allow_any = true
+
+[[commands]]
+name = "cd"
+allow_any = true
+
+[[commands]]
+name = "cut"
+allow_any = true
+
+[[commands]]
+name = "echo"
+allow_any = true
+
+[[commands]]
+name = "expr"
+allow_any = true
+
+[[commands]]
+name = "false"
+allow_any = true
+
+[[commands]]
+name = "grep"
+allow_any = true
+
+[[commands]]
+name = "head"
+allow_any = true
+
+[[commands]]
+name = "id"
+allow_any = true
+
+[[commands]]
+name = "ls"
+allow_any = true
+
+[[commands]]
+name = "nl"
+allow_any = true
+
+[[commands]]
+name = "paste"
+allow_any = true
+
+[[commands]]
+name = "pwd"
+allow_any = true
+
+[[commands]]
+name = "tail"
+allow_any = true
+
+[[commands]]
+name = "rev"
+allow_any = true
+
+[[commands]]
+name = "seq"
+allow_any = true
+
+[[commands]]
+name = "stat"
+allow_any = true
+
+[[commands]]
+name = "tr"
+allow_any = true
+
+[[commands]]
+name = "true"
+allow_any = true
+
+[[commands]]
+name = "uname"
+allow_any = true
+
+[[commands]]
+name = "uniq"
+allow_any = true
+
+[[commands]]
+name = "wc"
+allow_any = true
+
+[[commands]]
+name = "which"
+allow_any = true
+
+[[commands]]
+name = "whoami"
+allow_any = true

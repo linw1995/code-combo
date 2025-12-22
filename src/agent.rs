@@ -8,6 +8,7 @@ use super::Config;
 use crate::Result;
 use executor::PermissionControl;
 
+mod bash_executor;
 mod executor;
 pub use anthropic::{Block, Content, Message, Role, StopReason, ToolUse};
 pub use executor::{Executor, Input, Output};
