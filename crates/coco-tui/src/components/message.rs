@@ -38,6 +38,11 @@ pub trait Content {
     fn block_with_shortcuts_desc<'a>(&self, block: Block<'a>) -> Block<'a> {
         block
     }
+
+    /// Provide a reminder line to append to the message title.
+    fn reminder_line(&self) -> Option<Line<'static>> {
+        None
+    }
 }
 
 pub trait ContentComponent: Component + Content {}

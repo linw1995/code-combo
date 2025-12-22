@@ -132,6 +132,11 @@ impl Tool {
                 spans.push("   Cancelled".red());
             }
         }
+        if matches!(self.inner.state, ToolState::Completed | ToolState::Failed)
+            && let Some(line) = self.widget.reminder_line()
+        {
+            spans.extend(line.spans);
+        }
         spans.push(" ".into());
         spans
     }

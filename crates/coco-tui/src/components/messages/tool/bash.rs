@@ -21,7 +21,7 @@ use tracing::warn;
 
 use super::{Component, Content, ContentComponent};
 use crate::{
-    actions::ToolAction,
+    actions::{Action, ToolAction},
     components::{CodeHighlight, Persistable, shortcuts_desc},
     error::*,
     events::{AnswerEvent, AskEvent, Event},
@@ -232,17 +232,31 @@ impl<'a> Bash<'a> {
         }
         Ok(())
     }
+
+    fn has_output_content(&self) -> bool {
+        match self.state.output.as_ref() {
+            Some(output) => {
+                !(output.stdout.is_empty() && output.stderr.is_empty() && output.chunks.is_empty())
+            }
+            None => false,
+        }
+    }
+
+    pub fn empty_output_summary(&self) -> Option<String> {
+        if self.has_output_content() {
+            return None;
+        }
+        let output = self.state.output.as_ref()?;
+        if output.timed_out {
+            return Some(format!("Timed out (exit {}, no output)", output.exit_code));
+        }
+        Some(format!("Exit {} (no output)", output.exit_code))
+    }
 }
 
 impl<'a> Content for Bash<'a> {
     fn height(&self, width: u16) -> usize {
-        if self.state.collapsed {
-            return 0;
-        }
-        if self.state.requiring_confirmation {
-            return self.input.height(width);
-        }
-        if self.state.output.is_none() {
+        if self.state.requiring_confirmation || self.state.collapsed || !self.has_output_content() {
             return self.input.height(width);
         }
         let height_input = self.input.height(width);
@@ -265,7 +279,7 @@ impl<'a> Content for Bash<'a> {
                 .title_bottom(shortcuts_desc(&[("Cancel", "Esc")]));
         }
 
-        if self.state.output.is_none() {
+        if !self.has_output_content() {
             return block;
         }
 
@@ -283,6 +297,11 @@ impl<'a> Content for Bash<'a> {
         block
             .title_bottom(shortcuts_desc(&[(view, "1/2/3")]))
             .title_bottom(shortcuts_desc(&[toggle_text]))
+    }
+
+    fn reminder_line(&self) -> Option<Line<'static>> {
+        let summary = self.empty_output_summary()?;
+        Some(Line::from(Span::raw(format!(" - {summary}")).dark_gray()))
     }
 }
 
@@ -338,14 +357,12 @@ impl Component for Bash<'static> {
                 drop(state);
                 self.rebuild_output();
             }
-            Event::Answer(AnswerEvent::ToolResult {
-                is_error, output, ..
-            }) => {
+            Event::Answer(AnswerEvent::ToolResult { output, .. }) => {
                 if let Err(err) = self.update_output(Some(output.to_owned())) {
                     warn!(?err, "failed to update tool output");
                 };
                 let mut state = self.state.write();
-                state.collapsed = !*is_error;
+                state.collapsed = false;
                 state.requiring_confirmation = false;
             }
             _ => (),
@@ -355,6 +372,9 @@ impl Component for Bash<'static> {
     fn handle_key_event(&mut self, key: &KeyEvent) {
         match (key.modifiers, key.code) {
             (KeyModifiers::NONE, KeyCode::Char('1')) => {
+                if !self.has_output_content() {
+                    return;
+                }
                 let mut state = self.state.write();
                 state.view = BashOutputView::Stdout;
                 state.collapsed = false;
@@ -362,6 +382,9 @@ impl Component for Bash<'static> {
                 self.rebuild_output();
             }
             (KeyModifiers::NONE, KeyCode::Char('2')) => {
+                if !self.has_output_content() {
+                    return;
+                }
                 let mut state = self.state.write();
                 state.view = BashOutputView::Stderr;
                 state.collapsed = false;
@@ -369,6 +392,9 @@ impl Component for Bash<'static> {
                 self.rebuild_output();
             }
             (KeyModifiers::NONE, KeyCode::Char('3')) => {
+                if !self.has_output_content() {
+                    return;
+                }
                 let mut state = self.state.write();
                 state.view = BashOutputView::Mixed;
                 state.collapsed = false;
@@ -376,6 +402,9 @@ impl Component for Bash<'static> {
                 self.rebuild_output();
             }
             (KeyModifiers::NONE, KeyCode::Char('z')) => {
+                if !self.has_output_content() {
+                    return;
+                }
                 self.state.write().collapsed = !self.state.collapsed;
             }
             (KeyModifiers::NONE, KeyCode::Enter) => {
@@ -401,8 +430,27 @@ impl Component for Bash<'static> {
         }
     }
 
+    fn update(&mut self, action: &Action) {
+        if !matches!(action, Action::Blur) {
+            return;
+        }
+        if self.state.requiring_confirmation {
+            return;
+        }
+        if !self.has_output_content() {
+            return;
+        }
+        let Some(output) = self.state.output.as_ref() else {
+            return;
+        };
+        if output.exit_code != 0 {
+            return;
+        }
+        self.state.write().collapsed = true;
+    }
+
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        if self.state.collapsed || area.height == 0 {
+        if area.height == 0 {
             return Ok(());
         }
 
@@ -411,7 +459,7 @@ impl Component for Bash<'static> {
         let width = area.width.max(1);
         let height_input = self.input.height(width);
 
-        if self.state.requiring_confirmation || self.state.output.is_none() {
+        if self.state.collapsed || self.state.requiring_confirmation || !self.has_output_content() {
             let [area_input] = Layout::vertical([Length(height_input as u16)]).areas(area);
             self.input.draw(frame, area_input)?;
             return Ok(());
@@ -464,6 +512,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::actions::Action;
     use crate::events::Event;
 
     fn tool_use() -> ToolUse {
@@ -477,9 +526,9 @@ mod tests {
         }
     }
 
-    fn bash_output() -> BashOutput {
+    fn bash_output_with_exit(exit_code: u8) -> BashOutput {
         BashOutput {
-            exit_code: 0,
+            exit_code,
             stdout: "out\n".to_string(),
             stderr: "err\n".to_string(),
             chunks: vec![
@@ -494,6 +543,20 @@ mod tests {
                     lines: vec!["err".to_string()],
                 },
             ],
+            timed_out: false,
+        }
+    }
+
+    fn bash_output() -> BashOutput {
+        bash_output_with_exit(0)
+    }
+
+    fn bash_output_empty() -> BashOutput {
+        BashOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            chunks: Vec::new(),
             timed_out: false,
         }
     }
@@ -514,14 +577,18 @@ mod tests {
             is_error: false,
             output: Final::Json(value),
         }));
+        assert!(!bash.state.collapsed);
+        bash.update(&Action::Blur);
         assert!(bash.state.collapsed);
 
-        let value = serde_json::to_value(bash_output()).unwrap();
+        let value = serde_json::to_value(bash_output_with_exit(1)).unwrap();
         bash.handle_event(&Event::Answer(AnswerEvent::ToolResult {
             id: "tool_1".to_string(),
             is_error: true,
             output: Final::Json(value),
         }));
+        assert!(!bash.state.collapsed);
+        bash.update(&Action::Blur);
         assert!(!bash.state.collapsed);
     }
 
@@ -592,5 +659,57 @@ mod tests {
         let height_confirm = bash.height(80);
 
         assert!(height_with_output > height_confirm);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bash_collapsed_shows_input_only() {
+        let tool_use = tool_use();
+        let value = serde_json::to_value(bash_output()).unwrap();
+        let mut bash = Bash::try_new()
+            .tool_use(&tool_use)
+            .output(value)
+            .call()
+            .unwrap();
+
+        bash.state.write().collapsed = true;
+        let height = bash.height(80);
+        let input_height = bash.input.height(80);
+
+        assert_eq!(height, input_height);
+        assert!(height > 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bash_no_output_does_not_auto_collapse() {
+        let tool_use = tool_use();
+        let value = serde_json::to_value(bash_output_empty()).unwrap();
+        let mut bash = Bash::try_new().tool_use(&tool_use).call().unwrap();
+
+        bash.handle_event(&Event::Answer(AnswerEvent::ToolResult {
+            id: "tool_1".to_string(),
+            is_error: false,
+            output: Final::Json(value),
+        }));
+        assert!(!bash.state.collapsed);
+        assert_eq!(bash.height(80), bash.input.height(80));
+
+        bash.update(&Action::Blur);
+        assert!(!bash.state.collapsed);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bash_empty_output_summary_is_available() {
+        let tool_use = tool_use();
+        let value = serde_json::to_value(bash_output_empty()).unwrap();
+        let bash = Bash::try_new()
+            .tool_use(&tool_use)
+            .output(value)
+            .call()
+            .unwrap();
+
+        assert_eq!(
+            bash.empty_output_summary(),
+            Some("Exit 0 (no output)".to_string())
+        );
     }
 }
