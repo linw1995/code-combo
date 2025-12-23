@@ -92,3 +92,33 @@ allow_any = true
 [[commands]]
 name = "whoami"
 allow_any = true
+
+[[commands]]
+command = ["git", "branch"]
+allow_any = true
+
+[[commands]]
+command = ["git", "status"]
+allow_any = true
+
+[[commands]]
+command = ["git", "log"]
+allow_any = true
+allow_positional = true
+positional_path_from = 0
+
+[[commands]]
+command = ["git", "diff"]
+allow_any = true
+allow_positional = true
+positional_path_from = 0
+
+[[commands]]
+command = ["git", "show"]
+allow_any = true
+allow_positional = true
+positional_path_from = 0
+
+[[commands]]
+command = ["cargo", "check"]
+allow_any = true

@@ -11,7 +11,7 @@ use crate::tools::BashInput;
 
 #[derive(Clone)]
 struct SafeCommandRule {
-    name: String,
+    command_chain: Vec<String>,
     args: ArgPolicy,
 }
 
@@ -92,7 +92,10 @@ struct SafeCommandConfig {
 
 #[derive(Deserialize)]
 struct SafeCommandConfigEntry {
-    name: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    command: Option<Vec<String>>,
     #[serde(default)]
     allow_any: bool,
     #[serde(default)]
@@ -142,10 +145,11 @@ fn is_safe_command_with_rules(command: &str, rules: &[SafeCommandRule]) -> bool 
     };
 
     commands.iter().all(|command| {
-        let Some(rule) = rules.iter().find(|rule| rule.name == command.name) else {
+        let Some((rule, consumed_args)) = find_best_rule(command, rules) else {
             return false;
         };
-        is_safe_args(&command.args, &rule.args)
+        let remaining_args = command.args.get(consumed_args..).unwrap_or_default();
+        is_safe_args(remaining_args, &rule.args)
     })
 }
 
@@ -252,6 +256,43 @@ fn split_long_option(arg: &str) -> (&str, Option<&str>) {
     } else {
         (arg, None)
     }
+}
+
+fn find_best_rule<'a>(
+    command: &ParsedCommand,
+    rules: &'a [SafeCommandRule],
+) -> Option<(&'a SafeCommandRule, usize)> {
+    let mut best: Option<(&SafeCommandRule, usize, usize)> = None;
+    for rule in rules {
+        let Some(consumed_args) = match_command_chain(command, rule) else {
+            continue;
+        };
+        let chain_len = rule.command_chain.len();
+        match best {
+            Some((_, _, best_len)) if chain_len <= best_len => {}
+            _ => best = Some((rule, consumed_args, chain_len)),
+        }
+    }
+    best.map(|(rule, consumed_args, _)| (rule, consumed_args))
+}
+
+fn match_command_chain(command: &ParsedCommand, rule: &SafeCommandRule) -> Option<usize> {
+    if rule.command_chain.is_empty() {
+        return None;
+    }
+    if rule.command_chain[0] != command.name {
+        return None;
+    }
+    let consumed_args = rule.command_chain.len() - 1;
+    if command.args.len() < consumed_args {
+        return None;
+    }
+    for (index, token) in rule.command_chain.iter().skip(1).enumerate() {
+        if command.args[index].text != *token {
+            return None;
+        }
+    }
+    Some(consumed_args)
 }
 
 fn consume_long_option(
@@ -675,27 +716,48 @@ fn load_safe_command_rules() -> Vec<SafeCommandRule> {
                     },
                 );
             }
-            if flags.is_empty() && !entry.allow_positional {
+            let command_chain = match entry.command {
+                Some(command) => command,
+                None => match entry.name {
+                    Some(name) => vec![name],
+                    None => {
+                        warn!("safe command entry missing name or command");
+                        return SafeCommandRule {
+                            command_chain: Vec::new(),
+                            args: ArgPolicy::Deny,
+                        };
+                    }
+                },
+            };
+            if command_chain.is_empty() || command_chain.iter().any(|item| item.trim().is_empty()) {
+                warn!("safe command entry has empty command chain");
                 return SafeCommandRule {
-                    name: entry.name,
+                    command_chain: Vec::new(),
+                    args: ArgPolicy::Deny,
+                };
+            }
+            let allow_positional = entry.allow_positional || entry.allow_any;
+            if flags.is_empty() && !allow_positional {
+                return SafeCommandRule {
+                    command_chain,
                     args: ArgPolicy::Deny,
                 };
             }
             if entry.allow_any {
                 return SafeCommandRule {
-                    name: entry.name,
+                    command_chain,
                     args: ArgPolicy::Any {
                         flags,
-                        allow_positional: entry.allow_positional,
+                        allow_positional,
                         positional_path_from: entry.positional_path_from,
                     },
                 };
             }
             SafeCommandRule {
-                name: entry.name,
+                command_chain,
                 args: ArgPolicy::AllowList {
                     flags,
-                    allow_positional: entry.allow_positional,
+                    allow_positional,
                     positional_path_from: entry.positional_path_from,
                 },
             }
@@ -796,7 +858,7 @@ mod tests {
         );
         let rules = vec![
             SafeCommandRule {
-                name: "ls".to_string(),
+                command_chain: vec!["ls".to_string()],
                 args: ArgPolicy::AllowList {
                     flags: ls_flags,
                     allow_positional: false,
@@ -804,7 +866,7 @@ mod tests {
                 },
             },
             SafeCommandRule {
-                name: "head".to_string(),
+                command_chain: vec!["head".to_string()],
                 args: ArgPolicy::AllowList {
                     flags: head_flags,
                     allow_positional: false,
@@ -836,7 +898,7 @@ mod tests {
         );
         let rules = vec![
             SafeCommandRule {
-                name: "cat".to_string(),
+                command_chain: vec!["cat".to_string()],
                 args: ArgPolicy::AllowList {
                     flags: HashMap::new(),
                     allow_positional: true,
@@ -844,7 +906,7 @@ mod tests {
                 },
             },
             SafeCommandRule {
-                name: "grep".to_string(),
+                command_chain: vec!["grep".to_string()],
                 args: ArgPolicy::AllowList {
                     flags: grep_flags,
                     allow_positional: true,
@@ -874,7 +936,7 @@ mod tests {
             },
         );
         let rules = vec![SafeCommandRule {
-            name: "cat".to_string(),
+            command_chain: vec!["cat".to_string()],
             args: ArgPolicy::Any {
                 flags,
                 allow_positional: true,
@@ -886,6 +948,42 @@ mod tests {
         assert_safe_cmd_with_rules!("cat ./etc/passwd", &rules);
         assert_safe_cmd_with_rules!("cat --file ./etc/passwd", &rules);
         assert_unsafe_cmd_with_rules!("cat --file /etc/passwd", &rules);
+    }
+
+    #[test]
+    fn safe_command_matches_command_chain() {
+        let rules = vec![
+            SafeCommandRule {
+                command_chain: vec!["git".to_string()],
+                args: ArgPolicy::Any {
+                    flags: HashMap::new(),
+                    allow_positional: true,
+                    positional_path_from: None,
+                },
+            },
+            SafeCommandRule {
+                command_chain: vec!["git".to_string(), "status".to_string()],
+                args: ArgPolicy::AllowList {
+                    flags: HashMap::new(),
+                    allow_positional: true,
+                    positional_path_from: None,
+                },
+            },
+            SafeCommandRule {
+                command_chain: vec!["cargo".to_string(), "check".to_string()],
+                args: ArgPolicy::AllowList {
+                    flags: HashMap::new(),
+                    allow_positional: true,
+                    positional_path_from: None,
+                },
+            },
+        ];
+
+        assert_safe_cmd_with_rules!("git status", &rules);
+        assert_unsafe_cmd_with_rules!("git status -s", &rules);
+        assert_safe_cmd_with_rules!("git checkout", &rules);
+        assert_safe_cmd_with_rules!("cargo check", &rules);
+        assert_unsafe_cmd_with_rules!("cargo build", &rules);
     }
 
     #[test]
