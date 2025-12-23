@@ -54,6 +54,7 @@ impl From<ComboAction> for Action {
 #[derive(Debug, Clone)]
 pub enum ToolAction {
     Grant(ToolUse),
+    GrantSession(ToolUse),
     Cancel(ToolUse),
     ApplyTextEdit {
         id: String,

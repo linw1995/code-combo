@@ -203,6 +203,11 @@ impl Component for Tool {
                     self.update_state(ToolState::Executing);
                 }
             }
+            Action::Tool(ToolAction::GrantSession(ToolUse { id, .. })) => {
+                if self.tool_use_id() == id {
+                    self.update_state(ToolState::Executing);
+                }
+            }
             Action::Tool(ToolAction::ApplyTextEdit {
                 id, is_rejecting, ..
             }) => {

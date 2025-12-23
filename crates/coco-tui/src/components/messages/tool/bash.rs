@@ -278,7 +278,7 @@ impl<'a> Content for Bash<'a> {
     fn block_with_shortcuts_desc<'b>(&self, block: Block<'b>) -> Block<'b> {
         if self.state.requiring_confirmation {
             return block
-                .title_bottom(shortcuts_desc(&[("Run", "CR")]))
+                .title_bottom(shortcuts_desc(&[("Run", "CR"), ("Allow in Session", "A")]))
                 .title_bottom(shortcuts_desc(&[("Cancel", "Esc")]));
         }
 
@@ -427,6 +427,16 @@ impl Component for Bash<'static> {
                 self.state.write().collapsed = false;
                 global::action_tx()
                     .send(ToolAction::Grant(self.state.tool_use.to_owned()).into())
+                    .unwrap();
+                self.state.write().requiring_confirmation = false;
+            }
+            (KeyModifiers::NONE, KeyCode::Char('a') | KeyCode::Char('A')) => {
+                if !self.state.requiring_confirmation {
+                    return;
+                }
+                self.state.write().collapsed = false;
+                global::action_tx()
+                    .send(ToolAction::GrantSession(self.state.tool_use.to_owned()).into())
                     .unwrap();
                 self.state.write().requiring_confirmation = false;
             }

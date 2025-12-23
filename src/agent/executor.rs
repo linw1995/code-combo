@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use lazy_static::lazy_static;
 use snafu::prelude::*;
@@ -18,6 +21,7 @@ pub struct Executor {
     tools: HashMap<String, Arc<dyn Tool>>,
     tools_pcl: HashMap<String, Vec<(String, PermissionControl)>>,
     tools_once_pcl: HashMap<String, Vec<String>>,
+    bash_session_allowlist: HashSet<String>,
 }
 
 lazy_static! {
@@ -47,6 +51,7 @@ impl Default for Executor {
             tools_pcl: HashMap::default(),
             tools_once_pcl: HashMap::default(),
             tools: DEFAULT_TOOLS.clone(),
+            bash_session_allowlist: HashSet::default(),
         }
     }
 }
@@ -96,6 +101,23 @@ pub enum PermissionControl {
     Once(String),
     Session,
     Always,
+}
+
+fn bash_permission_key_from_value(value: &serde_json::Value) -> Option<String> {
+    let input: BashInput = serde_json::from_value(value.clone()).ok()?;
+    let trimmed = input.command.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn bash_permission_key(input: &Input<'_>) -> Option<String> {
+    match input {
+        Input::Starter(value) => bash_permission_key_from_value(value),
+        _ => None,
+    }
 }
 
 impl Executor {
@@ -162,8 +184,9 @@ impl Executor {
 
         // Check Permission
         let granted_once = self.take_once_permission(name, id);
+        let granted_session = self.has_session_permission(name, &input);
 
-        if !granted_once {
+        if !granted_once && !granted_session {
             // Check if the tool has permission control entries for this session
             if let Some(_pcl) = self.tools_pcl.get(name) {
                 // TODO: Implement permission control list validation logic
@@ -231,6 +254,26 @@ impl Executor {
         }
     }
 
+    pub fn grant_session(&mut self, name: &str, input: &serde_json::Value) {
+        if name != BASH_TOOL_NAME {
+            return;
+        }
+        let Some(key) = bash_permission_key_from_value(input) else {
+            return;
+        };
+        self.bash_session_allowlist.insert(key);
+    }
+
+    fn has_session_permission(&self, name: &str, input: &Input<'_>) -> bool {
+        if name != BASH_TOOL_NAME {
+            return false;
+        }
+        let Some(key) = bash_permission_key(input) else {
+            return false;
+        };
+        self.bash_session_allowlist.contains(&key)
+    }
+
     /// Generate a list of Tools of Anthropic API
     pub fn anthropic_tools(&self) -> Vec<anthropic::Tool> {
         self.tools
@@ -241,5 +284,62 @@ impl Executor {
                 input_schema: t.input_schema(),
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bash_input_value(command: &str) -> serde_json::Value {
+        serde_json::to_value(BashInput {
+            command: command.to_string(),
+            timeout: 1_000,
+        })
+        .expect("serialize BashInput")
+    }
+
+    #[tokio::test]
+    async fn bash_session_permission_allows_repeat_command() {
+        let mut executor = Executor::default();
+        let input_value = bash_input_value("printf 'ok'");
+
+        let mut outputs = Vec::new();
+        let _ = executor
+            .execute_with_output(
+                "1",
+                BASH_TOOL_NAME,
+                Input::Starter(input_value.clone()),
+                CancellationToken::new(),
+                |out| outputs.push(out),
+            )
+            .await
+            .expect("execute without session permission");
+        assert!(
+            outputs
+                .iter()
+                .any(|out| matches!(out, Output::AskPermission)),
+            "expected permission request before granting"
+        );
+
+        executor.grant_session(BASH_TOOL_NAME, &input_value);
+
+        let mut outputs = Vec::new();
+        let _ = executor
+            .execute_with_output(
+                "2",
+                BASH_TOOL_NAME,
+                Input::Starter(input_value),
+                CancellationToken::new(),
+                |out| outputs.push(out),
+            )
+            .await
+            .expect("execute with session permission");
+        assert!(
+            !outputs
+                .iter()
+                .any(|out| matches!(out, Output::AskPermission)),
+            "did not expect permission request after granting session"
+        );
     }
 }
