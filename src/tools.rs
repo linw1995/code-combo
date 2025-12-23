@@ -20,8 +20,8 @@ mod read;
 mod str_replace;
 
 use crate::{AppliedTextEdit, TextEdit};
+pub(crate) use bash::run_bash_chunked;
 pub use bash::{BASH_TOOL_NAME, BashInput, BashOutput, BashTool};
-pub use bash::{run_bash, run_bash_chunked};
 pub use list::{DEFAULT_ENTRY_LIMIT, LIST_TOOL_NAME, ListInput, ListTool, MAX_ENTRY_LIMIT};
 pub use read::{
     DEFAULT_LINE_LIMIT, DEFAULT_LINE_OFFSET, MAX_LINE_LIMIT, READ_TOOL_NAME, ReadInput, ReadTool,

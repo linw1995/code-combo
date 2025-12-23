@@ -1213,59 +1213,54 @@ async fn task_tool_use(mut agent: Agent, tool_use: ToolUse, cancel_token: Cancel
             &name,
             code_combo::Input::Starter(input),
             cancel_token.clone(),
-            |out| {
-                if cancel_token.is_cancelled() {
-                    return;
+            |out| match out {
+                Output::ToolOutput(chunk) => {
+                    tx.send(
+                        AnswerEvent::ToolOutput {
+                            id: id.clone(),
+                            chunk,
+                        }
+                        .into(),
+                    )
+                    .unwrap();
                 }
-                match out {
-                    Output::ToolOutput(chunk) => {
-                        tx.send(
-                            AnswerEvent::ToolOutput {
-                                id: id.clone(),
-                                chunk,
-                            }
-                            .into(),
-                        )
+                Output::AskPermission => {
+                    tx.send(AskEvent::ToolUsePermission(id.clone()).into())
                         .unwrap();
-                    }
-                    Output::AskPermission => {
-                        tx.send(AskEvent::ToolUsePermission(id.clone()).into())
-                            .unwrap();
-                    }
-                    Output::TextEdit(edit) => {
-                        tx.send(
-                            AskEvent::TextEdit {
-                                id: id.clone(),
-                                edit,
-                            }
-                            .into(),
-                        )
-                        .unwrap();
-                    }
-                    Output::Success(output) => {
-                        tx.send(
-                            AnswerEvent::ToolResult {
-                                id: id.clone(),
-                                is_error: false,
-                                output,
-                            }
-                            .into(),
-                        )
-                        .unwrap();
-                    }
-                    Output::Failure(output) => {
-                        tx.send(
-                            AnswerEvent::ToolResult {
-                                id: id.clone(),
-                                is_error: true,
-                                output,
-                            }
-                            .into(),
-                        )
-                        .unwrap();
-                    }
-                    Output::Denied => (),
                 }
+                Output::TextEdit(edit) => {
+                    tx.send(
+                        AskEvent::TextEdit {
+                            id: id.clone(),
+                            edit,
+                        }
+                        .into(),
+                    )
+                    .unwrap();
+                }
+                Output::Success(output) => {
+                    tx.send(
+                        AnswerEvent::ToolResult {
+                            id: id.clone(),
+                            is_error: false,
+                            output,
+                        }
+                        .into(),
+                    )
+                    .unwrap();
+                }
+                Output::Failure(output) => {
+                    tx.send(
+                        AnswerEvent::ToolResult {
+                            id: id.clone(),
+                            is_error: true,
+                            output,
+                        }
+                        .into(),
+                    )
+                    .unwrap();
+                }
+                Output::Denied => (),
             },
         )
         .await;
