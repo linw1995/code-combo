@@ -5,6 +5,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 
 use super::{ExecuteResult, Final, Input, Tool};
 use crate::exec::{ChunkConfig, ExecCommand, OutputChunk, ProcessEvent, StreamKind};
@@ -38,7 +39,60 @@ fn default_timeout_ms() -> u64 {
 
 pub const BASH_TOOL_NAME: &str = "bash";
 
-pub async fn run_bash_chunked<F>(input: BashInput, mut on_chunk: F) -> Result<BashOutput, String>
+pub async fn run_bash_chunked<'a, F>(
+    input: Input<'a>,
+    cancel_token: CancellationToken,
+    mut on_chunk: F,
+) -> ExecuteResult
+where
+    F: FnMut(&OutputChunk) + Send,
+{
+    let Input::Starter(input) = input else {
+        return err_msg!("Input should be Starter variant, not other variants");
+    };
+    let input: BashInput = match serde_json::from_value(input) {
+        Ok(value) => value,
+        Err(err) => {
+            let output = BashOutput {
+                exit_code: 255,
+                stdout: String::new(),
+                stderr: format!("Invalid input format: {err}"),
+                chunks: Vec::new(),
+                timed_out: false,
+            };
+            let output = serde_json::to_value(&output)
+                .map_err(|err| format!("Failed to serialize tool output: {err}"))?;
+            return Final::Json(output).err();
+        }
+    };
+
+    let output = match run_bash_chunked_raw(input, cancel_token, |chunk| on_chunk(chunk)).await {
+        Ok(output) => output,
+        Err(err) => BashOutput {
+            exit_code: 255,
+            stdout: String::new(),
+            stderr: err,
+            chunks: Vec::new(),
+            timed_out: false,
+        },
+    };
+
+    let exit_code = output.exit_code;
+    let output = serde_json::to_value(&output)
+        .map_err(|err| format!("Failed to serialize tool output: {err}"))?;
+    let output = Final::from(output);
+    if exit_code == 0 {
+        output.ok()
+    } else {
+        output.err()
+    }
+}
+
+async fn run_bash_chunked_raw<F>(
+    input: BashInput,
+    cancel_token: CancellationToken,
+    mut on_chunk: F,
+) -> Result<BashOutput, String>
 where
     F: FnMut(&OutputChunk) + Send,
 {
@@ -64,6 +118,11 @@ where
 
     loop {
         tokio::select! {
+            _ = cancel_token.cancelled() => {
+                output.exit_code = 130;
+                proc.killer.kill();
+                break;
+            }
             _ = &mut timeout_sleep => {
                 output.timed_out = true;
                 output.exit_code = 124;
@@ -114,10 +173,6 @@ where
     Ok(output)
 }
 
-pub async fn run_bash(input: BashInput) -> Result<BashOutput, String> {
-    run_bash_chunked(input, |_| {}).await
-}
-
 #[async_trait]
 impl Tool for BashTool {
     fn name(&self) -> &'static str {
@@ -140,45 +195,7 @@ impl Tool for BashTool {
     }
 
     async fn execute<'a>(&self, input: Input<'a>) -> ExecuteResult {
-        let Input::Starter(input) = input else {
-            return err_msg!("Input should be Starter variant, not other variants");
-        };
-        let input: BashInput = match serde_json::from_value(input) {
-            Ok(value) => value,
-            Err(err) => {
-                let output = BashOutput {
-                    exit_code: 255,
-                    stdout: String::new(),
-                    stderr: format!("Invalid input format: {err}"),
-                    chunks: Vec::new(),
-                    timed_out: false,
-                };
-                let value = serde_json::to_value(&output)
-                    .map_err(|err| format!("Failed to serialize tool output: {err}"))?;
-                return Final::Json(value).err();
-            }
-        };
-
-        let output = match run_bash(input).await {
-            Ok(output) => output,
-            Err(err) => BashOutput {
-                exit_code: 255,
-                stdout: String::new(),
-                stderr: err,
-                chunks: Vec::new(),
-                timed_out: false,
-            },
-        };
-
-        let exit_code = output.exit_code;
-        let output = serde_json::to_value(&output)
-            .map_err(|err| format!("Failed to serialize tool output: {err}"))?;
-        let output = Final::from(output);
-        if exit_code == 0 {
-            output.ok()
-        } else {
-            output.err()
-        }
+        run_bash_chunked(input, CancellationToken::new(), |_| {}).await
     }
 }
 
@@ -244,5 +261,22 @@ mod tests {
 
         assert!(output.timed_out);
         assert_eq!(output.exit_code, 124);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bash_invalid_input_returns_json_error() {
+        let tool = BashTool::default();
+        let input = Input::Starter(json!({
+            "timeout": "bad",
+        }));
+
+        let err = tool.execute(input).await.unwrap_err();
+        let Final::Json(value) = err else {
+            panic!("expected JSON Final error output");
+        };
+        let output: BashOutput = serde_json::from_value(value).unwrap();
+
+        assert_eq!(output.exit_code, 255);
+        assert!(output.stderr.contains("Invalid input format"));
     }
 }

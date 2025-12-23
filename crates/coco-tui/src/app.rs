@@ -6,7 +6,7 @@ use std::{
 use code_combo::Config;
 use crossterm::{
     cursor,
-    event::{Event as CrosstermEvent, EventStream, KeyCode, KeyEvent, KeyModifiers},
+    event::{Event as CrosstermEvent, EventStream, KeyEvent},
     terminal::{EnterAlternateScreen, LeaveAlternateScreen},
 };
 use futures::{FutureExt, StreamExt};
@@ -216,14 +216,7 @@ impl App {
     }
 
     fn on_key_event(&mut self, key: KeyEvent) {
-        match (key.modifiers, key.code) {
-            (KeyModifiers::CONTROL, KeyCode::Char('c') | KeyCode::Char('C')) => {
-                self.send_action(Action::Quit);
-            }
-            _ => {
-                self.root.handle_event(&Event::Key(key));
-            }
-        }
+        self.root.handle_event(&Event::Key(key));
     }
 
     fn handle_action(&mut self) -> Result<()> {

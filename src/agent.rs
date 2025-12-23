@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anthropic::Client;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::Config;
@@ -11,7 +12,7 @@ use executor::PermissionControl;
 mod bash_executor;
 mod executor;
 pub use anthropic::{Block, Content, Message, Role, StopReason, ToolUse};
-pub use executor::{Executor, Input, Output};
+pub use executor::{ExecuteStatus, Executor, Input, Output};
 
 #[derive(Clone)]
 pub struct Agent {
@@ -95,13 +96,14 @@ impl Agent {
         id: &str,
         name: &str,
         input: executor::Input<'a>,
+        cancel_token: CancellationToken,
         on_output: F,
-    ) -> Result<()>
+    ) -> Result<ExecuteStatus>
     where
         F: FnMut(Output) + Send,
     {
         self.executor
-            .execute_with_output(id, name, input, on_output)
+            .execute_with_output(id, name, input, cancel_token, on_output)
             .await
     }
 

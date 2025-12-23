@@ -1,9 +1,10 @@
 use coco_macro::ComponentExt;
 use code_combo::{
     Agent, Block as ChatBlock, Config, Content as ChatContent, Message as ChatMessage, Output,
-    StopReason, TextEdit, ToolUse,
+    SessionEnv, StarterCommand, StarterError, StarterEvent, StopReason, TextEdit, ToolUse,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use futures::StreamExt;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -14,8 +15,9 @@ use ratatui::{
 };
 
 use serde::{Deserialize, Serialize};
+use std::{path::Path, time::Duration};
 use time::OffsetDateTime;
-use tokio::time::Instant;
+use tokio::{fs, time::Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -44,6 +46,7 @@ pub struct Chat<'a> {
     indicator: ThrobberState,
 
     token_schedule_session_save: Option<CancellationToken>,
+    cancellation_guard: CancellationGuard,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -80,12 +83,11 @@ impl Default for Inner {
     }
 }
 
-#[derive(Default, Clone, Serialize, Deserialize)]
+#[derive(Default, Clone, PartialEq, Serialize, Deserialize)]
 enum ChatState {
     #[default]
     Ready,
     Procesing,
-    ComboDiscovering,
 }
 
 impl std::fmt::Display for ChatState {
@@ -93,7 +95,6 @@ impl std::fmt::Display for ChatState {
         match self {
             Self::Ready => f.write_str("Ready"),
             Self::Procesing => f.write_str("Procesing"),
-            Self::ComboDiscovering => f.write_str("Discovering"),
         }
     }
 }
@@ -105,6 +106,70 @@ enum Focus {
     InputBlur,
     Messages,
     CommandPalette,
+}
+
+const CTRL_C_WINDOW: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Default)]
+struct CancellationGuard {
+    last_hit: State<Option<Instant>>,
+    cancel_token: Option<CancellationToken>,
+}
+
+impl CancellationGuard {
+    pub fn try_fire(&mut self) -> bool {
+        let now = Instant::now();
+        if let Some(last) = self.last_hit.get()
+            && now.duration_since(last) <= CTRL_C_WINDOW
+        {
+            // fire
+            self.cancel_token();
+            self.reset();
+            return true;
+        }
+
+        *self.last_hit.write() = Some(now);
+
+        false
+    }
+
+    pub fn reset(&mut self) {
+        *self.last_hit.write() = None;
+    }
+
+    pub fn on_trick(&mut self) {
+        let Some(last) = self.last_hit.get() else {
+            return;
+        };
+        if Instant::now().duration_since(last) > CTRL_C_WINDOW {
+            self.reset();
+        }
+    }
+
+    pub fn is_armed(&self) -> bool {
+        self.last_hit.is_some()
+    }
+
+    pub fn token(&mut self) -> CancellationToken {
+        if let Some(token) = &self.cancel_token {
+            return token.clone();
+        }
+        let token = CancellationToken::new();
+        self.cancel_token = Some(token.clone());
+        token
+    }
+
+    pub fn start_token(&mut self) -> CancellationToken {
+        self.cancel_token();
+        self.reset();
+        self.token()
+    }
+
+    fn cancel_token(&mut self) {
+        if let Some(token) = self.cancel_token.take() {
+            token.cancel();
+        }
+    }
 }
 
 const COMMAND_NEW_SESSION: &str = "New Session";
@@ -125,6 +190,7 @@ impl Chat<'static> {
             messages: Messages::default(),
             indicator: ThrobberState::default(),
             token_schedule_session_save: None,
+            cancellation_guard: CancellationGuard::default(),
         }
     }
 
@@ -219,19 +285,18 @@ impl Chat<'static> {
     fn handle_combo_event(&mut self, event: &ComboEvent) {
         debug!(?event, "receive combo event");
         match event {
-            ComboEvent::Discovering => {
-                self.state.write().state = ChatState::ComboDiscovering;
-            }
-            ComboEvent::Executing { .. } | ComboEvent::Output { .. } => {
-                self.state.write().state = ChatState::Procesing;
+            ComboEvent::Discovering | ComboEvent::Executing { .. } | ComboEvent::Output { .. } => {
+                self.set_processing();
             }
             ComboEvent::Executed { starter, .. } => {
                 let combo = starter.combo.as_ref().unwrap();
                 let content = self.build_user_content(ChatContent::Text(combo.to_markdown()));
-                tokio::task::spawn(task_chat(self.agent.clone(), content));
+                self.spawn_chat_task(content);
             }
-            ComboEvent::Discovered { .. } | ComboEvent::NotFound { .. } => {
-                self.state.write().state = ChatState::Ready;
+            ComboEvent::Discovered { .. }
+            | ComboEvent::NotFound { .. }
+            | ComboEvent::Cancelled { .. } => {
+                self.set_ready();
             }
         }
     }
@@ -273,14 +338,61 @@ impl Chat<'static> {
         }
     }
 
+    fn spawn_chat_task(&mut self, content: ChatContent) {
+        let cancel_token = self.cancellation_guard.start_token();
+        tokio::task::spawn(task_chat(self.agent.clone(), content, cancel_token));
+    }
+
+    fn spawn_combo_discover(&mut self) {
+        let cancel_token = self.cancellation_guard.start_token();
+        tokio::task::spawn(task_combo_discover(cancel_token));
+    }
+
+    fn spawn_combo_execute(&mut self, name: String) {
+        let cancel_token = self.cancellation_guard.start_token();
+        tokio::task::spawn(task_combo_execute(name, cancel_token));
+    }
+
+    fn set_processing(&mut self) {
+        if self.state.state != ChatState::Procesing {
+            self.state.write().state = ChatState::Procesing;
+        }
+    }
+
+    fn set_ready(&mut self) {
+        if self.state.state != ChatState::Ready {
+            // Avoid quitting the app while trying to cancel processing
+            self.cancellation_guard.reset();
+            self.state.write().state = ChatState::Ready;
+        }
+    }
+
+    fn is_ready_for_exit(&self) -> bool {
+        self.state.state == ChatState::Ready
+    }
+
+    fn handle_ctrl_c(&mut self) {
+        if !self.cancellation_guard.try_fire() {
+            return;
+        }
+
+        if self.is_ready_for_exit() {
+            global::action_tx().send(Action::Quit).unwrap();
+        }
+    }
+
     fn on_submit(&mut self) {
-        if matches!(self.state.state, ChatState::Ready) {
+        if self.state.state == ChatState::Ready {
             let value = self.input.clear();
+            if value.is_empty() {
+                debug!("submitting with empty value, skipping");
+                return;
+            }
             debug!(?value, "submiting");
             self.messages
                 .push(Message::user(Plain::new(value.clone()).into()));
             let content = self.build_user_content(ChatContent::Text(value));
-            tokio::task::spawn(task_chat(self.agent.clone(), content));
+            self.spawn_chat_task(content);
         } else {
             // TODO: Display an alert when input submission is not available
         }
@@ -310,11 +422,23 @@ impl Chat<'static> {
         }
     }
 
+    fn ctrl_c_reminder_line(&self) -> Option<Line<'static>> {
+        if !self.cancellation_guard.is_armed() {
+            return None;
+        }
+        let message = if self.is_ready_for_exit() {
+            "Press Ctrl+C again to exit"
+        } else {
+            "Press Ctrl+C again to cancel"
+        };
+        Some(Line::from(format!(" {message} ")).yellow())
+    }
+
     fn widget_state_indicator(&self) -> Line<'_> {
         let state = &self.state.state;
         (match state {
             ChatState::Ready => Line::from(format!(" {state} ").green()),
-            ChatState::Procesing | ChatState::ComboDiscovering => Line::from(vec![
+            ChatState::Procesing => Line::from(vec![
                 " ".into(),
                 Throbber::default()
                     .throbber_set(BRAILLE_EIGHT_DOUBLE)
@@ -381,6 +505,7 @@ impl Chat<'static> {
             focus: Focus::InputBlur,
             ..Default::default()
         };
+        self.cancellation_guard.reset();
 
         // 4. Reset focus to Input from InputBlur to trigger the input component
         self.update_focus(Focus::Input);
@@ -429,10 +554,9 @@ impl Component for Chat<'static> {
     }
 
     fn on_tick(&mut self) {
-        if matches!(
-            self.state.state,
-            ChatState::Procesing | ChatState::ComboDiscovering
-        ) {
+        self.cancellation_guard.on_trick();
+
+        if self.state.state == ChatState::Procesing {
             self.indicator.calc_next();
             global::signal_dirty();
         }
@@ -450,10 +574,10 @@ impl Component for Chat<'static> {
                 handle_component_event!(self, event);
             }
             Event::Ask(AskEvent::Bot) => {
-                self.state.write().state = ChatState::Procesing;
+                self.set_processing();
             }
             Event::Answer(AnswerEvent::Bot(msgs)) => {
-                self.state.write().state = ChatState::Ready;
+                self.set_ready();
                 self.messages
                     .extend(msgs.iter().cloned().map(|msg| match msg {
                         BotMessage::Plain(text) => Message::bot(Plain::new(text).into()),
@@ -464,6 +588,9 @@ impl Component for Chat<'static> {
                     }));
                 // Trigger session save after receiving bot response
                 global::trigger_schedule_session_save();
+            }
+            Event::Answer(AnswerEvent::Cancelled) => {
+                self.set_ready();
             }
             Event::Ask(AskEvent::ToolUsePermission(_) | AskEvent::TextEdit { .. }) => {
                 if let Some(idx) = self.messages.on_tool_event(event) {
@@ -476,6 +603,7 @@ impl Component for Chat<'static> {
             }
             Event::Answer(AnswerEvent::ToolResult {
                 id,
+                is_user_cancelled,
                 is_error,
                 output,
             }) => {
@@ -488,14 +616,18 @@ impl Component for Chat<'static> {
                     self.messages.blur();
                 }
                 // Add ToolResult message to send execution result to LLM API Server
+                let mut content: code_combo::Content = output.try_into().unwrap();
+                if *is_user_cancelled {
+                    content = content.user_cancel();
+                }
                 // TODO: Allow user to retry if tool use fails.
                 let content = ChatContent::Multiple(vec![code_combo::Block::ToolResult {
                     tool_use_id: id.clone(),
                     is_error: Some(*is_error),
-                    content: output.try_into().unwrap(),
+                    content,
                 }]);
                 let content = self.build_user_content(content);
-                tokio::task::spawn(task_chat(self.agent.clone(), content));
+                self.spawn_chat_task(content);
                 // Trigger session save after tool result
                 global::trigger_schedule_session_save();
             }
@@ -515,6 +647,17 @@ impl Component for Chat<'static> {
         use KeyModifiers as KM;
 
         let focus = &self.state.focus;
+        if matches!(
+            key,
+            KeyEvent {
+                code: Char('c') | Char('C'),
+                modifiers: KM::CONTROL,
+                ..
+            }
+        ) {
+            self.handle_ctrl_c();
+            return;
+        }
         match (focus, key.modifiers, key.code) {
             // Focus switching
             (Input, KM::NONE, Esc) => self.update_focus(InputBlur),
@@ -575,15 +718,28 @@ impl Component for Chat<'static> {
         debug!(?action, "updating");
 
         match action {
-            Action::Combo(ComboAction::Execute { name }) => {
-                let combo = Combo::new(name);
-                self.messages.push(Message::user(combo.into()));
-                debug!("Combo message pushed");
-            }
+            Action::Combo(combo_action) => match combo_action {
+                ComboAction::Discover => {
+                    self.spawn_combo_discover();
+                }
+                ComboAction::Execute { name } => {
+                    let combo = Combo::new(name);
+                    self.messages.push(Message::user(combo.into()));
+                    self.spawn_combo_execute(name.clone());
+                    debug!("Combo message pushed");
+                }
+            },
             Action::Tool(action) => match action {
                 ToolAction::Grant(tool_use) => {
+                    self.set_processing();
                     self.agent.grant_once(&tool_use.id, &tool_use.name);
-                    tokio::task::spawn(task_tool_use(self.agent.clone(), tool_use.to_owned()));
+                    let cancel_token = self.cancellation_guard.token();
+
+                    tokio::task::spawn(task_tool_use(
+                        self.agent.clone(),
+                        tool_use.to_owned(),
+                        cancel_token,
+                    ));
                 }
                 ToolAction::Cancel(tool_use) => {
                     // Move focus back to Input when tool use is cancelled.
@@ -622,6 +778,7 @@ impl Component for Chat<'static> {
                             *hunk_idx,
                         );
                     } else {
+                        self.set_processing();
                         tokio::task::spawn(task_apply_text_edit(
                             self.agent.clone(),
                             id.to_owned(),
@@ -686,20 +843,23 @@ impl Component for Chat<'static> {
             .border_set(border::THICK);
         frame.render_widget(self.block_bottom_with_shortcuts_desc(block), divider);
 
-        let mut block = Block::new().borders(Borders::BOTTOM);
-        block = if !matches!(self.state.focus, Focus::Messages) {
-            block.border_set(border::THICK).border_style(Style::reset())
+        let mut bottom_block = Block::new().borders(Borders::BOTTOM);
+        bottom_block = if !matches!(self.state.focus, Focus::Messages) {
+            bottom_block
+                .border_set(border::THICK)
+                .border_style(Style::reset())
         } else {
-            block
+            bottom_block
                 .border_set(border::PLAIN)
                 .border_style(Style::default().dark_gray())
         };
-        frame.render_widget(
-            block
-                .title_bottom(Line::from(""))
-                .title_bottom(self.widget_state_indicator()),
-            bottom,
-        );
+        bottom_block = bottom_block
+            .title_bottom(Line::from(""))
+            .title_bottom(self.widget_state_indicator());
+        if let Some(line) = self.ctrl_c_reminder_line() {
+            bottom_block = bottom_block.title_bottom(line);
+        }
+        frame.render_widget(bottom_block, bottom);
         self.input.draw(frame, area_input)?;
 
         if self.state.focus == Focus::CommandPalette {
@@ -711,13 +871,238 @@ impl Component for Chat<'static> {
     }
 }
 
-async fn task_chat(mut agent: Agent, content: ChatContent) {
+struct DiscoverResult {
+    starters: Vec<code_combo::Starter>,
+    cancelled: bool,
+}
+
+async fn task_combo_discover(cancel_token: CancellationToken) {
+    let tx = global::event_tx();
+    let config = global::config().await;
+    let combo_dir = config.combo_dir();
+
+    tx.send(ComboEvent::Discovering.into()).unwrap();
+    let result = discover_with_cancel(&combo_dir, cancel_token).await;
+    if result.cancelled {
+        tx.send(ComboEvent::Cancelled { name: None }.into())
+            .unwrap();
+        return;
+    }
+    tx.send(
+        ComboEvent::Discovered {
+            starters: result.starters,
+        }
+        .into(),
+    )
+    .unwrap();
+}
+
+async fn task_combo_execute(name: String, cancel_token: CancellationToken) {
+    let tx = global::event_tx();
+    let config = global::config().await;
+    let combo_dir = config.combo_dir();
+
+    tx.send(ComboEvent::Discovering.into()).unwrap();
+    let result = discover_with_cancel(&combo_dir, cancel_token.clone()).await;
+    if result.cancelled || cancel_token.is_cancelled() {
+        tx.send(
+            ComboEvent::Cancelled {
+                name: Some(name.clone()),
+            }
+            .into(),
+        )
+        .unwrap();
+        return;
+    }
+
+    let Some(starter) = result
+        .starters
+        .into_iter()
+        .find(|starter| match &starter.combo {
+            Ok(combo) => combo.metadata.name == name,
+            Err(err) => {
+                warn!(?starter.path, ?err, "Failed to load combo");
+                false
+            }
+        })
+    else {
+        tx.send(ComboEvent::NotFound { name: name.clone() }.into())
+            .unwrap();
+        return;
+    };
+
+    // Skip the `ComboEvent::Discovered` event and advance directly to `ComboEvent::Executing`
+    tx.send(ComboEvent::Executing { name: name.clone() }.into())
+        .unwrap();
+
+    let session_env = SessionEnv::builder()
+        .build()
+        .expect("failed to build session");
+    let starter_path = starter.path.clone();
+    let execution = StarterCommand::new(&starter.path)
+        .session_env(session_env)
+        .execute();
+
+    let starter = match run_execution_with_cancel(execution, cancel_token.clone(), |event| {
+        if let StarterEvent::Output { chunk } = event {
+            tx.send(
+                ComboEvent::Output {
+                    name: name.clone(),
+                    chunk,
+                }
+                .into(),
+            )
+            .unwrap();
+        }
+    })
+    .await
+    {
+        Ok(starter) => starter,
+        Err(err) => {
+            warn!(?err, "starter join error");
+            let starter = code_combo::Starter {
+                path: starter_path,
+                combo: Err(StarterError::Invalid {
+                    reason: format!("starter join error: {err}"),
+                }),
+            };
+            tx.send(
+                ComboEvent::Executed {
+                    name: name.clone(),
+                    starter,
+                }
+                .into(),
+            )
+            .unwrap();
+            return;
+        }
+    };
+
+    if cancel_token.is_cancelled() || matches!(&starter.combo, Err(StarterError::Cancelled)) {
+        tx.send(
+            ComboEvent::Cancelled {
+                name: Some(name.clone()),
+            }
+            .into(),
+        )
+        .unwrap();
+        return;
+    }
+
+    tx.send(
+        ComboEvent::Executed {
+            name: name.clone(),
+            starter,
+        }
+        .into(),
+    )
+    .unwrap();
+}
+
+async fn discover_with_cancel(combo_dir: &Path, cancel_token: CancellationToken) -> DiscoverResult {
+    let mut starters = Vec::new();
+    let mut entries = match fs::read_dir(combo_dir).await {
+        Ok(entries) => entries,
+        Err(err) => {
+            warn!(?combo_dir, ?err, "read dir error");
+            return DiscoverResult {
+                starters,
+                cancelled: false,
+            };
+        }
+    };
+
+    loop {
+        let entry = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                return DiscoverResult { starters, cancelled: true };
+            }
+            entry = entries.next_entry() => entry,
+        };
+        let entry = match entry {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(err) => {
+                warn!(?combo_dir, ?err, "read dir error");
+                break;
+            }
+        };
+
+        let path = entry.path();
+        let session_env = SessionEnv::builder()
+            .build()
+            .expect("failed to build session");
+        let execution = StarterCommand::new(path.to_string_lossy())
+            .discovery(true)
+            .session_env(session_env)
+            .execute();
+        let starter = match run_execution_with_cancel(execution, cancel_token.clone(), |_| {}).await
+        {
+            Ok(starter) => starter,
+            Err(err) => {
+                warn!(?err, "starter join error");
+                continue;
+            }
+        };
+
+        if matches!(&starter.combo, Err(StarterError::Cancelled)) || cancel_token.is_cancelled() {
+            return DiscoverResult {
+                starters,
+                cancelled: true,
+            };
+        }
+
+        starters.push(starter);
+    }
+
+    DiscoverResult {
+        starters,
+        cancelled: false,
+    }
+}
+
+async fn run_execution_with_cancel<F>(
+    mut execution: code_combo::StarterExecution,
+    cancel_token: CancellationToken,
+    mut on_event: F,
+) -> Result<code_combo::Starter, tokio::task::JoinError>
+where
+    F: FnMut(StarterEvent),
+{
+    let mut cancelled = false;
+    loop {
+        tokio::select! {
+            _ = cancel_token.cancelled(), if !cancelled => {
+                cancelled = true;
+                execution.cancel();
+            }
+            event = execution.next() => {
+                let Some(event) = event else {
+                    break;
+                };
+                on_event(event);
+            }
+        }
+    }
+    execution.wait().await
+}
+
+async fn task_chat(mut agent: Agent, content: ChatContent, cancel_token: CancellationToken) {
     let tx = global::event_tx();
 
+    if cancel_token.is_cancelled() {
+        return;
+    }
     let msg = ChatMessage::user(content);
     tx.send(Event::Ask(AskEvent::Bot)).unwrap();
 
-    let chat_resp = agent.chat(msg).await.expect("failed to chat with LLM");
+    let chat_resp = tokio::select! {
+        _ = cancel_token.cancelled() => {
+            tx.send(AnswerEvent::Cancelled.into()).ok();
+            return;
+        }
+        chat_resp = agent.chat(msg) => chat_resp.expect("failed to chat with LLM"),
+    };
 
     let mut to_execute: Vec<code_combo::ToolUse> = vec![];
     let mut bot_messages = match chat_resp.message.content {
@@ -777,26 +1162,34 @@ async fn task_chat(mut agent: Agent, content: ChatContent) {
             executions_cnt = to_execute.len(),
             "run executions parallelly"
         );
+        if cancel_token.is_cancelled() {
+            return;
+        }
         // Parallel execution
         let handles = to_execute
             .into_iter()
             .map(|tool_use| {
                 let agent = agent.clone();
-                tokio::task::spawn(task_tool_use(agent, tool_use))
+                let cancel_token = cancel_token.clone();
+                tokio::task::spawn(task_tool_use(agent, tool_use, cancel_token))
             })
             .collect::<Vec<_>>();
-        futures::future::join_all(handles).await;
+        tokio::select! {
+            _ = cancel_token.cancelled() => {}
+            _ = futures::future::join_all(handles) => {}
+        }
     }
 }
 
-async fn task_tool_use(mut agent: Agent, tool_use: ToolUse) {
+async fn task_tool_use(mut agent: Agent, tool_use: ToolUse, cancel_token: CancellationToken) {
     let tx = global::event_tx();
-    let code_combo::ToolUse { id, name, input } = tool_use;
+    let code_combo::ToolUse { id, name, input } = tool_use.clone();
     let _ = agent
         .execute_with_output(
             &id,
             &name,
             code_combo::Input::Starter(input),
+            cancel_token.clone(),
             |out| match out {
                 Output::ToolOutput(chunk) => {
                     tx.send(
@@ -827,6 +1220,7 @@ async fn task_tool_use(mut agent: Agent, tool_use: ToolUse) {
                         AnswerEvent::ToolResult {
                             id: id.clone(),
                             is_error: false,
+                            is_user_cancelled: cancel_token.is_cancelled(),
                             output,
                         }
                         .into(),
@@ -838,6 +1232,7 @@ async fn task_tool_use(mut agent: Agent, tool_use: ToolUse) {
                         AnswerEvent::ToolResult {
                             id: id.clone(),
                             is_error: true,
+                            is_user_cancelled: cancel_token.is_cancelled(),
                             output,
                         }
                         .into(),
@@ -876,6 +1271,7 @@ async fn task_apply_text_edit(
                     AnswerEvent::ToolResult {
                         id,
                         is_error,
+                        is_user_cancelled: false,
                         output,
                     }
                     .into(),

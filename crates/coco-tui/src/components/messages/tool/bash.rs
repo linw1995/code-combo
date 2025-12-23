@@ -585,6 +585,7 @@ mod tests {
         bash.handle_event(&Event::Answer(AnswerEvent::ToolResult {
             id: "tool_1".to_string(),
             is_error: false,
+            is_user_cancelled: false,
             output: Final::Json(value),
         }));
         assert!(!bash.state.collapsed);
@@ -595,6 +596,7 @@ mod tests {
         bash.handle_event(&Event::Answer(AnswerEvent::ToolResult {
             id: "tool_1".to_string(),
             is_error: true,
+            is_user_cancelled: false,
             output: Final::Json(value),
         }));
         assert!(!bash.state.collapsed);
@@ -698,6 +700,7 @@ mod tests {
         bash.handle_event(&Event::Answer(AnswerEvent::ToolResult {
             id: "tool_1".to_string(),
             is_error: false,
+            is_user_cancelled: false,
             output: Final::Json(value),
         }));
         assert!(!bash.state.collapsed);

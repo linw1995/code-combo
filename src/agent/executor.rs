@@ -2,13 +2,14 @@ use std::{collections::HashMap, sync::Arc};
 
 use lazy_static::lazy_static;
 use snafu::prelude::*;
+use tokio_util::sync::CancellationToken;
 
 use super::bash_executor;
 use crate::{
     OutputChunk, TextEdit, error,
     tools::{
-        self, BASH_TOOL_NAME, BashInput, BashOutput, BashTool, Final, LIST_TOOL_NAME, ListTool,
-        READ_TOOL_NAME, ReadTool, STR_REPLACE_TOOL_NAME, StrReplaceTool, Tool, run_bash_chunked,
+        self, BASH_TOOL_NAME, BashInput, BashTool, Final, LIST_TOOL_NAME, ListTool, READ_TOOL_NAME,
+        ReadTool, STR_REPLACE_TOOL_NAME, StrReplaceTool, Tool, run_bash_chunked,
     },
 };
 
@@ -61,6 +62,12 @@ pub use tools::Input;
 //pub enum Input<'a> {
 //    ToolInput(tools::Input<'a>),
 //}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecuteStatus {
+    Completed,
+    Cancelled,
+}
 
 #[derive(Debug)]
 pub enum Output {
@@ -115,12 +122,17 @@ impl Executor {
         input: Input<'a>,
     ) -> error::Result<Output> {
         let mut final_output: Option<Output> = None;
-        self.execute_with_output(id, name, input, |out| {
-            if !matches!(out, Output::ToolOutput(_)) {
-                final_output = Some(out);
-            }
-        })
-        .await?;
+        let cancel_token = CancellationToken::new();
+        let status = self
+            .execute_with_output(id, name, input, cancel_token, |out| {
+                if !matches!(out, Output::ToolOutput(_)) {
+                    final_output = Some(out);
+                }
+            })
+            .await?;
+        if matches!(status, ExecuteStatus::Cancelled) {
+            return Ok(Output::Denied);
+        }
         Ok(final_output.unwrap_or(Output::Denied))
     }
 
@@ -129,11 +141,16 @@ impl Executor {
         id: &str,
         name: &str,
         input: Input<'a>,
+        cancel_token: CancellationToken,
         mut on_output: F,
-    ) -> error::Result<()>
+    ) -> error::Result<ExecuteStatus>
     where
         F: FnMut(Output) + Send,
     {
+        if cancel_token.is_cancelled() {
+            return Ok(ExecuteStatus::Cancelled);
+        }
+
         // Check tool
         let Some(tool) = self.tools.get(name).cloned() else {
             return Err(NotFoundSnafu {
@@ -169,55 +186,32 @@ impl Executor {
                     )
                 {
                     on_output(Output::AskPermission);
-                    return Ok(());
+                    return Ok(ExecuteStatus::Completed);
                 }
             };
         }
 
         if name == BASH_TOOL_NAME {
-            match input {
-                Input::Starter(value) => {
-                    let parsed: Result<BashInput, _> = serde_json::from_value(value.clone());
-                    match parsed {
-                        Ok(input) => {
-                            let output = match run_bash_chunked(input, |chunk| {
-                                on_output(Output::ToolOutput(chunk.clone()));
-                            })
-                            .await
-                            {
-                                Ok(output) => output,
-                                Err(err) => BashOutput {
-                                    exit_code: 255,
-                                    stdout: String::new(),
-                                    stderr: err,
-                                    chunks: Vec::new(),
-                                    timed_out: false,
-                                },
-                            };
-                            let is_error = output.exit_code != 0;
-                            let final_output = Final::Json(serde_json::to_value(output).unwrap());
-                            on_output(if is_error {
-                                Output::Failure(final_output)
-                            } else {
-                                Output::Success(final_output)
-                            });
-                            return Ok(());
-                        }
-                        Err(_) => {
-                            on_output(tool.execute(Input::Starter(value)).await.into());
-                            return Ok(());
-                        }
-                    }
-                }
-                _ => {
-                    on_output(tool.execute(input).await.into());
-                    return Ok(());
-                }
+            let output = run_bash_chunked(input, cancel_token.clone(), |chunk| {
+                on_output(Output::ToolOutput(chunk.clone()));
+            })
+            .await;
+            on_output(output.into());
+            if cancel_token.is_cancelled() {
+                return Ok(ExecuteStatus::Cancelled);
+            } else {
+                return Ok(ExecuteStatus::Completed);
             }
         }
 
-        on_output(tool.execute(input).await.into());
-        Ok(())
+        let output = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                return Ok(ExecuteStatus::Cancelled);
+            }
+            output = tool.execute(input) => output,
+        };
+        on_output(output.into());
+        Ok(ExecuteStatus::Completed)
     }
 
     /// Update Permission Control List

@@ -62,11 +62,30 @@ impl From<&str> for Block {
     }
 }
 
+impl From<String> for Block {
+    fn from(value: String) -> Self {
+        Self::Text { text: value }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Content {
     Text(String),
     Multiple(Vec<Block>),
+}
+
+impl Content {
+    pub fn user_cancel(self) -> Self {
+        let msg = Block::text("User interrupted!");
+        match self {
+            Self::Text(text) => Self::Multiple(vec![msg, text.into()]),
+            Self::Multiple(mut blocks) => {
+                blocks.insert(0, msg);
+                Self::Multiple(blocks)
+            }
+        }
+    }
 }
 
 impl From<&str> for Content {
