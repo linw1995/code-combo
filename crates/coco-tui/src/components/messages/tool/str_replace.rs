@@ -793,6 +793,7 @@ mod tests {
         widget.handle_event(&Event::Answer(AnswerEvent::ToolResult {
             id: "tool_1".to_string(),
             is_error: false,
+            is_user_cancelled: false,
             output: Final::Message("Success".to_string()),
         }));
 
@@ -814,6 +815,7 @@ mod tests {
         widget.handle_event(&Event::Answer(AnswerEvent::ToolResult {
             id: "tool_1".to_string(),
             is_error: true,
+            is_user_cancelled: false,
             output: Final::Message("Write failed".to_string()),
         }));
 
@@ -854,6 +856,7 @@ mod tests {
         widget1.handle_event(&Event::Answer(AnswerEvent::ToolResult {
             id: "tool_1".to_string(),
             is_error: false,
+            is_user_cancelled: false,
             output: Final::Message("Success".to_string()),
         }));
 
@@ -886,6 +889,7 @@ mod tests {
         widget2.handle_event(&Event::Answer(AnswerEvent::ToolResult {
             id: "tool_2".to_string(),
             is_error: true,
+            is_user_cancelled: false,
             output: Final::Message("Failed".to_string()),
         }));
 

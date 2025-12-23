@@ -69,6 +69,18 @@ pub enum Content {
     Multiple(Vec<Block>),
 }
 
+impl Content {
+    pub fn user_cancel(self) -> Self {
+        match self {
+            Self::Text(text) => Self::Text(format!("User cancelled!\n{text}")),
+            Self::Multiple(mut blocks) => {
+                blocks.insert(0, "User cancelled!".into());
+                Self::Multiple(blocks)
+            }
+        }
+    }
+}
+
 impl From<&str> for Content {
     fn from(value: &str) -> Self {
         Self::Text(value.to_string())

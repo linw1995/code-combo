@@ -42,6 +42,7 @@ pub enum AnswerEvent {
     ToolResult {
         id: String,
         is_error: bool,
+        is_user_cancelled: bool,
         output: Final,
     },
 }

@@ -1,8 +1,7 @@
 use coco_macro::ComponentExt;
 use code_combo::{
-    Agent, Block as ChatBlock, Config, Content as ChatContent, ExecuteStatus,
-    Message as ChatMessage, Output, SessionEnv, StarterCommand, StarterError, StarterEvent,
-    StopReason, TextEdit, ToolUse,
+    Agent, Block as ChatBlock, Config, Content as ChatContent, Message as ChatMessage, Output,
+    SessionEnv, StarterCommand, StarterError, StarterEvent, StopReason, TextEdit, ToolUse,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use futures::StreamExt;
@@ -605,6 +604,7 @@ impl Component for Chat<'static> {
             }
             Event::Answer(AnswerEvent::ToolResult {
                 id,
+                is_user_cancelled,
                 is_error,
                 output,
             }) => {
@@ -617,11 +617,15 @@ impl Component for Chat<'static> {
                     self.messages.blur();
                 }
                 // Add ToolResult message to send execution result to LLM API Server
+                let mut content: code_combo::Content = output.try_into().unwrap();
+                if *is_user_cancelled {
+                    content = content.user_cancel();
+                }
                 // TODO: Allow user to retry if tool use fails.
                 let content = ChatContent::Multiple(vec![code_combo::Block::ToolResult {
                     tool_use_id: id.clone(),
                     is_error: Some(*is_error),
-                    content: output.try_into().unwrap(),
+                    content,
                 }]);
                 let content = self.build_user_content(content);
                 self.spawn_chat_task(content);
@@ -1173,10 +1177,6 @@ async fn task_chat(mut agent: Agent, content: ChatContent, cancel_token: Cancell
         }
     }
 
-    if cancel_token.is_cancelled() {
-        tx.send(AnswerEvent::Cancelled.into()).ok();
-        return;
-    }
     tx.send(AnswerEvent::Bot(bot_messages).into()).unwrap();
 
     if !to_execute.is_empty() {
@@ -1205,9 +1205,8 @@ async fn task_chat(mut agent: Agent, content: ChatContent, cancel_token: Cancell
 
 async fn task_tool_use(mut agent: Agent, tool_use: ToolUse, cancel_token: CancellationToken) {
     let tx = global::event_tx();
-    let action_tx = global::action_tx();
     let code_combo::ToolUse { id, name, input } = tool_use.clone();
-    let status = agent
+    let _ = agent
         .execute_with_output(
             &id,
             &name,
@@ -1243,6 +1242,7 @@ async fn task_tool_use(mut agent: Agent, tool_use: ToolUse, cancel_token: Cancel
                         AnswerEvent::ToolResult {
                             id: id.clone(),
                             is_error: false,
+                            is_user_cancelled: cancel_token.is_cancelled(),
                             output,
                         }
                         .into(),
@@ -1254,6 +1254,7 @@ async fn task_tool_use(mut agent: Agent, tool_use: ToolUse, cancel_token: Cancel
                         AnswerEvent::ToolResult {
                             id: id.clone(),
                             is_error: true,
+                            is_user_cancelled: cancel_token.is_cancelled(),
                             output,
                         }
                         .into(),
@@ -1264,16 +1265,6 @@ async fn task_tool_use(mut agent: Agent, tool_use: ToolUse, cancel_token: Cancel
             },
         )
         .await;
-    match status {
-        Ok(ExecuteStatus::Completed) => {}
-        Ok(ExecuteStatus::Cancelled) => {
-            action_tx.send(ToolAction::Cancel(tool_use).into()).ok();
-            tx.send(AnswerEvent::Cancelled.into()).ok();
-        }
-        Err(err) => {
-            warn!(?err, "failed to execute tool");
-        }
-    }
 }
 
 async fn task_apply_text_edit(
@@ -1302,6 +1293,7 @@ async fn task_apply_text_edit(
                     AnswerEvent::ToolResult {
                         id,
                         is_error,
+                        is_user_cancelled: false,
                         output,
                     }
                     .into(),
