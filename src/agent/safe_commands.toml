@@ -36,7 +36,14 @@ allow_any = true
 
 [[commands]]
 name = "ls"
-allow_any = true
+allow_any = false
+allow_positional = false
+flags = [
+  { name = "-a", arg = "none" },
+  { name = "-l", arg = "none" },
+  { name = "-n", arg = "none" },
+  { name = "--color", arg = "optional" },
+]
 
 [[commands]]
 name = "nl"
