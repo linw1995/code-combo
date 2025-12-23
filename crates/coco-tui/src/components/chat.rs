@@ -293,10 +293,9 @@ impl Chat<'static> {
                 let content = self.build_user_content(ChatContent::Text(combo.to_markdown()));
                 self.spawn_chat_task(content);
             }
-            ComboEvent::Discovered { .. } => {
-                self.set_ready();
-            }
-            ComboEvent::NotFound { .. } | ComboEvent::Cancelled { .. } => {
+            ComboEvent::Discovered { .. }
+            | ComboEvent::NotFound { .. }
+            | ComboEvent::Cancelled { .. } => {
                 self.set_ready();
             }
         }
@@ -905,18 +904,7 @@ async fn task_combo_execute(name: String, cancel_token: CancellationToken) {
 
     tx.send(ComboEvent::Discovering.into()).unwrap();
     let result = discover_with_cancel(&combo_dir, cancel_token.clone()).await;
-    if result.cancelled {
-        tx.send(
-            ComboEvent::Cancelled {
-                name: Some(name.clone()),
-            }
-            .into(),
-        )
-        .unwrap();
-        return;
-    }
-
-    if cancel_token.is_cancelled() {
+    if result.cancelled || cancel_token.is_cancelled() {
         tx.send(
             ComboEvent::Cancelled {
                 name: Some(name.clone()),
@@ -943,6 +931,7 @@ async fn task_combo_execute(name: String, cancel_token: CancellationToken) {
         return;
     };
 
+    // Skip the `ComboEvent::Discovered` event and advance directly to `ComboEvent::Executing`
     tx.send(ComboEvent::Executing { name: name.clone() }.into())
         .unwrap();
 
@@ -989,18 +978,7 @@ async fn task_combo_execute(name: String, cancel_token: CancellationToken) {
         }
     };
 
-    if cancel_token.is_cancelled() {
-        tx.send(
-            ComboEvent::Cancelled {
-                name: Some(name.clone()),
-            }
-            .into(),
-        )
-        .unwrap();
-        return;
-    }
-
-    if matches!(&starter.combo, Err(StarterError::Cancelled)) {
+    if cancel_token.is_cancelled() || matches!(&starter.combo, Err(StarterError::Cancelled)) {
         tx.send(
             ComboEvent::Cancelled {
                 name: Some(name.clone()),
