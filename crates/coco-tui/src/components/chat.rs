@@ -353,6 +353,16 @@ impl Chat<'static> {
         tokio::task::spawn(task_combo_execute(name, cancel_token));
     }
 
+    fn spawn_tool_use(&mut self, tool_use: &ToolUse) {
+        self.set_processing();
+        let cancel_token = self.cancellation_guard.token();
+        tokio::task::spawn(task_tool_use(
+            self.agent.clone(),
+            tool_use.to_owned(),
+            cancel_token,
+        ));
+    }
+
     fn set_processing(&mut self) {
         if self.state.state != ChatState::Procesing {
             self.state.write().state = ChatState::Procesing;
@@ -731,15 +741,12 @@ impl Component for Chat<'static> {
             },
             Action::Tool(action) => match action {
                 ToolAction::Grant(tool_use) => {
-                    self.set_processing();
                     self.agent.grant_once(&tool_use.id, &tool_use.name);
-                    let cancel_token = self.cancellation_guard.token();
-
-                    tokio::task::spawn(task_tool_use(
-                        self.agent.clone(),
-                        tool_use.to_owned(),
-                        cancel_token,
-                    ));
+                    self.spawn_tool_use(tool_use);
+                }
+                ToolAction::GrantSession(tool_use) => {
+                    self.agent.grant_session(tool_use);
+                    self.spawn_tool_use(tool_use);
                 }
                 ToolAction::Cancel(tool_use) => {
                     // Move focus back to Input when tool use is cancelled.

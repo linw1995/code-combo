@@ -781,7 +781,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::{path::PathBuf, sync::OnceLock};
 
-    use indoc::formatdoc;
+    use indoc::{formatdoc, indoc};
     use tempfile::TempDir;
 
     use crate::combo::{RecordStartPayload, SessionSocketClient};
@@ -793,7 +793,7 @@ mod tests {
     fn coco_binary() -> PathBuf {
         COCO_BIN_PATH
             .get_or_init(|| {
-                if let Ok(path) = std::env::var("COCO_BIN") {
+                if let Ok(path) = std::env::var("COCO_TEST_BIN") {
                     return PathBuf::from(path);
                 }
                 PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -808,7 +808,11 @@ mod tests {
         let path = coco_binary();
         assert!(
             path.exists(),
-            "coco binary not found at {:?}; build `cargo build -p code-combo --bin coco` first or set COCO_BIN",
+            indoc! {"
+                coco binary not found at {:?};
+                build `cargo build -p code-combo --bin coco` first
+                or set COCO_TEST_BIN
+            "},
             path
         );
         SessionEnv::builder()

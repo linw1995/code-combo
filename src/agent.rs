@@ -79,6 +79,10 @@ impl Agent {
             .update_pcl(name, PermissionControl::Once(id.to_string()))
     }
 
+    pub fn grant_session(&mut self, tool_use: &ToolUse) {
+        self.executor.grant_session(&tool_use.name, &tool_use.input)
+    }
+
     pub async fn execute<'a>(
         &mut self,
         id: &str,
