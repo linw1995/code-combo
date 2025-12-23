@@ -30,6 +30,12 @@ enum ArgPolicy {
     Deny,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArgMode {
+    AllowList,
+    AllowAny,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
@@ -149,21 +155,34 @@ fn is_safe_args(args: &[ParsedArg], policy: &ArgPolicy) -> bool {
             flags,
             allow_positional,
             positional_path_from,
-        } => is_safe_args_any(args, flags, *allow_positional, *positional_path_from),
+        } => is_safe_args_with_mode(
+            args,
+            flags,
+            *allow_positional,
+            *positional_path_from,
+            ArgMode::AllowAny,
+        ),
         ArgPolicy::Deny => args.is_empty(),
         ArgPolicy::AllowList {
             flags,
             allow_positional,
             positional_path_from,
-        } => is_safe_args_allowlist(args, flags, *allow_positional, *positional_path_from),
+        } => is_safe_args_with_mode(
+            args,
+            flags,
+            *allow_positional,
+            *positional_path_from,
+            ArgMode::AllowList,
+        ),
     }
 }
 
-fn is_safe_args_allowlist(
+fn is_safe_args_with_mode(
     args: &[ParsedArg],
     flags: &HashMap<String, FlagPolicy>,
     allow_positional: bool,
     positional_path_from: Option<usize>,
+    mode: ArgMode,
 ) -> bool {
     let mut index = 0;
     let mut positional_index = 0;
@@ -182,69 +201,7 @@ fn is_safe_args_allowlist(
         }
 
         if !options_ended && is_long_option(text) {
-            let (name, attached_value) = split_long_option(text);
-            let Some(policy) = flags.get(name) else {
-                return false;
-            };
-            let consumed = match policy.arg {
-                FlagValuePolicy::None => {
-                    if attached_value.is_some() {
-                        return false;
-                    }
-                    1
-                }
-                FlagValuePolicy::Required => {
-                    if let Some(value) = attached_value {
-                        if value.is_empty() {
-                            return false;
-                        }
-                        if policy.value_type == FlagValueType::Path
-                            && !is_relative_path_value(value, arg)
-                        {
-                            return false;
-                        }
-                        1
-                    } else if index + 1 < args.len() {
-                        if policy.value_type == FlagValueType::Path
-                            && !is_relative_path_arg(&args[index + 1])
-                        {
-                            return false;
-                        }
-                        2
-                    } else {
-                        return false;
-                    }
-                }
-                FlagValuePolicy::Optional => {
-                    if let Some(value) = attached_value {
-                        if value.is_empty() {
-                            return false;
-                        }
-                        if policy.value_type == FlagValueType::Path
-                            && !is_relative_path_value(value, arg)
-                        {
-                            return false;
-                        }
-                        1
-                    } else if index + 1 < args.len() && !is_flag_like(args[index + 1].text.as_str())
-                    {
-                        if policy.value_type == FlagValueType::Path
-                            && !is_relative_path_arg(&args[index + 1])
-                        {
-                            return false;
-                        }
-                        2
-                    } else {
-                        1
-                    }
-                }
-            };
-            index += consumed;
-            continue;
-        }
-
-        if !options_ended && is_short_option(text) {
-            let consumed = match parse_short_options_allowlist(arg, index, args, flags) {
+            let consumed = match consume_long_option(arg, index, args, flags, mode) {
                 Some(consumed) => consumed,
                 None => return false,
             };
@@ -252,115 +209,8 @@ fn is_safe_args_allowlist(
             continue;
         }
 
-        if !allow_positional {
-            return false;
-        }
-        if positional_path_from
-            .map(|from| positional_index >= from)
-            .unwrap_or(false)
-            && !is_relative_path_arg(arg)
-        {
-            return false;
-        }
-        positional_index += 1;
-        index += 1;
-    }
-    true
-}
-
-fn is_safe_args_any(
-    args: &[ParsedArg],
-    flags: &HashMap<String, FlagPolicy>,
-    allow_positional: bool,
-    positional_path_from: Option<usize>,
-) -> bool {
-    let mut index = 0;
-    let mut positional_index = 0;
-    let mut options_ended = false;
-    while index < args.len() {
-        let arg = &args[index];
-        let text = arg.text.as_str();
-
-        if !options_ended && text == "--" {
-            if !allow_positional {
-                return false;
-            }
-            options_ended = true;
-            index += 1;
-            continue;
-        }
-
-        if !options_ended && is_long_option(text) {
-            let (name, attached_value) = split_long_option(text);
-            if let Some(policy) = flags.get(name) {
-                let consumed = match policy.arg {
-                    FlagValuePolicy::None => {
-                        if let Some(value) = attached_value
-                            && policy.value_type == FlagValueType::Path
-                            && !is_relative_path_value(value, arg)
-                        {
-                            return false;
-                        }
-                        1
-                    }
-                    FlagValuePolicy::Required => {
-                        if let Some(value) = attached_value {
-                            if value.is_empty() {
-                                return false;
-                            }
-                            if policy.value_type == FlagValueType::Path
-                                && !is_relative_path_value(value, arg)
-                            {
-                                return false;
-                            }
-                            1
-                        } else if index + 1 < args.len()
-                            && !is_flag_like(args[index + 1].text.as_str())
-                        {
-                            if policy.value_type == FlagValueType::Path
-                                && !is_relative_path_arg(&args[index + 1])
-                            {
-                                return false;
-                            }
-                            2
-                        } else {
-                            1
-                        }
-                    }
-                    FlagValuePolicy::Optional => {
-                        if let Some(value) = attached_value {
-                            if value.is_empty() {
-                                return false;
-                            }
-                            if policy.value_type == FlagValueType::Path
-                                && !is_relative_path_value(value, arg)
-                            {
-                                return false;
-                            }
-                            1
-                        } else if index + 1 < args.len()
-                            && !is_flag_like(args[index + 1].text.as_str())
-                        {
-                            if policy.value_type == FlagValueType::Path
-                                && !is_relative_path_arg(&args[index + 1])
-                            {
-                                return false;
-                            }
-                            2
-                        } else {
-                            1
-                        }
-                    }
-                };
-                index += consumed;
-                continue;
-            }
-            index += 1;
-            continue;
-        }
-
         if !options_ended && is_short_option(text) {
-            let consumed = match parse_short_options_any(arg, index, args, flags) {
+            let consumed = match parse_short_options(arg, index, args, flags, mode) {
                 Some(consumed) => consumed,
                 None => return false,
             };
@@ -404,11 +254,96 @@ fn split_long_option(arg: &str) -> (&str, Option<&str>) {
     }
 }
 
-fn parse_short_options_allowlist(
+fn consume_long_option(
     token: &ParsedArg,
     index: usize,
     args: &[ParsedArg],
     flags: &HashMap<String, FlagPolicy>,
+    mode: ArgMode,
+) -> Option<usize> {
+    let (name, attached_value) = split_long_option(token.text.as_str());
+    let policy = match flags.get(name) {
+        Some(policy) => policy,
+        None => {
+            return if mode == ArgMode::AllowAny {
+                Some(1)
+            } else {
+                None
+            };
+        }
+    };
+    match policy.arg {
+        FlagValuePolicy::None => {
+            if let Some(value) = attached_value {
+                if mode == ArgMode::AllowAny {
+                    if policy.value_type == FlagValueType::Path
+                        && !is_relative_path_value(value, token)
+                    {
+                        return None;
+                    }
+                    return Some(1);
+                }
+                return None;
+            }
+            Some(1)
+        }
+        FlagValuePolicy::Required => {
+            if let Some(value) = attached_value {
+                if value.is_empty() {
+                    return None;
+                }
+                if policy.value_type == FlagValueType::Path && !is_relative_path_value(value, token)
+                {
+                    return None;
+                }
+                return Some(1);
+            }
+            if index + 1 < args.len()
+                && (mode == ArgMode::AllowList || !is_flag_like(args[index + 1].text.as_str()))
+            {
+                if policy.value_type == FlagValueType::Path
+                    && !is_relative_path_arg(&args[index + 1])
+                {
+                    return None;
+                }
+                return Some(2);
+            }
+            if mode == ArgMode::AllowAny {
+                Some(1)
+            } else {
+                None
+            }
+        }
+        FlagValuePolicy::Optional => {
+            if let Some(value) = attached_value {
+                if value.is_empty() {
+                    return None;
+                }
+                if policy.value_type == FlagValueType::Path && !is_relative_path_value(value, token)
+                {
+                    return None;
+                }
+                return Some(1);
+            }
+            if index + 1 < args.len() && !is_flag_like(args[index + 1].text.as_str()) {
+                if policy.value_type == FlagValueType::Path
+                    && !is_relative_path_arg(&args[index + 1])
+                {
+                    return None;
+                }
+                return Some(2);
+            }
+            Some(1)
+        }
+    }
+}
+
+fn parse_short_options(
+    token: &ParsedArg,
+    index: usize,
+    args: &[ParsedArg],
+    flags: &HashMap<String, FlagPolicy>,
+    mode: ArgMode,
 ) -> Option<usize> {
     let body = token.text.strip_prefix('-')?;
     let mut offset = 0;
@@ -417,11 +352,31 @@ fn parse_short_options_allowlist(
         let ch = iter.next()?;
         let ch_len = ch.len_utf8();
         let name = format!("-{ch}");
-        let policy = flags.get(&name)?;
         let remainder = &body[offset + ch_len..];
+        let policy = match flags.get(&name) {
+            Some(policy) => policy,
+            None => {
+                if mode == ArgMode::AllowAny {
+                    if remainder.starts_with('=') {
+                        return Some(1);
+                    }
+                    offset += ch_len;
+                    continue;
+                }
+                return None;
+            }
+        };
         match policy.arg {
             FlagValuePolicy::None => {
-                if remainder.starts_with('=') {
+                if let Some(value) = remainder.strip_prefix('=') {
+                    if mode == ArgMode::AllowAny {
+                        if policy.value_type == FlagValueType::Path
+                            && !is_relative_path_value(value, token)
+                        {
+                            return None;
+                        }
+                        return Some(1);
+                    }
                     return None;
                 }
                 offset += ch_len;
@@ -446,114 +401,20 @@ fn parse_short_options_allowlist(
                     }
                     return Some(1);
                 }
-                if index + 1 < args.len() {
+                if index + 1 < args.len()
+                    && (mode == ArgMode::AllowList || !is_flag_like(args[index + 1].text.as_str()))
+                {
                     if policy.value_type == FlagValueType::Path
                         && !is_relative_path_arg(&args[index + 1])
                     {
                         return None;
                     }
                     return Some(2);
+                }
+                if mode == ArgMode::AllowAny {
+                    return Some(1);
                 }
                 return None;
-            }
-            FlagValuePolicy::Optional => {
-                if let Some(value) = remainder.strip_prefix('=') {
-                    if value.is_empty() {
-                        return None;
-                    }
-                    if policy.value_type == FlagValueType::Path
-                        && !is_relative_path_value(value, token)
-                    {
-                        return None;
-                    }
-                    return Some(1);
-                }
-                if !remainder.is_empty() {
-                    if policy.value_type == FlagValueType::Path
-                        && !is_relative_path_value(remainder, token)
-                    {
-                        return None;
-                    }
-                    return Some(1);
-                }
-                if index + 1 < args.len() && !is_flag_like(args[index + 1].text.as_str()) {
-                    if policy.value_type == FlagValueType::Path
-                        && !is_relative_path_arg(&args[index + 1])
-                    {
-                        return None;
-                    }
-                    return Some(2);
-                }
-                return Some(1);
-            }
-        }
-    }
-    Some(1)
-}
-
-fn parse_short_options_any(
-    token: &ParsedArg,
-    index: usize,
-    args: &[ParsedArg],
-    flags: &HashMap<String, FlagPolicy>,
-) -> Option<usize> {
-    let body = token.text.strip_prefix('-')?;
-    let mut offset = 0;
-    while offset < body.len() {
-        let mut iter = body[offset..].chars();
-        let ch = iter.next()?;
-        let ch_len = ch.len_utf8();
-        let name = format!("-{ch}");
-        let policy = flags.get(&name);
-        let remainder = &body[offset + ch_len..];
-        let Some(policy) = policy else {
-            if remainder.starts_with('=') {
-                return Some(1);
-            }
-            offset += ch_len;
-            continue;
-        };
-        match policy.arg {
-            FlagValuePolicy::None => {
-                if let Some(value) = remainder.strip_prefix('=') {
-                    if policy.value_type == FlagValueType::Path
-                        && !is_relative_path_value(value, token)
-                    {
-                        return None;
-                    }
-                    return Some(1);
-                }
-                offset += ch_len;
-            }
-            FlagValuePolicy::Required => {
-                if let Some(value) = remainder.strip_prefix('=') {
-                    if value.is_empty() {
-                        return None;
-                    }
-                    if policy.value_type == FlagValueType::Path
-                        && !is_relative_path_value(value, token)
-                    {
-                        return None;
-                    }
-                    return Some(1);
-                }
-                if !remainder.is_empty() {
-                    if policy.value_type == FlagValueType::Path
-                        && !is_relative_path_value(remainder, token)
-                    {
-                        return None;
-                    }
-                    return Some(1);
-                }
-                if index + 1 < args.len() && !is_flag_like(args[index + 1].text.as_str()) {
-                    if policy.value_type == FlagValueType::Path
-                        && !is_relative_path_arg(&args[index + 1])
-                    {
-                        return None;
-                    }
-                    return Some(2);
-                }
-                return Some(1);
             }
             FlagValuePolicy::Optional => {
                 if let Some(value) = remainder.strip_prefix('=') {
