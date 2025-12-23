@@ -260,11 +260,14 @@ impl<'a> Content for Bash<'a> {
             return self.input.height(width);
         }
         let height_input = self.input.height(width);
-        let tab_width = tab_panel_width(width);
-        let body_width = width.saturating_sub(tab_width).max(1);
-        let marker_width = output_marker_width(self.state.view);
-        let text_width = body_width.saturating_sub(marker_width).max(1);
-        let height_output = self.output_text.line_count(text_width).max(1);
+        let height_tabs = 3;
+
+        let width_tab = tab_panel_width(width);
+        let width_body = width.saturating_sub(width_tab).max(1);
+        let width_marker = output_marker_width(self.state.view);
+        let width_text = width_body.saturating_sub(width_marker).max(1);
+        let height_output = self.output_text.line_count(width_text).max(height_tabs);
+
         height_input + height_output
     }
 
