@@ -1,14 +1,13 @@
 [[commands]]
 name = "cat"
 allow_any = true
+allow_positional = true
+positional_path_from = 0
 
 [[commands]]
 name = "cd"
-allow_any = true
-
-[[commands]]
-name = "cut"
-allow_any = true
+allow_positional = true
+positional_path_from = 0
 
 [[commands]]
 name = "echo"
@@ -25,10 +24,14 @@ allow_any = true
 [[commands]]
 name = "grep"
 allow_any = true
+allow_positional = true
+positional_path_from = 1
 
 [[commands]]
 name = "head"
 allow_any = true
+allow_positional = true
+positional_path_from = 0
 
 [[commands]]
 name = "id"
@@ -37,14 +40,20 @@ allow_any = true
 [[commands]]
 name = "ls"
 allow_any = true
+allow_positional = true
+positional_path_from = 0
+flags = [
+  { name = "-a", arg = "none" },
+  { name = "-l", arg = "none" },
+  { name = "-n", arg = "none" },
+  { name = "--color", arg = "optional" },
+]
 
 [[commands]]
 name = "nl"
 allow_any = true
-
-[[commands]]
-name = "paste"
-allow_any = true
+allow_positional = true
+positional_path_from = 0
 
 [[commands]]
 name = "pwd"
@@ -53,22 +62,8 @@ allow_any = true
 [[commands]]
 name = "tail"
 allow_any = true
-
-[[commands]]
-name = "rev"
-allow_any = true
-
-[[commands]]
-name = "seq"
-allow_any = true
-
-[[commands]]
-name = "stat"
-allow_any = true
-
-[[commands]]
-name = "tr"
-allow_any = true
+allow_positional = true
+positional_path_from = 0
 
 [[commands]]
 name = "true"
@@ -81,10 +76,14 @@ allow_any = true
 [[commands]]
 name = "uniq"
 allow_any = true
+allow_positional = true
+positional_path_from = 0
 
 [[commands]]
 name = "wc"
 allow_any = true
+allow_positional = true
+positional_path_from = 0
 
 [[commands]]
 name = "which"
@@ -92,4 +91,34 @@ allow_any = true
 
 [[commands]]
 name = "whoami"
+allow_any = true
+
+[[commands]]
+command = ["git", "branch"]
+allow_any = true
+
+[[commands]]
+command = ["git", "status"]
+allow_any = true
+
+[[commands]]
+command = ["git", "log"]
+allow_any = true
+allow_positional = true
+positional_path_from = 0
+
+[[commands]]
+command = ["git", "diff"]
+allow_any = true
+allow_positional = true
+positional_path_from = 0
+
+[[commands]]
+command = ["git", "show"]
+allow_any = true
+allow_positional = true
+positional_path_from = 0
+
+[[commands]]
+command = ["cargo", "check"]
 allow_any = true
