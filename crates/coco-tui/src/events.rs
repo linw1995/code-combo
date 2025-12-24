@@ -21,7 +21,11 @@ pub enum AskEvent {
     Bot,
     // Below events come from Bot
     ToolUsePermission(String),
-    TextEdit { id: String, edit: TextEdit },
+    TextEdit {
+        id: String,
+        edit: TextEdit,
+        auto_accept: bool,
+    },
 }
 
 impl From<AskEvent> for Event {

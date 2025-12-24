@@ -10,7 +10,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     prelude::*,
     symbols::border,
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Borders},
 };
 
@@ -56,6 +56,8 @@ struct Inner {
 
     state: ChatState,
     focus: Focus,
+    #[serde(default)]
+    auto_accept_edits: bool,
     pending_chats: Vec<ChatBlock>,
     #[serde(with = "time::serde::rfc3339")]
     created_at: time::OffsetDateTime,
@@ -71,6 +73,7 @@ impl Default for Inner {
             messages: vec![],
             state: ChatState::Ready,
             focus: Focus::Input,
+            auto_accept_edits: false,
             pending_chats: Vec::new(),
             created_at: now,
             updated_at: now,
@@ -408,13 +411,25 @@ impl Chat<'static> {
         }
     }
 
+    fn toggle_auto_accept_edits(&mut self) {
+        let enabled = {
+            let mut state = self.state.write();
+            state.auto_accept_edits = !state.auto_accept_edits;
+            state.auto_accept_edits
+        };
+        self.agent.set_auto_accept_edits(enabled);
+        global::trigger_schedule_session_save();
+    }
+
     fn block_bottom_with_shortcuts_desc<'a>(&self, mut block: Block<'a>) -> Block<'a> {
         block = block.title_bottom(Line::from(""));
         match self.state.focus {
             Focus::Input => block
+                .title_bottom(shortcuts_desc(&[("AutoAccept", "S-Tab")]))
                 .title_bottom(shortcuts_desc(&[("Blur", "Esc")]))
                 .title_bottom(shortcuts_desc(&[("Submit", "CR")])),
             Focus::InputBlur => block
+                .title_bottom(shortcuts_desc(&[("AutoAccept", "S-Tab")]))
                 .title_bottom(shortcuts_desc(&[("Focus", "CR")]))
                 .title_bottom(shortcuts_desc(&[("Commands", "C-p")]))
                 .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")])),
@@ -424,6 +439,7 @@ impl Chat<'static> {
                     block = block.title_bottom(shortcuts_desc(&[("Back", "Esc")]));
                 }
                 block
+                    .title_bottom(shortcuts_desc(&[("AutoAccept", "S-Tab")]))
                     .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")]))
                     .title_bottom(shortcuts_desc(&[("Scroll Up", "C-y"), ("Down", "C-e")]))
                     .title_bottom(shortcuts_desc(&[("Scroll+ Up", "C-u"), ("Down", "C-d")]))
@@ -459,6 +475,20 @@ impl Chat<'static> {
         .bold()
     }
 
+    fn auto_accept_indicator(&self) -> Line<'static> {
+        let label = if self.state.auto_accept_edits {
+            "AutoAccept: ON"
+        } else {
+            "AutoAccept: OFF"
+        };
+        let style = if self.state.auto_accept_edits {
+            Style::default().green()
+        } else {
+            Style::default().dark_gray()
+        };
+        Line::from(Span::styled(format!(" {label} "), style))
+    }
+
     fn reject_text_edit(
         &mut self,
         id: String,
@@ -471,7 +501,15 @@ impl Chat<'static> {
         let new_edit = edit.reject_hunk(context_radius, hunk_idx);
         if let Some(edit) = new_edit {
             // Notify components that text edits have been updated and need confirmation again
-            tx.send(AskEvent::TextEdit { id, edit }.into()).unwrap();
+            tx.send(
+                AskEvent::TextEdit {
+                    id,
+                    edit,
+                    auto_accept: false,
+                }
+                .into(),
+            )
+            .unwrap();
         } else {
             // Move focus back to Input when the tool interaction ends.
             if let Some(idx) = self.messages.locate_tool_message(&id)
@@ -507,15 +545,19 @@ impl Chat<'static> {
             self.save_now();
         }
 
+        let auto_accept_edits = self.state.auto_accept_edits;
+
         // 2. Clear messages
         self.messages.clear();
 
         // 3. Reset state
         *self.state.write() = Inner {
             focus: Focus::InputBlur,
+            auto_accept_edits,
             ..Default::default()
         };
         self.cancellation_guard.reset();
+        self.agent.set_auto_accept_edits(auto_accept_edits);
 
         // 4. Reset focus to Input from InputBlur to trigger the input component
         self.update_focus(Focus::Input);
@@ -545,6 +587,7 @@ impl Persistable for Chat<'static> {
     fn load(session: Session) -> Result<Self> {
         let (mut state, session): (Inner, Session) = session::load_related(session)?;
         let mut inst = Self::new(global::config_sync());
+        let auto_accept_edits = state.auto_accept_edits;
 
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current()
@@ -553,6 +596,7 @@ impl Persistable for Chat<'static> {
         });
         inst.state = State::new(state);
         inst.messages = Messages::load(session)?;
+        inst.agent.set_auto_accept_edits(auto_accept_edits);
         Ok(inst)
     }
 }
@@ -602,9 +646,20 @@ impl Component for Chat<'static> {
             Event::Answer(AnswerEvent::Cancelled) => {
                 self.set_ready();
             }
-            Event::Ask(AskEvent::ToolUsePermission(_) | AskEvent::TextEdit { .. }) => {
+            Event::Ask(AskEvent::ToolUsePermission(_)) => {
                 if let Some(idx) = self.messages.on_tool_event(event) {
                     // Move focus to tool use message when permission is required
+                    self.update_focus(Focus::Messages);
+                    self.messages.focus(idx);
+                }
+                // Trigger session save after ask event
+                global::trigger_schedule_session_save();
+            }
+            Event::Ask(AskEvent::TextEdit { auto_accept, .. }) => {
+                if let Some(idx) = self.messages.on_tool_event(event)
+                    && !*auto_accept
+                {
+                    // Move focus to tool use message when confirmation is required
                     self.update_focus(Focus::Messages);
                     self.messages.focus(idx);
                 }
@@ -655,6 +710,11 @@ impl Component for Chat<'static> {
         use Focus::*;
         use KeyCode::*;
         use KeyModifiers as KM;
+
+        if matches!(key.code, BackTab) {
+            self.toggle_auto_accept_edits();
+            return;
+        }
 
         let focus = &self.state.focus;
         if matches!(
@@ -863,6 +923,7 @@ impl Component for Chat<'static> {
         bottom_block = bottom_block
             .title_bottom(Line::from(""))
             .title_bottom(self.widget_state_indicator());
+        bottom_block = bottom_block.title_bottom(self.auto_accept_indicator());
         if let Some(line) = self.ctrl_c_reminder_line() {
             bottom_block = bottom_block.title_bottom(line);
         }
@@ -1191,6 +1252,7 @@ async fn task_chat(mut agent: Agent, content: ChatContent, cancel_token: Cancell
 async fn task_tool_use(mut agent: Agent, tool_use: ToolUse, cancel_token: CancellationToken) {
     let tx = global::event_tx();
     let code_combo::ToolUse { id, name, input } = tool_use.clone();
+    let auto_accept = agent.auto_accept_edits();
     let _ = agent
         .execute_with_output(
             &id,
@@ -1217,6 +1279,7 @@ async fn task_tool_use(mut agent: Agent, tool_use: ToolUse, cancel_token: Cancel
                         AskEvent::TextEdit {
                             id: id.clone(),
                             edit,
+                            auto_accept,
                         }
                         .into(),
                     )
@@ -1286,7 +1349,15 @@ async fn task_apply_text_edit(
                 .unwrap();
             } else if let Some(edit) = new_edit {
                 // Notify components that text edits have been updated and need confirmation again
-                tx.send(AskEvent::TextEdit { id, edit }.into()).unwrap();
+                tx.send(
+                    AskEvent::TextEdit {
+                        id,
+                        edit,
+                        auto_accept: false,
+                    }
+                    .into(),
+                )
+                .unwrap();
             }
         }
         _ => (),

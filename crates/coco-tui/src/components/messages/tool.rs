@@ -171,10 +171,23 @@ impl Component for Tool {
 
     fn handle_event(&mut self, event: &Event) {
         match event {
-            Event::Ask(AskEvent::ToolUsePermission(id) | AskEvent::TextEdit { id, .. }) => {
+            Event::Ask(AskEvent::ToolUsePermission(id)) => {
                 if self.tool_use_id() == id {
                     debug!(?event, "state change to pending confirmation");
                     self.update_state(ToolState::PendingConfirmation);
+                    handle_component_event!(self, event);
+                }
+            }
+            Event::Ask(AskEvent::TextEdit {
+                id, auto_accept, ..
+            }) => {
+                if self.tool_use_id() == id {
+                    if *auto_accept {
+                        self.update_state(ToolState::Executing);
+                    } else {
+                        debug!(?event, "state change to pending confirmation");
+                        self.update_state(ToolState::PendingConfirmation);
+                    }
                     handle_component_event!(self, event);
                 }
             }
