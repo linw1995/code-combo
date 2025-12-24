@@ -34,6 +34,7 @@ pub use tool::Tool;
 pub struct Messages {
     messages: State<Vec<Message>>,
     focus: State<Option<usize>>,
+    last_focus: Option<usize>,
 
     // scrolling
     viewport_height: u16,
@@ -66,6 +67,7 @@ impl Messages {
     pub fn clear(&mut self) {
         self.messages.write().clear();
         *self.focus.write() = None;
+        self.last_focus = None;
         *self.offset.write() = 0;
         self.total_height = 0;
     }
@@ -198,6 +200,46 @@ impl Messages {
             _ => (),
         }
         None
+    }
+
+    fn ensure_focus_visible(&mut self, heights: &[usize]) {
+        let Some(idx) = self.focus.get() else {
+            return;
+        };
+        if self.total_height <= self.viewport_height {
+            if self.offset.get() != 0 {
+                *self.offset.write() = 0;
+            }
+            return;
+        }
+        if idx >= heights.len() {
+            return;
+        }
+
+        let mut message_top = 0u16;
+        for height in heights.iter().take(idx) {
+            message_top = message_top.saturating_add(*height as u16);
+        }
+        let message_height = heights[idx] as u16;
+        let message_bottom = message_top.saturating_add(message_height);
+
+        let (visible_start, _) = self.scroll_position();
+        let visible_end = visible_start.saturating_add(self.viewport_height);
+        let max_offset = self.total_height.saturating_sub(self.viewport_height);
+
+        let desired_top = if message_top < visible_start {
+            message_top
+        } else if message_bottom > visible_end {
+            message_bottom.saturating_sub(self.viewport_height)
+        } else {
+            return;
+        };
+        let desired_top = min(desired_top, max_offset);
+        let desired_offset = max_offset.saturating_sub(desired_top);
+
+        if desired_offset != self.offset.get() {
+            *self.offset.write() = desired_offset;
+        }
     }
 
     fn draw_scrollbar(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
@@ -363,14 +405,18 @@ impl Component for Messages {
             .map(|m| m.height(area.width - border_width - scrollbar_width))
             .collect();
         self.total_height = heights.iter().sum::<usize>() as u16;
+        self.viewport_height = area.height;
+        let focus = self.focus.get();
+        if focus != self.last_focus {
+            self.ensure_focus_visible(&heights);
+            self.last_focus = focus;
+        }
 
         if self.total_height > area.height {
             let [area_list, area_bar] =
                 Layout::horizontal([Min(10), Length(scrollbar_width)]).areas(area);
             trace!(?area_list, ?area_bar, "print messages area");
 
-            // Store the actual height of viewport
-            self.viewport_height = area.height;
             self.virtual_draw(frame, area_list, &heights)?;
             self.draw_scrollbar(frame, area_bar)?;
         } else {
@@ -637,5 +683,39 @@ mod tests {
             .draw(|frame| app.draw(frame, offset_area).unwrap())
             .unwrap();
         assert_eq!(terminal.backend().buffer(), &expected);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scroll_focus_into_view() {
+        let mut app = Messages::default();
+        app.extend(
+            [
+                Message::user(Plain::new("Hello".to_string()).into()),
+                Message::user(Plain::new("World".to_string()).into()),
+                Message::user(Plain::new("Again".to_string()).into()),
+            ]
+            .into_iter(),
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(20, 4)).unwrap();
+        terminal
+            .draw(|frame| app.draw(frame, frame.area()).unwrap())
+            .unwrap();
+        let (position, _) = app.scroll_position();
+        assert_eq!(position, 2);
+
+        app.focus(0);
+        terminal
+            .draw(|frame| app.draw(frame, frame.area()).unwrap())
+            .unwrap();
+        let (position, _) = app.scroll_position();
+        assert_eq!(position, 0);
+
+        app.focus(2);
+        terminal
+            .draw(|frame| app.draw(frame, frame.area()).unwrap())
+            .unwrap();
+        let (position, _) = app.scroll_position();
+        assert_eq!(position, 2);
     }
 }
