@@ -69,6 +69,8 @@ struct Inner {
     #[serde(default)]
     pending_apply_diff: Option<String>,
     #[serde(default)]
+    auto_accept_pending: bool,
+    #[serde(default)]
     result_message: Option<String>,
     #[serde(default)]
     result_is_error: Option<bool>,
@@ -313,6 +315,7 @@ impl<'a> StrReplace<'a> {
                 applied_diffs: Vec::new(),
                 rejected_diffs: Vec::new(),
                 pending_apply_diff: None,
+                auto_accept_pending: false,
                 result_message: None,
                 result_is_error: None,
             }),
@@ -337,6 +340,7 @@ impl<'a> StrReplace<'a> {
         state.edit = Some(edit);
         state.display_state = DisplayState::Preview;
         state.collapsed = false;
+        state.auto_accept_pending = false;
         clamp_hunk_idx(&mut state);
         drop(state);
         self.rebuild_view();
@@ -368,6 +372,29 @@ impl<'a> StrReplace<'a> {
         }
         let idx = state.hunk_idx.min(total - 1);
         build_hunk_diff(edit, state.context_radius, idx)
+    }
+
+    fn record_auto_accept_diffs(&mut self, edit: &TextEdit) {
+        let context_radius = self.state.context_radius;
+        let total = hunk_total(Some(edit), context_radius);
+        let mut diffs = Vec::with_capacity(total);
+        for idx in 0..total {
+            if let Some(diff) = build_hunk_diff(edit, context_radius, idx)
+                && !diff.is_empty()
+            {
+                diffs.push(diff);
+            }
+        }
+
+        let mut state = self.state.write();
+        state.applied_diffs = diffs;
+        state.rejected_diffs.clear();
+        state.pending_apply_diff = None;
+        state.edit = None;
+        state.result_view = ResultView::Applied;
+        state.auto_accept_pending = true;
+        drop(state);
+        self.rebuild_view();
     }
 
     fn queue_pending_apply(&mut self) -> bool {
@@ -612,9 +639,15 @@ impl Component for StrReplace<'static> {
 
     fn handle_event(&mut self, event: &Event) {
         match event {
-            Event::Ask(AskEvent::TextEdit { edit, .. }) => {
+            Event::Ask(AskEvent::TextEdit {
+                edit, auto_accept, ..
+            }) => {
                 self.finalize_pending_apply(false);
-                self.update_text_edit(edit.clone());
+                if *auto_accept {
+                    self.record_auto_accept_diffs(edit);
+                } else {
+                    self.update_text_edit(edit.clone());
+                }
             }
             Event::Answer(AnswerEvent::ToolResult {
                 is_error, output, ..
@@ -628,6 +661,13 @@ impl Component for StrReplace<'static> {
                     }
                 };
                 let mut state = self.state.write();
+                if state.auto_accept_pending {
+                    if *is_error && !state.applied_diffs.is_empty() {
+                        let applied = std::mem::take(&mut state.applied_diffs);
+                        state.rejected_diffs.extend(applied);
+                    }
+                    state.auto_accept_pending = false;
+                }
                 state.result_message = message;
                 state.result_is_error = Some(*is_error);
                 state.display_state = DisplayState::Result;
@@ -833,11 +873,31 @@ mod tests {
         widget.handle_event(&Event::Ask(AskEvent::TextEdit {
             id: "tool_1".to_string(),
             edit: text_edit_two_hunks(),
+            auto_accept: false,
         }));
 
         assert_eq!(widget.state.applied_diffs.len(), 1);
         assert!(widget.state.pending_apply_diff.is_none());
         assert_eq!(widget.state.display_state, DisplayState::Preview);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn str_replace_auto_accept_collects_applied_diffs() {
+        let tool_use = tool_use();
+        let mut widget = StrReplace::new(&tool_use);
+        let edit = text_edit_two_hunks();
+        let total = hunk_total(Some(&edit), widget.state.context_radius);
+
+        widget.handle_event(&Event::Ask(AskEvent::TextEdit {
+            id: "tool_1".to_string(),
+            edit,
+            auto_accept: true,
+        }));
+
+        assert_eq!(widget.state.applied_diffs.len(), total);
+        assert!(widget.state.rejected_diffs.is_empty());
+        assert!(widget.state.pending_apply_diff.is_none());
+        assert!(widget.state.edit.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -127,6 +127,10 @@ impl Executor {
         self.auto_accept_edits = enabled;
     }
 
+    pub fn auto_accept_edits(&self) -> bool {
+        self.auto_accept_edits
+    }
+
     pub fn take_once_permission(&mut self, name: &str, id: &str) -> bool {
         if let Some(pcl) = self.tools_once_pcl.get_mut(name) {
             let mut granted_idx: Option<usize> = None;
@@ -239,20 +243,18 @@ impl Executor {
             }
             output = tool.execute(input) => output,
         };
-        let output = if self.auto_accept_edits {
-            match output {
-                Ok(tools::Output::TextEdit(edit)) => {
-                    let applied = AppliedTextEdit {
-                        path: edit.path.as_path(),
-                        text: edit.new_text.as_str(),
-                    };
-                    tool.execute(Input::AppliedTextEdit(applied)).await
-                }
-                other => other,
-            }
-        } else {
-            output
-        };
+        if self.auto_accept_edits
+            && let Ok(tools::Output::TextEdit(edit)) = output
+        {
+            on_output(Output::TextEdit(edit.clone()));
+            let applied = AppliedTextEdit {
+                path: edit.path.as_path(),
+                text: edit.new_text.as_str(),
+            };
+            let applied_output = tool.execute(Input::AppliedTextEdit(applied)).await;
+            on_output(applied_output.into());
+            return Ok(ExecuteStatus::Completed);
+        }
         on_output(output.into());
         Ok(ExecuteStatus::Completed)
     }

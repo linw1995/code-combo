@@ -501,7 +501,15 @@ impl Chat<'static> {
         let new_edit = edit.reject_hunk(context_radius, hunk_idx);
         if let Some(edit) = new_edit {
             // Notify components that text edits have been updated and need confirmation again
-            tx.send(AskEvent::TextEdit { id, edit }.into()).unwrap();
+            tx.send(
+                AskEvent::TextEdit {
+                    id,
+                    edit,
+                    auto_accept: false,
+                }
+                .into(),
+            )
+            .unwrap();
         } else {
             // Move focus back to Input when the tool interaction ends.
             if let Some(idx) = self.messages.locate_tool_message(&id)
@@ -638,9 +646,20 @@ impl Component for Chat<'static> {
             Event::Answer(AnswerEvent::Cancelled) => {
                 self.set_ready();
             }
-            Event::Ask(AskEvent::ToolUsePermission(_) | AskEvent::TextEdit { .. }) => {
+            Event::Ask(AskEvent::ToolUsePermission(_)) => {
                 if let Some(idx) = self.messages.on_tool_event(event) {
                     // Move focus to tool use message when permission is required
+                    self.update_focus(Focus::Messages);
+                    self.messages.focus(idx);
+                }
+                // Trigger session save after ask event
+                global::trigger_schedule_session_save();
+            }
+            Event::Ask(AskEvent::TextEdit { auto_accept, .. }) => {
+                if let Some(idx) = self.messages.on_tool_event(event)
+                    && !*auto_accept
+                {
+                    // Move focus to tool use message when confirmation is required
                     self.update_focus(Focus::Messages);
                     self.messages.focus(idx);
                 }
@@ -1233,6 +1252,7 @@ async fn task_chat(mut agent: Agent, content: ChatContent, cancel_token: Cancell
 async fn task_tool_use(mut agent: Agent, tool_use: ToolUse, cancel_token: CancellationToken) {
     let tx = global::event_tx();
     let code_combo::ToolUse { id, name, input } = tool_use.clone();
+    let auto_accept = agent.auto_accept_edits();
     let _ = agent
         .execute_with_output(
             &id,
@@ -1259,6 +1279,7 @@ async fn task_tool_use(mut agent: Agent, tool_use: ToolUse, cancel_token: Cancel
                         AskEvent::TextEdit {
                             id: id.clone(),
                             edit,
+                            auto_accept,
                         }
                         .into(),
                     )
@@ -1328,7 +1349,15 @@ async fn task_apply_text_edit(
                 .unwrap();
             } else if let Some(edit) = new_edit {
                 // Notify components that text edits have been updated and need confirmation again
-                tx.send(AskEvent::TextEdit { id, edit }.into()).unwrap();
+                tx.send(
+                    AskEvent::TextEdit {
+                        id,
+                        edit,
+                        auto_accept: false,
+                    }
+                    .into(),
+                )
+                .unwrap();
             }
         }
         _ => (),
