@@ -83,6 +83,10 @@ impl Agent {
         self.executor.grant_session(&tool_use.name, &tool_use.input)
     }
 
+    pub fn set_auto_accept_edits(&mut self, enabled: bool) {
+        self.executor.set_auto_accept_edits(enabled);
+    }
+
     pub async fn execute<'a>(
         &mut self,
         id: &str,

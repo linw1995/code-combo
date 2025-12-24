@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::bash_executor;
 use crate::{
-    OutputChunk, TextEdit, error,
+    AppliedTextEdit, OutputChunk, TextEdit, error,
     tools::{
         self, BASH_TOOL_NAME, BashInput, BashTool, Final, LIST_TOOL_NAME, ListTool, READ_TOOL_NAME,
         ReadTool, STR_REPLACE_TOOL_NAME, StrReplaceTool, Tool, run_bash_chunked,
@@ -22,6 +22,7 @@ pub struct Executor {
     tools_pcl: HashMap<String, Vec<(String, PermissionControl)>>,
     tools_once_pcl: HashMap<String, Vec<String>>,
     bash_session_allowlist: HashSet<String>,
+    auto_accept_edits: bool,
 }
 
 lazy_static! {
@@ -52,6 +53,7 @@ impl Default for Executor {
             tools_once_pcl: HashMap::default(),
             tools: DEFAULT_TOOLS.clone(),
             bash_session_allowlist: HashSet::default(),
+            auto_accept_edits: false,
         }
     }
 }
@@ -121,6 +123,10 @@ fn bash_permission_key(input: &Input<'_>) -> Option<String> {
 }
 
 impl Executor {
+    pub fn set_auto_accept_edits(&mut self, enabled: bool) {
+        self.auto_accept_edits = enabled;
+    }
+
     pub fn take_once_permission(&mut self, name: &str, id: &str) -> bool {
         if let Some(pcl) = self.tools_once_pcl.get_mut(name) {
             let mut granted_idx: Option<usize> = None;
@@ -233,6 +239,20 @@ impl Executor {
             }
             output = tool.execute(input) => output,
         };
+        let output = if self.auto_accept_edits {
+            match output {
+                Ok(tools::Output::TextEdit(edit)) => {
+                    let applied = AppliedTextEdit {
+                        path: edit.path.as_path(),
+                        text: edit.new_text.as_str(),
+                    };
+                    tool.execute(Input::AppliedTextEdit(applied)).await
+                }
+                other => other,
+            }
+        } else {
+            output
+        };
         on_output(output.into());
         Ok(ExecuteStatus::Completed)
     }
@@ -290,6 +310,7 @@ impl Executor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::StrReplaceInput;
 
     fn bash_input_value(command: &str) -> serde_json::Value {
         serde_json::to_value(BashInput {
@@ -341,5 +362,41 @@ mod tests {
                 .any(|out| matches!(out, Output::AskPermission)),
             "did not expect permission request after granting session"
         );
+    }
+
+    #[tokio::test]
+    async fn auto_accept_text_edit_applies_changes() {
+        let cwd = std::env::current_dir().expect("get cwd");
+        let dir = tempfile::Builder::new()
+            .prefix("auto-accept")
+            .tempdir_in(&cwd)
+            .expect("create tempdir");
+        let path = dir.path().join("demo.txt");
+        tokio::fs::write(&path, "hello\n")
+            .await
+            .expect("write test file");
+        let rel_path = path.strip_prefix(&cwd).expect("strip prefix");
+
+        let input = StrReplaceInput {
+            path: rel_path.to_string_lossy().to_string(),
+            old_str: "hello\n".to_string(),
+            new_str: "world\n".to_string(),
+            expected_replacements: 1,
+        };
+        let input_value = serde_json::to_value(input).expect("serialize input");
+
+        let mut executor = Executor::default();
+        executor.set_auto_accept_edits(true);
+
+        let output = executor
+            .execute("1", STR_REPLACE_TOOL_NAME, Input::Starter(input_value))
+            .await
+            .expect("execute str_replace");
+        assert!(matches!(output, Output::Success(_)));
+
+        let updated = tokio::fs::read_to_string(&path)
+            .await
+            .expect("read updated file");
+        assert_eq!(updated, "world\n");
     }
 }
