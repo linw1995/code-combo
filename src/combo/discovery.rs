@@ -9,11 +9,25 @@ pub struct DiscoverResult {
     pub starters: Vec<Starter>,
     pub cancelled: bool,
 }
-
-pub async fn discover_with_cancel(
-    combo_dir: &Path,
+pub async fn discover_starters(
+    combo_dirs: &[&Path],
     cancel_token: CancellationToken,
 ) -> DiscoverResult {
+    let mut starters = Vec::new();
+    let mut cancelled = cancel_token.is_cancelled();
+    for combo_dir in combo_dirs {
+        let rv = discover_starter_in(combo_dir, cancel_token.clone()).await;
+        starters.extend(rv.starters);
+        cancelled = rv.cancelled;
+    }
+
+    DiscoverResult {
+        starters,
+        cancelled,
+    }
+}
+
+async fn discover_starter_in(combo_dir: &Path, cancel_token: CancellationToken) -> DiscoverResult {
     let mut starters = Vec::new();
     let mut entries = match tokio::fs::read_dir(combo_dir).await {
         Ok(entries) => entries,

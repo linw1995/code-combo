@@ -2,7 +2,7 @@ use coco_macro::ComponentExt;
 use code_combo::{
     Agent, Block as ChatBlock, Config, Content as ChatContent, Message as ChatMessage, Output,
     SessionEnv, StarterCommand, StarterError, StarterEvent, StopReason, TextEdit, ToolUse,
-    discover_with_cancel,
+    discover_starters,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -943,9 +943,10 @@ async fn task_combo_discover(cancel_token: CancellationToken) {
     let tx = global::event_tx();
     let config = global::config().await;
     let combo_dir = config.combo_dir();
+    let workspace_combo_dir = global::workspace_combo_dir();
 
     tx.send(ComboEvent::Discovering.into()).unwrap();
-    let result = discover_with_cancel(&combo_dir, cancel_token).await;
+    let result = discover_starters(&[&workspace_combo_dir, &combo_dir], cancel_token).await;
     if result.cancelled {
         tx.send(ComboEvent::Cancelled { name: None }.into())
             .unwrap();
@@ -964,9 +965,10 @@ async fn task_combo_execute(name: String, cancel_token: CancellationToken) {
     let tx = global::event_tx();
     let config = global::config().await;
     let combo_dir = config.combo_dir();
+    let workspace_combo_dir = global::workspace_combo_dir();
 
     tx.send(ComboEvent::Discovering.into()).unwrap();
-    let result = discover_with_cancel(&combo_dir, cancel_token.clone()).await;
+    let result = discover_starters(&[&workspace_combo_dir, &combo_dir], cancel_token.clone()).await;
     if result.cancelled || cancel_token.is_cancelled() {
         tx.send(
             ComboEvent::Cancelled {

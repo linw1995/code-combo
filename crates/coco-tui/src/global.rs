@@ -107,6 +107,10 @@ pub fn workspace_dir() -> &'static Path {
     })
 }
 
+pub fn workspace_combo_dir() -> PathBuf {
+    workspace_dir().join(".coco/combos")
+}
+
 #[inline]
 pub fn trigger_schedule_session_save() {
     action_tx().send(Action::schedule_session_save()).ok();
