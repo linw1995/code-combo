@@ -23,6 +23,7 @@ use crate::{
 use super::{Action, AnswerEvent, AskEvent, Component, Content, Event, Message};
 
 mod combo;
+mod fold;
 mod plain;
 mod tool;
 pub use combo::Combo;

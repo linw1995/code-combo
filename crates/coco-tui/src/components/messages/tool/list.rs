@@ -14,6 +14,7 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::super::fold::FoldState;
 use crate::{
     actions::Action,
     components::{Component, Content, ContentComponent, Persistable},
@@ -28,15 +29,8 @@ use crate::{
 struct Inner {
     input: ListInput,
     output: Option<String>,
-    #[serde(default = "default_display_state")]
-    display_state: DisplayState,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-enum DisplayState {
-    Omitted,
-    Collapsed,
-    Expanded,
+    #[serde(default)]
+    display_state: FoldState,
 }
 
 #[derive(ComponentExt, ContentComponentExt)]
@@ -50,10 +44,6 @@ pub struct List<'a> {
 }
 
 const OMITTED_PREVIEW_LINES: usize = 5;
-
-fn default_display_state() -> DisplayState {
-    DisplayState::Omitted
-}
 
 fn generate_input_widget<'a>(input: ListInput) -> Paragraph<'a> {
     let mut lines = vec![];
@@ -87,7 +77,7 @@ impl List<'_> {
             state: State::new(Inner {
                 input,
                 output: None,
-                display_state: DisplayState::Omitted,
+                display_state: FoldState::Preview,
             }),
         }
     }
@@ -105,16 +95,12 @@ impl List<'_> {
 
     fn toggle_display_state(&mut self) {
         let mut state = self.state.write();
-        state.display_state = match state.display_state {
-            DisplayState::Collapsed => DisplayState::Expanded,
-            DisplayState::Expanded => DisplayState::Collapsed,
-            DisplayState::Omitted => DisplayState::Omitted,
-        };
+        state.display_state = state.display_state.toggle();
     }
 
     fn on_blur(&mut self) {
-        if self.state.display_state == DisplayState::Omitted {
-            self.state.write().display_state = DisplayState::Collapsed;
+        if self.state.display_state.is_preview() {
+            self.state.write().display_state.collapse();
         }
     }
 
@@ -136,9 +122,9 @@ impl Content for List<'_> {
             .output_widget
             .as_ref()
             .map(|widget| match self.state.display_state {
-                DisplayState::Collapsed => 0,
-                DisplayState::Expanded => widget.line_count(width),
-                DisplayState::Omitted => {
+                FoldState::Collapsed => 0,
+                FoldState::Expanded => widget.line_count(width),
+                FoldState::Preview => {
                     let height = widget.line_count(width);
                     let indicator = self.omitted_indicator();
                     let indicator_height = indicator.line_count(width);
@@ -157,7 +143,7 @@ impl Content for List<'_> {
         self.output_widget.is_some()
             && matches!(
                 self.state.display_state,
-                DisplayState::Collapsed | DisplayState::Expanded
+                FoldState::Collapsed | FoldState::Expanded
             )
     }
 
@@ -166,15 +152,15 @@ impl Content for List<'_> {
             return block;
         }
         let toggle_text = match self.state.display_state {
-            DisplayState::Collapsed => ("Unfold", "z"),
-            DisplayState::Expanded => ("Fold", "z"),
-            DisplayState::Omitted => return block,
+            FoldState::Collapsed => ("Unfold", "z"),
+            FoldState::Expanded => ("Fold", "z"),
+            FoldState::Preview => return block,
         };
         block.title_bottom(crate::components::shortcuts_desc(&[toggle_text]))
     }
 
     fn reminder_line(&self) -> Option<Line<'static>> {
-        if self.state.display_state == DisplayState::Collapsed {
+        if self.state.display_state.is_collapsed() {
             Some(Line::from(Span::raw(" (folded)").dark_gray()))
         } else {
             None
@@ -238,7 +224,7 @@ impl Component for List<'static> {
             return Ok(());
         };
 
-        if self.state.display_state == DisplayState::Collapsed {
+        if self.state.display_state == FoldState::Collapsed {
             frame.render_widget(&self.input_widget, area);
             return Ok(());
         }
@@ -249,10 +235,10 @@ impl Component for List<'static> {
         frame.render_widget(&self.input_widget, area_input);
 
         match self.state.display_state {
-            DisplayState::Expanded => {
+            FoldState::Expanded => {
                 frame.render_widget(output_widget, area_output);
             }
-            DisplayState::Omitted => {
+            FoldState::Preview => {
                 let height = output_widget.line_count(width);
                 let indicator = self.omitted_indicator();
                 let indicator_height = indicator.line_count(width);
@@ -266,7 +252,7 @@ impl Component for List<'static> {
                     frame.render_widget(output_widget, area_output);
                 }
             }
-            DisplayState::Collapsed => (),
+            FoldState::Collapsed => (),
         }
 
         Ok(())

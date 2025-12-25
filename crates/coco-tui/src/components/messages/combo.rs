@@ -13,6 +13,7 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
+use super::fold::FoldState;
 use crate::{
     actions::Action,
     components::{Component, Content, ContentComponent, Persistable, Plain},
@@ -48,8 +49,8 @@ struct Inner {
     name: String,
     is_error: bool,
     starter_state: StarterState,
-    #[serde(default = "default_collapsed")]
-    collapsed: bool,
+    #[serde(default = "default_display_state")]
+    display_state: FoldState,
 }
 
 impl Default for Inner {
@@ -58,7 +59,7 @@ impl Default for Inner {
             name: String::new(),
             is_error: false,
             starter_state: StarterState::default(),
-            collapsed: default_collapsed(),
+            display_state: default_display_state(),
         }
     }
 }
@@ -73,8 +74,8 @@ pub struct Combo {
 
 const LIMIT: usize = 10;
 
-fn default_collapsed() -> bool {
-    true
+fn default_display_state() -> FoldState {
+    FoldState::Collapsed
 }
 
 impl Combo {
@@ -106,7 +107,7 @@ impl Combo {
                     state.starter_state = StarterState::Executing {
                         output: VecDeque::new(),
                     };
-                    state.collapsed = false;
+                    state.display_state.expand();
                 }
             }
             ComboEvent::Executed { name, starter, .. } => {
@@ -122,7 +123,7 @@ impl Combo {
                         };
                         self.widget = Some(Plain::new(output.clone()));
                         state.starter_state = StarterState::Finalized { output };
-                        state.collapsed = false;
+                        state.display_state.expand();
                     }
                 }
             }
@@ -135,7 +136,7 @@ impl Combo {
                     {
                         let mut state = self.state.write();
                         state.starter_state = StarterState::Cancelled;
-                        state.collapsed = false;
+                        state.display_state.expand();
                     }
                 }
             }
@@ -166,13 +167,14 @@ impl Combo {
         }
     }
 
-    fn toggle_collapsed(&mut self) {
-        self.state.write().collapsed = !self.state.collapsed;
+    fn toggle_display_state(&mut self) {
+        let mut state = self.state.write();
+        state.display_state = state.display_state.toggle();
     }
 
     fn on_blur(&mut self) {
         if self.has_collapsible_body() {
-            self.state.write().collapsed = true;
+            self.state.write().display_state.collapse();
         }
     }
 
@@ -213,7 +215,7 @@ impl Combo {
 impl Content for Combo {
     fn height(&self, width: u16) -> usize {
         let border_height = 1;
-        if self.has_collapsible_body() && self.state.collapsed {
+        if self.has_collapsible_body() && self.state.display_state.is_collapsed() {
             return border_height;
         }
         if let Some(plain) = &self.widget {
@@ -234,7 +236,7 @@ impl Content for Combo {
         if !self.has_collapsible_body() {
             return block;
         }
-        let toggle_text = if self.state.collapsed {
+        let toggle_text = if self.state.display_state.is_collapsed() {
             ("Unfold", "z")
         } else {
             ("Fold", "z")
@@ -243,7 +245,7 @@ impl Content for Combo {
     }
 
     fn reminder_line(&self) -> Option<Line<'static>> {
-        if self.has_collapsible_body() && self.state.collapsed {
+        if self.has_collapsible_body() && self.state.display_state.is_collapsed() {
             Some(Line::from(Span::raw(" (folded)").dark_gray()))
         } else {
             None
@@ -286,11 +288,11 @@ impl Component for Combo {
         }
 
         if let (KeyModifiers::NONE, KeyCode::Char('z')) = (key.modifiers, key.code) {
-            self.toggle_collapsed();
+            self.toggle_display_state();
             return;
         }
 
-        if !self.state.collapsed
+        if !self.state.display_state.is_collapsed()
             && let Some(widget) = &mut self.widget
         {
             widget.handle_key_event(key);
@@ -323,7 +325,7 @@ impl Component for Combo {
             .title_alignment(Alignment::Left);
         frame.render_widget(&block, area);
 
-        if self.has_collapsible_body() && self.state.collapsed {
+        if self.has_collapsible_body() && self.state.display_state.is_collapsed() {
             return Ok(());
         }
 
