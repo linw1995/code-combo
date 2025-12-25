@@ -131,6 +131,52 @@ impl Executor {
         self.auto_accept_edits
     }
 
+    pub fn apply_tool_policies(
+        &mut self,
+        allow_tools: Option<&[String]>,
+        deny_tools: Option<&[String]>,
+    ) {
+        let allow = allow_tools.map(Self::normalize_tool_names);
+        let deny = deny_tools
+            .map(Self::normalize_tool_names)
+            .unwrap_or_default();
+
+        let allowed = match allow {
+            Some(mut allow) => {
+                if !deny.is_empty() {
+                    allow.retain(|name| !deny.contains(name));
+                }
+                Some(allow)
+            }
+            None => {
+                if deny.is_empty() {
+                    None
+                } else {
+                    Some(
+                        self.tools
+                            .keys()
+                            .filter(|name| !deny.contains(name.as_str()))
+                            .cloned()
+                            .collect::<HashSet<String>>(),
+                    )
+                }
+            }
+        };
+
+        let Some(allowed) = allowed else {
+            return;
+        };
+
+        self.tools.retain(|name, _| allowed.contains(name.as_str()));
+        self.tools_pcl
+            .retain(|name, _| allowed.contains(name.as_str()));
+        self.tools_once_pcl
+            .retain(|name, _| allowed.contains(name.as_str()));
+        if !allowed.contains(BASH_TOOL_NAME) {
+            self.bash_session_allowlist.clear();
+        }
+    }
+
     pub fn take_once_permission(&mut self, name: &str, id: &str) -> bool {
         if let Some(pcl) = self.tools_once_pcl.get_mut(name) {
             let mut granted_idx: Option<usize> = None;
@@ -307,12 +353,22 @@ impl Executor {
             })
             .collect()
     }
+
+    fn normalize_tool_names(names: &[String]) -> HashSet<String> {
+        names
+            .iter()
+            .map(|name| name.trim())
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tools::StrReplaceInput;
+    use std::collections::HashSet;
 
     fn bash_input_value(command: &str) -> serde_json::Value {
         serde_json::to_value(BashInput {
@@ -400,5 +456,72 @@ mod tests {
             .await
             .expect("read updated file");
         assert_eq!(updated, "world\n");
+    }
+
+    #[test]
+    fn allowlist_none_keeps_default_tools() {
+        let mut executor = Executor::default();
+        executor.apply_tool_policies(None, None);
+        let names: HashSet<String> = executor
+            .anthropic_tools()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert!(names.contains(BASH_TOOL_NAME));
+        assert!(names.contains(READ_TOOL_NAME));
+        assert!(names.contains(LIST_TOOL_NAME));
+        assert!(names.contains(STR_REPLACE_TOOL_NAME));
+    }
+
+    #[test]
+    fn allowlist_empty_disables_all_tools() {
+        let mut executor = Executor::default();
+        executor.apply_tool_policies(Some(&Vec::new()), None);
+        let names: Vec<String> = executor
+            .anthropic_tools()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn denylist_removes_tools_from_default() {
+        let mut executor = Executor::default();
+        executor.apply_tool_policies(
+            None,
+            Some(&[BASH_TOOL_NAME.to_string(), READ_TOOL_NAME.to_string()]),
+        );
+        let names: HashSet<String> = executor
+            .anthropic_tools()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert!(!names.contains(BASH_TOOL_NAME));
+        assert!(!names.contains(READ_TOOL_NAME));
+        assert!(names.contains(LIST_TOOL_NAME));
+        assert!(names.contains(STR_REPLACE_TOOL_NAME));
+    }
+
+    #[test]
+    fn allowlist_then_denylist_removes_from_allowlist() {
+        let mut executor = Executor::default();
+        executor.apply_tool_policies(
+            Some(&[
+                BASH_TOOL_NAME.to_string(),
+                READ_TOOL_NAME.to_string(),
+                LIST_TOOL_NAME.to_string(),
+            ]),
+            Some(&[READ_TOOL_NAME.to_string()]),
+        );
+        let names: HashSet<String> = executor
+            .anthropic_tools()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert!(names.contains(BASH_TOOL_NAME));
+        assert!(!names.contains(READ_TOOL_NAME));
+        assert!(names.contains(LIST_TOOL_NAME));
+        assert!(!names.contains(STR_REPLACE_TOOL_NAME));
     }
 }

@@ -31,10 +31,12 @@ pub struct ChatResponse {
 
 impl Agent {
     pub fn new(config: Config) -> Self {
+        let mut executor = Executor::default();
+        executor.apply_tool_policies(config.allow_tools.as_deref(), config.deny_tools.as_deref());
         Self {
             config,
             system_prompt: String::new(),
-            executor: Executor::default(),
+            executor,
             messages: Arc::new(Mutex::new(vec![])),
         }
     }
