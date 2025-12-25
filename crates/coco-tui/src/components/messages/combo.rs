@@ -1,5 +1,3 @@
-use std::collections::VecDeque;
-
 use coco_macro::{ComponentExt, ContentComponentExt};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -14,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use super::fold::FoldState;
+use super::streaming::StreamedLines;
 use crate::{
     actions::Action,
     components::{Component, Content, ContentComponent, Persistable, Plain},
@@ -31,17 +30,11 @@ enum StarterState {
     NotFound,
     Cancelled,
     Executing {
-        output: VecDeque<DisplayedLine>,
+        output: StreamedLines,
     },
     Finalized {
         output: String,
     },
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct DisplayedLine {
-    stream: code_combo::StreamKind,
-    text: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -105,7 +98,7 @@ impl Combo {
                 if &self.state.name == name {
                     let mut state = self.state.write();
                     state.starter_state = StarterState::Executing {
-                        output: VecDeque::new(),
+                        output: StreamedLines::new(Some(LIMIT)),
                     };
                     state.display_state.expand();
                 }
@@ -152,18 +145,12 @@ impl Combo {
         else {
             return;
         };
-        for text in &chunk.lines {
-            while lines.len() >= LIMIT {
-                debug!(
-                    limit = LIMIT,
-                    "Line count exceeds limit, removing oldest lines"
-                );
-                lines.pop_front();
-            }
-            lines.push_back(DisplayedLine {
-                stream: chunk.stream,
-                text: text.clone(),
-            });
+        let dropped = lines.push_chunk(chunk);
+        if dropped > 0 {
+            debug!(
+                limit = LIMIT,
+                dropped, "Line count exceeds limit, removing oldest lines"
+            );
         }
     }
 

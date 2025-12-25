@@ -20,6 +20,7 @@ use snafu::prelude::*;
 use tracing::warn;
 
 use super::super::fold::FoldState;
+use super::super::streaming::StreamedLines;
 use super::{Component, Content, ContentComponent};
 use crate::{
     actions::{Action, ToolAction},
@@ -48,6 +49,7 @@ pub struct Bash<'a> {
     state: State<Inner>,
 
     input: CodeHighlight<'a>,
+    streamed_lines: StreamedLines,
     output_text: Paragraph<'a>,
     output_markers: Option<Paragraph<'a>>,
     output_preview_text: Paragraph<'a>,
@@ -125,6 +127,7 @@ fn limit_tail_lines<T>(mut lines: Vec<T>, max_lines: Option<usize>) -> Vec<T> {
 
 fn build_output_view<'a>(
     output: Option<&BashOutput>,
+    streamed_lines: &StreamedLines,
     view: BashOutputView,
     max_lines: Option<usize>,
 ) -> (Paragraph<'a>, Option<Paragraph<'a>>) {
@@ -157,7 +160,16 @@ fn build_output_view<'a>(
         }
         BashOutputView::Mixed => {
             let mut markers: Vec<Line<'a>> = Vec::new();
-            if output.chunks.is_empty() {
+            if !streamed_lines.is_empty() {
+                for line in streamed_lines.iter() {
+                    let marker_style = match line.stream {
+                        code_combo::StreamKind::Stdout => Style::default().blue(),
+                        code_combo::StreamKind::Stderr => Style::default().red(),
+                    };
+                    lines.push(Line::from(line.text.clone()));
+                    markers.push(Line::from(Span::styled("▌", marker_style)));
+                }
+            } else if output.chunks.is_empty() {
                 for (marker_style, text) in [
                     (Style::default().red(), &output.stderr),
                     (Style::default().blue(), &output.stdout),
@@ -200,14 +212,23 @@ impl<'a> Bash<'a> {
     #[builder]
     pub fn try_new(tool_use: &ToolUse, output: Option<Value>) -> Result<Self> {
         let input = generate_input(tool_use);
-        let output = output
+        let output: Option<BashOutput> = output
             .map(serde_json::from_value)
             .transpose()
             .whatever_context("failed to parse BashOutput")?;
-        let (output_text, output_markers) =
-            build_output_view(output.as_ref(), BashOutputView::default(), None);
+        let streamed_lines = output
+            .as_ref()
+            .map(|output| StreamedLines::from_chunks(&output.chunks, None))
+            .unwrap_or_else(|| StreamedLines::new(None));
+        let (output_text, output_markers) = build_output_view(
+            output.as_ref(),
+            &streamed_lines,
+            BashOutputView::default(),
+            None,
+        );
         let (output_preview_text, output_preview_markers) = build_output_view(
             output.as_ref(),
+            &streamed_lines,
             BashOutputView::default(),
             Some(OUTPUT_PREVIEW_LINES),
         );
@@ -222,6 +243,7 @@ impl<'a> Bash<'a> {
                 display_state,
             }),
             input,
+            streamed_lines,
             output_text,
             output_markers,
             output_preview_text,
@@ -230,10 +252,15 @@ impl<'a> Bash<'a> {
     }
 
     fn rebuild_output(&mut self) {
-        let (output_text, output_markers) =
-            build_output_view(self.state.output.as_ref(), self.state.view, None);
+        let (output_text, output_markers) = build_output_view(
+            self.state.output.as_ref(),
+            &self.streamed_lines,
+            self.state.view,
+            None,
+        );
         let (output_preview_text, output_preview_markers) = build_output_view(
             self.state.output.as_ref(),
+            &self.streamed_lines,
             self.state.view,
             Some(OUTPUT_PREVIEW_LINES),
         );
@@ -245,8 +272,9 @@ impl<'a> Bash<'a> {
 
     pub fn update_output(&mut self, output: Option<Final>) -> Result<()> {
         if let Some(Final::Json(value)) = output {
-            let output =
-                serde_json::from_value(value).whatever_context("failed to parse BashOutput")?;
+            let output = serde_json::from_value::<BashOutput>(value)
+                .whatever_context("failed to parse BashOutput")?;
+            self.streamed_lines = StreamedLines::from_chunks(&output.chunks, None);
             self.state.write().output = Some(output);
             self.rebuild_output();
         }
@@ -361,15 +389,22 @@ impl Persistable for Bash<'static> {
 
     fn load(session: Session) -> Result<Self> {
         let state: Inner = session::load(session)?;
+        let streamed_lines = state
+            .output
+            .as_ref()
+            .map(|output| StreamedLines::from_chunks(&output.chunks, None))
+            .unwrap_or_else(|| StreamedLines::new(None));
         let (output_text, output_markers) =
-            build_output_view(state.output.as_ref(), state.view, None);
+            build_output_view(state.output.as_ref(), &streamed_lines, state.view, None);
         let (output_preview_text, output_preview_markers) = build_output_view(
             state.output.as_ref(),
+            &streamed_lines,
             state.view,
             Some(OUTPUT_PREVIEW_LINES),
         );
         Ok(Self {
             input: generate_input(&state.tool_use),
+            streamed_lines,
             output_text,
             output_markers,
             output_preview_text,
@@ -412,6 +447,7 @@ impl Component for Bash<'static> {
                     }
                 }
                 output.chunks.push(chunk.clone());
+                self.streamed_lines.push_chunk(chunk);
                 drop(state);
                 self.rebuild_output();
             }
