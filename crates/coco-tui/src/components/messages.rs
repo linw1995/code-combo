@@ -23,7 +23,9 @@ use crate::{
 use super::{Action, AnswerEvent, AskEvent, Component, Content, Event, Message};
 
 mod combo;
+mod fold;
 mod plain;
+mod streaming;
 mod tool;
 pub use combo::Combo;
 pub use plain::Plain;

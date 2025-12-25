@@ -14,6 +14,7 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::super::fold::FoldState;
 use crate::{
     actions::Action,
     components::{Component, Content, ContentComponent, Persistable},
@@ -28,15 +29,8 @@ use crate::{
 struct Inner {
     input: ReadInput,
     output: Option<String>,
-    #[serde(default = "default_display_state")]
-    display_state: DisplayState,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-enum DisplayState {
-    Omitted,
-    Collapsed,
-    Expanded,
+    #[serde(default)]
+    display_state: FoldState,
 }
 
 #[derive(ComponentExt, ContentComponentExt)]
@@ -50,10 +44,6 @@ pub struct Read<'a> {
 }
 
 const OMITTED_PREVIEW_LINES: usize = 5;
-
-fn default_display_state() -> DisplayState {
-    DisplayState::Omitted
-}
 
 fn generate_input_widget<'a>(input: ReadInput) -> Paragraph<'a> {
     let mut lines = vec![];
@@ -101,7 +91,7 @@ impl Read<'_> {
             state: State::new(Inner {
                 input,
                 output: None,
-                display_state: DisplayState::Omitted,
+                display_state: FoldState::Preview,
             }),
         }
     }
@@ -119,16 +109,12 @@ impl Read<'_> {
 
     fn toggle_display_state(&mut self) {
         let mut state = self.state.write();
-        state.display_state = match state.display_state {
-            DisplayState::Collapsed => DisplayState::Expanded,
-            DisplayState::Expanded => DisplayState::Collapsed,
-            DisplayState::Omitted => DisplayState::Omitted,
-        };
+        state.display_state = state.display_state.toggle();
     }
 
     fn on_blur(&mut self) {
-        if self.state.display_state == DisplayState::Omitted {
-            self.state.write().display_state = DisplayState::Collapsed;
+        if self.state.display_state.is_preview() {
+            self.state.write().display_state.collapse();
         }
     }
 
@@ -150,9 +136,9 @@ impl Content for Read<'_> {
             .output_widget
             .as_ref()
             .map(|widget| match self.state.display_state {
-                DisplayState::Collapsed => 0,
-                DisplayState::Expanded => widget.line_count(width),
-                DisplayState::Omitted => {
+                FoldState::Collapsed => 0,
+                FoldState::Expanded => widget.line_count(width),
+                FoldState::Preview => {
                     let height = widget.line_count(width);
                     let indicator = self.omitted_indicator();
                     let indicator_height = indicator.line_count(width);
@@ -171,7 +157,7 @@ impl Content for Read<'_> {
         self.output_widget.is_some()
             && matches!(
                 self.state.display_state,
-                DisplayState::Collapsed | DisplayState::Expanded
+                FoldState::Collapsed | FoldState::Expanded
             )
     }
 
@@ -180,15 +166,15 @@ impl Content for Read<'_> {
             return block;
         }
         let toggle_text = match self.state.display_state {
-            DisplayState::Collapsed => ("Unfold", "z"),
-            DisplayState::Expanded => ("Fold", "z"),
-            DisplayState::Omitted => return block,
+            FoldState::Collapsed => ("Unfold", "z"),
+            FoldState::Expanded => ("Fold", "z"),
+            FoldState::Preview => return block,
         };
         block.title_bottom(crate::components::shortcuts_desc(&[toggle_text]))
     }
 
     fn reminder_line(&self) -> Option<Line<'static>> {
-        if self.state.display_state == DisplayState::Collapsed {
+        if self.state.display_state.is_collapsed() {
             Some(Line::from(Span::raw(" (folded)").dark_gray()))
         } else {
             None
@@ -252,7 +238,7 @@ impl Component for Read<'static> {
             return Ok(());
         };
 
-        if self.state.display_state == DisplayState::Collapsed {
+        if self.state.display_state == FoldState::Collapsed {
             frame.render_widget(&self.input_widget, area);
             return Ok(());
         }
@@ -265,10 +251,10 @@ impl Component for Read<'static> {
 
         // Draw output area
         match self.state.display_state {
-            DisplayState::Expanded => {
+            FoldState::Expanded => {
                 frame.render_widget(output_widget, area_output);
             }
-            DisplayState::Omitted => {
+            FoldState::Preview => {
                 let height = output_widget.line_count(width);
                 let indicator = self.omitted_indicator();
                 let indicator_height = indicator.line_count(width);
@@ -282,7 +268,7 @@ impl Component for Read<'static> {
                     frame.render_widget(output_widget, area_output);
                 }
             }
-            DisplayState::Collapsed => (),
+            FoldState::Collapsed => (),
         }
 
         Ok(())
@@ -314,15 +300,15 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn read_omitted_then_blur_collapses() {
+    async fn read_preview_then_blur_collapses() {
         let mut read: Read<'static> = Read::new(&make_tool_use());
         read.update_output(make_output());
 
-        assert_eq!(read.state.display_state, DisplayState::Omitted);
+        assert_eq!(read.state.display_state, FoldState::Preview);
         assert!(!read.is_actionable());
 
         read.update(&Action::Blur);
-        assert_eq!(read.state.display_state, DisplayState::Collapsed);
+        assert_eq!(read.state.display_state, FoldState::Collapsed);
         assert!(read.is_actionable());
     }
 
@@ -333,12 +319,12 @@ mod tests {
 
         let key = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
         read.handle_key_event(&key);
-        assert_eq!(read.state.display_state, DisplayState::Omitted);
+        assert_eq!(read.state.display_state, FoldState::Preview);
 
         read.update(&Action::Blur);
         read.handle_key_event(&key);
-        assert_eq!(read.state.display_state, DisplayState::Expanded);
+        assert_eq!(read.state.display_state, FoldState::Expanded);
         read.handle_key_event(&key);
-        assert_eq!(read.state.display_state, DisplayState::Collapsed);
+        assert_eq!(read.state.display_state, FoldState::Collapsed);
     }
 }

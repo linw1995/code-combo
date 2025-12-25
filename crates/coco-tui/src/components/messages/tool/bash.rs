@@ -19,6 +19,8 @@ use serde_json::Value;
 use snafu::prelude::*;
 use tracing::warn;
 
+use super::super::fold::FoldState;
+use super::super::streaming::StreamedLines;
 use super::{Component, Content, ContentComponent};
 use crate::{
     actions::{Action, ToolAction},
@@ -38,7 +40,7 @@ struct Inner {
     #[serde(default)]
     view: BashOutputView,
     #[serde(default)]
-    display_state: DisplayState,
+    display_state: FoldState,
 }
 
 #[derive(ComponentExt, ContentComponentExt)]
@@ -47,6 +49,7 @@ pub struct Bash<'a> {
     state: State<Inner>,
 
     input: CodeHighlight<'a>,
+    streamed_lines: StreamedLines,
     output_text: Paragraph<'a>,
     output_markers: Option<Paragraph<'a>>,
     output_preview_text: Paragraph<'a>,
@@ -70,15 +73,6 @@ impl BashOutputView {
             Self::Mixed => 2,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum DisplayState {
-    Collapsed,
-    #[default]
-    Preview,
-    Expanded,
 }
 
 const OUTPUT_PREVIEW_LINES: usize = 6;
@@ -133,6 +127,7 @@ fn limit_tail_lines<T>(mut lines: Vec<T>, max_lines: Option<usize>) -> Vec<T> {
 
 fn build_output_view<'a>(
     output: Option<&BashOutput>,
+    streamed_lines: &StreamedLines,
     view: BashOutputView,
     max_lines: Option<usize>,
 ) -> (Paragraph<'a>, Option<Paragraph<'a>>) {
@@ -165,7 +160,16 @@ fn build_output_view<'a>(
         }
         BashOutputView::Mixed => {
             let mut markers: Vec<Line<'a>> = Vec::new();
-            if output.chunks.is_empty() {
+            if !streamed_lines.is_empty() {
+                for line in streamed_lines.iter() {
+                    let marker_style = match line.stream {
+                        code_combo::StreamKind::Stdout => Style::default().blue(),
+                        code_combo::StreamKind::Stderr => Style::default().red(),
+                    };
+                    lines.push(Line::from(line.text.clone()));
+                    markers.push(Line::from(Span::styled("▌", marker_style)));
+                }
+            } else if output.chunks.is_empty() {
                 for (marker_style, text) in [
                     (Style::default().red(), &output.stderr),
                     (Style::default().blue(), &output.stdout),
@@ -208,18 +212,27 @@ impl<'a> Bash<'a> {
     #[builder]
     pub fn try_new(tool_use: &ToolUse, output: Option<Value>) -> Result<Self> {
         let input = generate_input(tool_use);
-        let output = output
+        let output: Option<BashOutput> = output
             .map(serde_json::from_value)
             .transpose()
             .whatever_context("failed to parse BashOutput")?;
-        let (output_text, output_markers) =
-            build_output_view(output.as_ref(), BashOutputView::default(), None);
+        let streamed_lines = output
+            .as_ref()
+            .map(|output| StreamedLines::from_chunks(&output.chunks, None))
+            .unwrap_or_else(|| StreamedLines::new(None));
+        let (output_text, output_markers) = build_output_view(
+            output.as_ref(),
+            &streamed_lines,
+            BashOutputView::default(),
+            None,
+        );
         let (output_preview_text, output_preview_markers) = build_output_view(
             output.as_ref(),
+            &streamed_lines,
             BashOutputView::default(),
             Some(OUTPUT_PREVIEW_LINES),
         );
-        let display_state = display_state_for_output(output.as_ref(), DisplayState::Preview);
+        let display_state = display_state_for_output(output.as_ref(), FoldState::Preview);
 
         Ok(Self {
             state: State::new(Inner {
@@ -230,6 +243,7 @@ impl<'a> Bash<'a> {
                 display_state,
             }),
             input,
+            streamed_lines,
             output_text,
             output_markers,
             output_preview_text,
@@ -238,10 +252,15 @@ impl<'a> Bash<'a> {
     }
 
     fn rebuild_output(&mut self) {
-        let (output_text, output_markers) =
-            build_output_view(self.state.output.as_ref(), self.state.view, None);
+        let (output_text, output_markers) = build_output_view(
+            self.state.output.as_ref(),
+            &self.streamed_lines,
+            self.state.view,
+            None,
+        );
         let (output_preview_text, output_preview_markers) = build_output_view(
             self.state.output.as_ref(),
+            &self.streamed_lines,
             self.state.view,
             Some(OUTPUT_PREVIEW_LINES),
         );
@@ -253,8 +272,9 @@ impl<'a> Bash<'a> {
 
     pub fn update_output(&mut self, output: Option<Final>) -> Result<()> {
         if let Some(Final::Json(value)) = output {
-            let output =
-                serde_json::from_value(value).whatever_context("failed to parse BashOutput")?;
+            let output = serde_json::from_value::<BashOutput>(value)
+                .whatever_context("failed to parse BashOutput")?;
+            self.streamed_lines = StreamedLines::from_chunks(&output.chunks, None);
             self.state.write().output = Some(output);
             self.rebuild_output();
         }
@@ -285,7 +305,7 @@ impl<'a> Bash<'a> {
 impl<'a> Content for Bash<'a> {
     fn height(&self, width: u16) -> usize {
         if self.state.requiring_confirmation
-            || self.state.display_state == DisplayState::Collapsed
+            || self.state.display_state == FoldState::Collapsed
             || !self.has_output_content()
         {
             return self.input.height(width);
@@ -293,7 +313,7 @@ impl<'a> Content for Bash<'a> {
         let height_input = self.input.height(width);
         let min_height = TAB_PANEL_HEIGHT;
 
-        let width_tab = if self.state.display_state == DisplayState::Preview {
+        let width_tab = if self.state.display_state == FoldState::Preview {
             0
         } else {
             tab_panel_width(width)
@@ -302,9 +322,9 @@ impl<'a> Content for Bash<'a> {
         let width_marker = output_marker_width(self.state.view);
         let width_text = width_body.saturating_sub(width_marker).max(1);
         let height_output = match self.state.display_state {
-            DisplayState::Preview => OUTPUT_PREVIEW_LINES.max(min_height),
-            DisplayState::Expanded => self.output_text.line_count(width_text).max(min_height),
-            DisplayState::Collapsed => 0,
+            FoldState::Preview => OUTPUT_PREVIEW_LINES.max(min_height),
+            FoldState::Expanded => self.output_text.line_count(width_text).max(min_height),
+            FoldState::Collapsed => 0,
         };
 
         height_input + height_output
@@ -326,11 +346,11 @@ impl<'a> Content for Bash<'a> {
         }
 
         let toggle_text = match self.state.display_state {
-            DisplayState::Expanded => ("Fold", "z"),
-            DisplayState::Preview | DisplayState::Collapsed => ("Expand", "z"),
+            FoldState::Expanded => ("Fold", "z"),
+            FoldState::Preview | FoldState::Collapsed => ("Expand", "z"),
         };
 
-        if matches!(self.state.display_state, DisplayState::Expanded) {
+        if matches!(self.state.display_state, FoldState::Expanded) {
             let view = match self.state.view {
                 BashOutputView::Stdout => "Stdout",
                 BashOutputView::Stderr => "Stderr",
@@ -349,9 +369,9 @@ impl<'a> Content for Bash<'a> {
         }
         if self.has_output_content() {
             match self.state.display_state {
-                DisplayState::Collapsed => spans.push(Span::raw(" (folded)").dark_gray()),
-                DisplayState::Preview => spans.push(Span::raw(" (preview)").dark_gray()),
-                DisplayState::Expanded => {}
+                FoldState::Collapsed => spans.push(Span::raw(" (folded)").dark_gray()),
+                FoldState::Preview => spans.push(Span::raw(" (preview)").dark_gray()),
+                FoldState::Expanded => {}
             }
         }
         if spans.is_empty() {
@@ -369,15 +389,22 @@ impl Persistable for Bash<'static> {
 
     fn load(session: Session) -> Result<Self> {
         let state: Inner = session::load(session)?;
+        let streamed_lines = state
+            .output
+            .as_ref()
+            .map(|output| StreamedLines::from_chunks(&output.chunks, None))
+            .unwrap_or_else(|| StreamedLines::new(None));
         let (output_text, output_markers) =
-            build_output_view(state.output.as_ref(), state.view, None);
+            build_output_view(state.output.as_ref(), &streamed_lines, state.view, None);
         let (output_preview_text, output_preview_markers) = build_output_view(
             state.output.as_ref(),
+            &streamed_lines,
             state.view,
             Some(OUTPUT_PREVIEW_LINES),
         );
         Ok(Self {
             input: generate_input(&state.tool_use),
+            streamed_lines,
             output_text,
             output_markers,
             output_preview_text,
@@ -393,7 +420,7 @@ impl Component for Bash<'static> {
             Event::Ask(AskEvent::ToolUsePermission(_)) => {
                 let mut state = self.state.write();
                 state.requiring_confirmation = true;
-                state.display_state = DisplayState::Preview;
+                state.display_state.preview();
             }
             Event::Answer(AnswerEvent::ToolOutput { id, chunk }) => {
                 if id != &self.state.tool_use.id {
@@ -420,6 +447,7 @@ impl Component for Bash<'static> {
                     }
                 }
                 output.chunks.push(chunk.clone());
+                self.streamed_lines.push_chunk(chunk);
                 drop(state);
                 self.rebuild_output();
             }
@@ -438,7 +466,7 @@ impl Component for Bash<'static> {
 
     fn handle_key_event(&mut self, key: &KeyEvent) {
         match (self.state.display_state, key.modifiers, key.code) {
-            (DisplayState::Expanded, KeyModifiers::NONE, KeyCode::Char('1')) => {
+            (FoldState::Expanded, KeyModifiers::NONE, KeyCode::Char('1')) => {
                 if !self.has_output_content() {
                     return;
                 }
@@ -447,17 +475,17 @@ impl Component for Bash<'static> {
                 drop(state);
                 self.rebuild_output();
             }
-            (DisplayState::Expanded, KeyModifiers::NONE, KeyCode::Char('2')) => {
+            (FoldState::Expanded, KeyModifiers::NONE, KeyCode::Char('2')) => {
                 if !self.has_output_content() {
                     return;
                 }
                 let mut state = self.state.write();
                 state.view = BashOutputView::Stderr;
-                state.display_state = DisplayState::Expanded;
+                state.display_state.expand();
                 drop(state);
                 self.rebuild_output();
             }
-            (DisplayState::Expanded, KeyModifiers::NONE, KeyCode::Char('3')) => {
+            (FoldState::Expanded, KeyModifiers::NONE, KeyCode::Char('3')) => {
                 if !self.has_output_content() {
                     return;
                 }
@@ -472,15 +500,15 @@ impl Component for Bash<'static> {
                 }
                 let mut state = self.state.write();
                 state.display_state = match state.display_state {
-                    DisplayState::Expanded => DisplayState::Collapsed,
-                    DisplayState::Collapsed | DisplayState::Preview => DisplayState::Expanded,
+                    FoldState::Expanded => FoldState::Collapsed,
+                    FoldState::Collapsed | FoldState::Preview => FoldState::Expanded,
                 };
             }
             (_, KeyModifiers::NONE, KeyCode::Enter) => {
                 if !self.state.requiring_confirmation {
                     return;
                 }
-                self.state.write().display_state = DisplayState::Preview;
+                self.state.write().display_state.preview();
                 global::action_tx()
                     .send(ToolAction::Grant(self.state.tool_use.to_owned()).into())
                     .unwrap();
@@ -490,7 +518,7 @@ impl Component for Bash<'static> {
                 if !self.state.requiring_confirmation {
                     return;
                 }
-                self.state.write().display_state = DisplayState::Preview;
+                self.state.write().display_state.preview();
                 global::action_tx()
                     .send(ToolAction::GrantSession(self.state.tool_use.to_owned()).into())
                     .unwrap();
@@ -519,7 +547,7 @@ impl Component for Bash<'static> {
         if !self.has_output_content() {
             return;
         }
-        if self.state.display_state != DisplayState::Preview {
+        if self.state.display_state != FoldState::Preview {
             return;
         }
         let Some(output) = self.state.output.as_ref() else {
@@ -528,7 +556,7 @@ impl Component for Bash<'static> {
         if output.exit_code != 0 {
             return;
         }
-        self.state.write().display_state = DisplayState::Collapsed;
+        self.state.write().display_state.collapse();
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
@@ -541,7 +569,7 @@ impl Component for Bash<'static> {
         let width = area.width.max(1);
         let height_input = self.input.height(width);
 
-        if self.state.display_state == DisplayState::Collapsed
+        if self.state.display_state == FoldState::Collapsed
             || self.state.requiring_confirmation
             || !self.has_output_content()
         {
@@ -550,7 +578,7 @@ impl Component for Bash<'static> {
             return Ok(());
         }
 
-        let width_tabs = if self.state.display_state == DisplayState::Preview {
+        let width_tabs = if self.state.display_state == FoldState::Preview {
             0
         } else {
             tab_panel_width(width)
@@ -560,9 +588,9 @@ impl Component for Bash<'static> {
         let width_text = width_body.saturating_sub(width_marker).max(1);
         let min_height = TAB_PANEL_HEIGHT;
         let height_output = match self.state.display_state {
-            DisplayState::Preview => OUTPUT_PREVIEW_LINES.max(min_height),
-            DisplayState::Expanded => self.output_text.line_count(width_text).max(min_height),
-            DisplayState::Collapsed => 0,
+            FoldState::Preview => OUTPUT_PREVIEW_LINES.max(min_height),
+            FoldState::Expanded => self.output_text.line_count(width_text).max(min_height),
+            FoldState::Collapsed => 0,
         };
         let [area_input, area_output] =
             Layout::vertical([Length(height_input as u16), Length(height_output as u16)])
@@ -580,9 +608,9 @@ impl Component for Bash<'static> {
         };
 
         let (output_text, output_markers) = match self.state.display_state {
-            DisplayState::Preview => (&self.output_preview_text, &self.output_preview_markers),
-            DisplayState::Expanded => (&self.output_text, &self.output_markers),
-            DisplayState::Collapsed => (&self.output_text, &self.output_markers),
+            FoldState::Preview => (&self.output_preview_text, &self.output_preview_markers),
+            FoldState::Expanded => (&self.output_text, &self.output_markers),
+            FoldState::Collapsed => (&self.output_text, &self.output_markers),
         };
 
         if width_marker == 0 {
@@ -607,17 +635,17 @@ impl Component for Bash<'static> {
 
 impl ContentComponent for Bash<'static> {}
 
-fn display_state_for_output(output: Option<&BashOutput>, current: DisplayState) -> DisplayState {
+fn display_state_for_output(output: Option<&BashOutput>, current: FoldState) -> FoldState {
     let Some(output) = output else {
         return current;
     };
     if output.exit_code != 0 {
-        return DisplayState::Expanded;
+        return FoldState::Expanded;
     }
-    if current == DisplayState::Expanded {
-        DisplayState::Expanded
+    if current == FoldState::Expanded {
+        FoldState::Expanded
     } else {
-        DisplayState::Preview
+        FoldState::Preview
     }
 }
 
@@ -683,7 +711,7 @@ mod tests {
     async fn bash_auto_collapses_on_success_and_stays_open_on_failure() {
         let tool_use = tool_use();
         let mut bash = Bash::try_new().tool_use(&tool_use).call().unwrap();
-        assert_eq!(bash.state.display_state, DisplayState::Preview);
+        assert_eq!(bash.state.display_state, FoldState::Preview);
 
         let value = serde_json::to_value(bash_output()).unwrap();
         bash.handle_event(&Event::Answer(AnswerEvent::ToolResult {
@@ -692,9 +720,9 @@ mod tests {
             is_user_cancelled: false,
             output: Final::Json(value),
         }));
-        assert_eq!(bash.state.display_state, DisplayState::Preview);
+        assert_eq!(bash.state.display_state, FoldState::Preview);
         bash.update(&Action::Blur);
-        assert_eq!(bash.state.display_state, DisplayState::Collapsed);
+        assert_eq!(bash.state.display_state, FoldState::Collapsed);
 
         let value = serde_json::to_value(bash_output_with_exit(1)).unwrap();
         bash.handle_event(&Event::Answer(AnswerEvent::ToolResult {
@@ -703,9 +731,9 @@ mod tests {
             is_user_cancelled: false,
             output: Final::Json(value),
         }));
-        assert_eq!(bash.state.display_state, DisplayState::Expanded);
+        assert_eq!(bash.state.display_state, FoldState::Expanded);
         bash.update(&Action::Blur);
-        assert_eq!(bash.state.display_state, DisplayState::Expanded);
+        assert_eq!(bash.state.display_state, FoldState::Expanded);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -718,21 +746,21 @@ mod tests {
             .call()
             .unwrap();
 
-        bash.state.write().display_state = DisplayState::Collapsed;
+        bash.state.write().display_state = FoldState::Collapsed;
         bash.handle_key_event(&key(KeyCode::Char('1')));
-        assert_eq!(bash.state.display_state, DisplayState::Collapsed);
+        assert_eq!(bash.state.display_state, FoldState::Collapsed);
 
-        bash.state.write().display_state = DisplayState::Expanded;
+        bash.state.write().display_state = FoldState::Expanded;
         bash.handle_key_event(&key(KeyCode::Char('1')));
-        assert_eq!(bash.state.display_state, DisplayState::Expanded);
+        assert_eq!(bash.state.display_state, FoldState::Expanded);
         assert_eq!(bash.state.view.index(), 0);
 
         bash.handle_key_event(&key(KeyCode::Char('2')));
-        assert_eq!(bash.state.display_state, DisplayState::Expanded);
+        assert_eq!(bash.state.display_state, FoldState::Expanded);
         assert_eq!(bash.state.view.index(), 1);
 
         bash.handle_key_event(&key(KeyCode::Char('3')));
-        assert_eq!(bash.state.display_state, DisplayState::Expanded);
+        assert_eq!(bash.state.display_state, FoldState::Expanded);
         assert_eq!(bash.state.view.index(), 2);
     }
 
@@ -746,9 +774,9 @@ mod tests {
             .call()
             .unwrap();
 
-        assert_eq!(bash.state.display_state, DisplayState::Preview);
+        assert_eq!(bash.state.display_state, FoldState::Preview);
         bash.handle_key_event(&key(KeyCode::Char('z')));
-        assert_eq!(bash.state.display_state, DisplayState::Expanded);
+        assert_eq!(bash.state.display_state, FoldState::Expanded);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -804,7 +832,7 @@ mod tests {
             .call()
             .unwrap();
 
-        bash.state.write().display_state = DisplayState::Collapsed;
+        bash.state.write().display_state = FoldState::Collapsed;
         let height = bash.height(80);
         let input_height = bash.input.height(80);
 
@@ -824,11 +852,11 @@ mod tests {
             is_user_cancelled: false,
             output: Final::Json(value),
         }));
-        assert_eq!(bash.state.display_state, DisplayState::Preview);
+        assert_eq!(bash.state.display_state, FoldState::Preview);
         assert_eq!(bash.height(80), bash.input.height(80));
 
         bash.update(&Action::Blur);
-        assert_eq!(bash.state.display_state, DisplayState::Preview);
+        assert_eq!(bash.state.display_state, FoldState::Preview);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
