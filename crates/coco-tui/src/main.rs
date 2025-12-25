@@ -33,6 +33,10 @@ struct Args {
     #[arg(short = 'r', long)]
     restore: bool,
 
+    /// Prompt text to submit after TUI starts
+    #[arg(trailing_var_arg = true, value_name = "prompt")]
+    prompt: Vec<String>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -90,6 +94,20 @@ impl TryFrom<Commands> for ClientCommand {
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut args = Args::parse();
+    if !args.prompt.is_empty() {
+        ensure_whatever!(
+            args.command.is_none(),
+            "prompt cannot be used with subcommands"
+        );
+        ensure_whatever!(!args.restore, "prompt cannot be used with --restore");
+    }
+    let startup_prompt = if args.prompt.is_empty() {
+        None
+    } else {
+        let prompt = args.prompt.join(" ");
+        ensure_whatever!(!prompt.trim().is_empty(), "prompt is required");
+        Some(prompt)
+    };
     if let Some(command) = args.command.take() {
         match ClientCommand::try_from(command) {
             Ok(command) => {
@@ -120,6 +138,9 @@ async fn main() -> Result<()> {
     let mut root_view = Chat::new(config);
     root_view.setup().await;
     let mut app = app::App::new(Box::new(root_view))?;
+    if let Some(prompt) = startup_prompt {
+        app.send_action(Action::SubmitPrompt(prompt));
+    }
     match args.command {
         Some(Commands::Combo(combo_cmd)) => match combo_cmd {
             ComboCommands::Run { name } => {
