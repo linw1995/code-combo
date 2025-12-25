@@ -48,6 +48,7 @@ impl Client {
     #[builder]
     pub async fn messages(
         &self,
+        system_prompt: Option<&str>,
         conversations: Vec<Message>,
         tools: Vec<Tool>,
     ) -> Result<MessagesResponse> {
@@ -55,6 +56,7 @@ impl Client {
             &self.cli,
             &self.base_url,
             MessagesRequest::builder()
+                .maybe_system(system_prompt)
                 .messages(conversations)
                 .model(&self.model)
                 .tools(tools)

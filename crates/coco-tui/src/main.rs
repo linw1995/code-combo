@@ -11,6 +11,7 @@ use snafu::prelude::*;
 use coco_tui::{
     actions::{Action, ComboAction},
     app,
+    components::Chat,
     error::Result,
     global, version,
 };
@@ -116,7 +117,9 @@ async fn main() -> Result<()> {
     config.config_dir = config_dir;
     global::set_config(config.clone()).await;
 
-    let mut app = app::App::new(config)?;
+    let mut root_view = Chat::new(config);
+    root_view.setup().await;
+    let mut app = app::App::new(Box::new(root_view))?;
     match args.command {
         Some(Commands::Combo(combo_cmd)) => match combo_cmd {
             ComboCommands::Run { name } => {

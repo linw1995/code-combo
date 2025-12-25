@@ -52,6 +52,7 @@ pub struct Chat<'a> {
 #[derive(Clone, Serialize, Deserialize)]
 struct Inner {
     // Placeholder field for serialization
+    system_prompt: String,
     messages: Vec<code_combo::Message>,
 
     state: ChatState,
@@ -70,6 +71,7 @@ impl Default for Inner {
     fn default() -> Self {
         let now = time::OffsetDateTime::now_utc();
         Self {
+            system_prompt: String::new(),
             messages: vec![],
             state: ChatState::Ready,
             focus: Focus::Input,
@@ -177,11 +179,15 @@ impl CancellationGuard {
 
 const COMMAND_NEW_SESSION: &str = "New Session";
 
+const AGENTS_MD_FILENAME: &str = "AGENTS.md";
+
 impl Chat<'static> {
     pub fn new(config: Config) -> Self {
+        let agent = Agent::new(config);
+
         Self {
             state: State::default(),
-            agent: Agent::new(config),
+            agent,
             command_palette: CommandPalette::new(&[
                 Command {
                     name: COMMAND_NEW_SESSION.to_string(),
@@ -194,6 +200,23 @@ impl Chat<'static> {
             indicator: ThrobberState::default(),
             token_schedule_session_save: None,
             cancellation_guard: CancellationGuard::default(),
+        }
+    }
+
+    pub async fn setup(&mut self) {
+        // read AGENTS.md file
+        let workspace_path = global::workspace_dir().join(AGENTS_MD_FILENAME);
+        let global_path = global::config().await.config_dir.join(AGENTS_MD_FILENAME);
+        for path in [workspace_path, global_path] {
+            match tokio::fs::read_to_string(&path).await {
+                Ok(system_prompt) => {
+                    self.agent.set_system_prompt(&system_prompt);
+                    break;
+                }
+                Err(err) => {
+                    warn!(?path, ?err, "failed to read file");
+                }
+            }
         }
     }
 
@@ -212,6 +235,7 @@ impl Chat<'static> {
 
         tokio::spawn(async move {
             // Take a snapshot immediately to avoid persisting later dirty state
+            state.system_prompt = agent.system_prompt().to_string();
             state.messages = agent.dump_messages().await;
 
             let session_dir = std::path::Path::new(".coco/sessions").to_path_buf();
@@ -574,14 +598,8 @@ impl Chat<'static> {
 
 impl Persistable for Chat<'static> {
     fn save(&self) -> Session {
-        // Save LLM messages
-        let agent_messages = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.agent.dump_messages())
-        });
-        let mut state = self.state.get();
-        state.messages = agent_messages;
-
-        session::save_related(&state, self.messages.save())
+        // Chat persists via schedule_save_task, not through this method
+        unreachable!("Chat has special way to do persisting")
     }
 
     fn load(session: Session) -> Result<Self> {
@@ -594,9 +612,11 @@ impl Persistable for Chat<'static> {
                 .block_on(inst.agent.restore_messages(&state.messages));
             state.messages.clear();
         });
+        inst.agent.set_system_prompt(&state.system_prompt);
+        inst.agent.set_auto_accept_edits(auto_accept_edits);
+
         inst.state = State::new(state);
         inst.messages = Messages::load(session)?;
-        inst.agent.set_auto_accept_edits(auto_accept_edits);
         Ok(inst)
     }
 }

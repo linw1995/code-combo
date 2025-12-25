@@ -63,6 +63,8 @@ pub struct MessagesRequest {
     pub messages: Vec<Message>,
     /// The maximum number of tokens to generate before stopping.
     pub max_tokens: usize,
+    /// System prompt
+    pub system: String,
     /// Amount of randomness injected into the response.
     ///
     /// Defaults to 1.0. Ranges from 0.0 to 1.0. Use temperature closer to 0.0 for analytical / multiple choice,
@@ -81,10 +83,16 @@ pub struct MessagesRequest {
 #[bon]
 impl MessagesRequest {
     #[builder]
-    pub fn new(model: &str, messages: Vec<Message>, #[builder(default)] tools: Vec<Tool>) -> Self {
+    pub fn new(
+        model: &str,
+        system: Option<&str>,
+        messages: Vec<Message>,
+        #[builder(default)] tools: Vec<Tool>,
+    ) -> Self {
         Self {
             model: model.to_string(),
             messages,
+            system: system.unwrap_or_default().to_string(),
             max_tokens: 32000,
             temperature: None,
             tool_choice: None,
