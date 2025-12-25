@@ -9,7 +9,6 @@ use ratatui::{
     widgets::{Block, Borders},
 };
 use serde::{Deserialize, Serialize};
-use tracing::debug;
 
 use super::fold::FoldState;
 use super::streaming::StreamedLines;
@@ -145,13 +144,7 @@ impl Combo {
         else {
             return;
         };
-        let dropped = lines.push_chunk(chunk);
-        if dropped > 0 {
-            debug!(
-                limit = LIMIT,
-                dropped, "Line count exceeds limit, removing oldest lines"
-            );
-        }
+        lines.push_chunk(chunk);
     }
 
     fn toggle_display_state(&mut self) {
@@ -295,7 +288,6 @@ impl Component for Combo {
     }
 
     fn update(&mut self, action: &Action) {
-        debug!(?action, "updating");
         if let Action::Blur = action {
             self.on_blur()
         }
