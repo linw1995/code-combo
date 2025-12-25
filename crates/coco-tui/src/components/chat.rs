@@ -418,18 +418,22 @@ impl Chat<'static> {
         }
     }
 
+    fn submit_value(&mut self, value: String) {
+        if value.is_empty() {
+            debug!("submitting with empty value, skipping");
+            return;
+        }
+        debug!(?value, "submiting");
+        self.messages
+            .push(Message::user(Plain::new(value.clone()).into()));
+        let content = self.build_user_content(ChatContent::Text(value));
+        self.spawn_chat_task(content);
+    }
+
     fn on_submit(&mut self) {
         if self.state.state == ChatState::Ready {
             let value = self.input.clear();
-            if value.is_empty() {
-                debug!("submitting with empty value, skipping");
-                return;
-            }
-            debug!(?value, "submiting");
-            self.messages
-                .push(Message::user(Plain::new(value.clone()).into()));
-            let content = self.build_user_content(ChatContent::Text(value));
-            self.spawn_chat_task(content);
+            self.submit_value(value);
         } else {
             // TODO: Display an alert when input submission is not available
         }
@@ -911,6 +915,17 @@ impl Component for Chat<'static> {
                     unknown => {
                         warn!(?unknown, "unknown command");
                     }
+                }
+            }
+            Action::SubmitPrompt(prompt) => {
+                if self.state.state == ChatState::Ready {
+                    self.submit_value(prompt.to_owned());
+                } else {
+                    warn!(
+                        ?prompt,
+                        state = %self.state.state,
+                        "auto submit skipped while busy"
+                    );
                 }
             }
             _ => (),

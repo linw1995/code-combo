@@ -12,6 +12,7 @@ pub enum Action {
     Tool(ToolAction),
     Session(SessionAction),
     Command(String),
+    SubmitPrompt(String),
 
     Blur,
     Focus,
