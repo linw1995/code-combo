@@ -2,9 +2,9 @@ use coco_macro::ComponentExt;
 use code_combo::{
     Agent, Block as ChatBlock, Config, Content as ChatContent, Message as ChatMessage, Output,
     SessionEnv, StarterCommand, StarterError, StarterEvent, StopReason, TextEdit, ToolUse,
+    discover_with_cancel,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use futures::StreamExt;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -15,9 +15,9 @@ use ratatui::{
 };
 
 use serde::{Deserialize, Serialize};
-use std::{path::Path, time::Duration};
+use std::time::Duration;
 use time::OffsetDateTime;
-use tokio::{fs, time::Instant};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -939,11 +939,6 @@ impl Component for Chat<'static> {
     }
 }
 
-struct DiscoverResult {
-    starters: Vec<code_combo::Starter>,
-    cancelled: bool,
-}
-
 async fn task_combo_discover(cancel_token: CancellationToken) {
     let tx = global::event_tx();
     let config = global::config().await;
@@ -1007,23 +1002,23 @@ async fn task_combo_execute(name: String, cancel_token: CancellationToken) {
         .build()
         .expect("failed to build session");
     let starter_path = starter.path.clone();
-    let execution = StarterCommand::new(&starter.path)
-        .session_env(session_env)
-        .execute();
 
-    let starter = match run_execution_with_cancel(execution, cancel_token.clone(), |event| {
-        if let StarterEvent::Output { chunk } = event {
-            tx.send(
-                ComboEvent::Output {
-                    name: name.clone(),
-                    chunk,
-                }
-                .into(),
-            )
-            .unwrap();
-        }
-    })
-    .await
+    let starter = match StarterCommand::new(&starter.path)
+        .session_env(session_env)
+        .execute()
+        .consume_with_cancel(cancel_token.clone(), |event| {
+            if let StarterEvent::Output { chunk } = event {
+                tx.send(
+                    ComboEvent::Output {
+                        name: name.clone(),
+                        chunk,
+                    }
+                    .into(),
+                )
+                .unwrap();
+            }
+        })
+        .await
     {
         Ok(starter) => starter,
         Err(err) => {
@@ -1065,94 +1060,6 @@ async fn task_combo_execute(name: String, cancel_token: CancellationToken) {
         .into(),
     )
     .unwrap();
-}
-
-async fn discover_with_cancel(combo_dir: &Path, cancel_token: CancellationToken) -> DiscoverResult {
-    let mut starters = Vec::new();
-    let mut entries = match fs::read_dir(combo_dir).await {
-        Ok(entries) => entries,
-        Err(err) => {
-            warn!(?combo_dir, ?err, "read dir error");
-            return DiscoverResult {
-                starters,
-                cancelled: false,
-            };
-        }
-    };
-
-    loop {
-        let entry = tokio::select! {
-            _ = cancel_token.cancelled() => {
-                return DiscoverResult { starters, cancelled: true };
-            }
-            entry = entries.next_entry() => entry,
-        };
-        let entry = match entry {
-            Ok(Some(entry)) => entry,
-            Ok(None) => break,
-            Err(err) => {
-                warn!(?combo_dir, ?err, "read dir error");
-                break;
-            }
-        };
-
-        let path = entry.path();
-        let session_env = SessionEnv::builder()
-            .build()
-            .expect("failed to build session");
-        let execution = StarterCommand::new(path.to_string_lossy())
-            .discovery(true)
-            .session_env(session_env)
-            .execute();
-        let starter = match run_execution_with_cancel(execution, cancel_token.clone(), |_| {}).await
-        {
-            Ok(starter) => starter,
-            Err(err) => {
-                warn!(?err, "starter join error");
-                continue;
-            }
-        };
-
-        if matches!(&starter.combo, Err(StarterError::Cancelled)) || cancel_token.is_cancelled() {
-            return DiscoverResult {
-                starters,
-                cancelled: true,
-            };
-        }
-
-        starters.push(starter);
-    }
-
-    DiscoverResult {
-        starters,
-        cancelled: false,
-    }
-}
-
-async fn run_execution_with_cancel<F>(
-    mut execution: code_combo::StarterExecution,
-    cancel_token: CancellationToken,
-    mut on_event: F,
-) -> Result<code_combo::Starter, tokio::task::JoinError>
-where
-    F: FnMut(StarterEvent),
-{
-    let mut cancelled = false;
-    loop {
-        tokio::select! {
-            _ = cancel_token.cancelled(), if !cancelled => {
-                cancelled = true;
-                execution.cancel();
-            }
-            event = execution.next() => {
-                let Some(event) = event else {
-                    break;
-                };
-                on_event(event);
-            }
-        }
-    }
-    execution.wait().await
 }
 
 async fn task_chat(mut agent: Agent, content: ChatContent, cancel_token: CancellationToken) {

@@ -69,10 +69,12 @@ impl Combo {
     }
 }
 
+mod discovery;
 mod session;
 mod session_env;
 mod starter;
 
+pub use discovery::*;
 pub use session::{
     ClientMessage, ControlAction, MetadataPayload, MetadataResponse, PromptPayload,
     RecordChunkPayload, RecordControl, RecordEndPayload, RecordSession, RecordStartPayload,
@@ -80,6 +82,4 @@ pub use session::{
     SessionSocketServer,
 };
 pub use session_env::{SessionEnv, SessionEnvBuilder, SessionEnvError};
-pub use starter::{
-    Starter, StarterCommand, StarterError, StarterEvent, StarterExecution, discover_combo_starters,
-};
+pub use starter::{Starter, StarterCommand, StarterError, StarterEvent, StarterExecution};

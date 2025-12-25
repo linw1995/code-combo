@@ -10,10 +10,10 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use snafu::prelude::*;
 use tokio::{
-    fs,
     sync::{mpsc, oneshot},
     task::{self, JoinHandle},
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -96,6 +96,32 @@ impl StarterExecution {
     pub async fn wait(self) -> Result<Starter, tokio::task::JoinError> {
         self.join_handle.await
     }
+
+    pub async fn consume_with_cancel<F>(
+        mut self,
+        cancel_token: CancellationToken,
+        mut on_event: F,
+    ) -> Result<Starter, tokio::task::JoinError>
+    where
+        F: FnMut(StarterEvent),
+    {
+        let mut cancelled = false;
+        loop {
+            tokio::select! {
+                _ = cancel_token.cancelled(), if !cancelled => {
+                    cancelled = true;
+                    self.cancel();
+                }
+                event = self.next() => {
+                    let Some(event) = event else {
+                        break;
+                    };
+                    on_event(event);
+                }
+            }
+        }
+        self.wait().await
+    }
 }
 
 #[derive(Debug)]
@@ -163,35 +189,6 @@ impl StarterCommand {
             self.discovery,
             self.session_env,
         )
-    }
-}
-
-pub async fn discover_combo_starters(path: &str) -> Vec<Starter> {
-    match fs::read_dir(path).await {
-        Ok(mut entries) => {
-            let mut starters = vec![];
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let path = entry.path();
-                let session_env = SessionEnv::builder()
-                    .build()
-                    .expect("failed to build session");
-                let execution = StarterCommand::new(path.to_string_lossy())
-                    .discovery(true)
-                    .session_env(session_env)
-                    .execute();
-                starters.push(
-                    execution
-                        .wait()
-                        .await
-                        .expect("execute_starter task success"),
-                );
-            }
-            starters
-        }
-        Err(err) => {
-            warn!(?path, ?err, "read dir error");
-            Vec::new()
-        }
     }
 }
 
@@ -844,7 +841,7 @@ mod tests {
         std::fs::write(&file_path, code)?;
 
         // Get current permissions
-        let metadata = fs::metadata(&file_path).await?;
+        let metadata = tokio::fs::metadata(&file_path).await?;
         let mut permissions = metadata.permissions();
 
         // Set the executable bit (octal 0o755 for owner read/write/execute, group read/execute, others read/execute)
@@ -853,7 +850,7 @@ mod tests {
         permissions.set_mode(0o755);
 
         // Apply the new permissions
-        fs::set_permissions(&file_path, permissions).await?;
+        tokio::fs::set_permissions(&file_path, permissions).await?;
 
         Ok((temp_dir, file_path.to_string_lossy().to_string()))
     }
