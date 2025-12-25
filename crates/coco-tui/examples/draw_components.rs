@@ -52,7 +52,6 @@ async fn main() -> Result<()> {
     config.config_dir = config_dir;
     global::set_config(config.clone()).await;
 
-    let mut app = app::App::new(config.clone())?;
     let component: Box<dyn Component> = match args.command {
         Some(Commands::CodeHighlight) => {
             let app = CodeHighlight::try_new(
@@ -79,9 +78,13 @@ async fn main() -> Result<()> {
             let (type_id, s): (String, Session) = session::load_related(s)?;
             session::load_component(&type_id, s)?
         }
-        None => Box::new(Chat::new(config)),
+        None => {
+            let mut app = Chat::new(config);
+            app.setup().await;
+            Box::new(app)
+        }
     };
-    app.set_root(component);
+    let mut app = app::App::new(component)?;
 
     let result = app.run().await;
 

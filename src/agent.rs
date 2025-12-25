@@ -18,6 +18,8 @@ pub use executor::{ExecuteStatus, Executor, Input, Output};
 pub struct Agent {
     config: Config,
     executor: Executor,
+
+    system_prompt: String,
     /// Shared messages across cloned instances.
     messages: Arc<Mutex<Vec<Message>>>,
 }
@@ -31,9 +33,18 @@ impl Agent {
     pub fn new(config: Config) -> Self {
         Self {
             config,
+            system_prompt: String::new(),
             executor: Executor::default(),
             messages: Arc::new(Mutex::new(vec![])),
         }
+    }
+
+    pub fn system_prompt(&self) -> &str {
+        &self.system_prompt
+    }
+
+    pub fn set_system_prompt(&mut self, system_prompt: &str) {
+        self.system_prompt = system_prompt.to_string()
     }
 
     pub async fn dump_messages(&self) -> Vec<Message> {
@@ -52,6 +63,7 @@ impl Agent {
 
         let response = client
             .messages()
+            .system_prompt(&self.system_prompt)
             .conversations(messages.clone())
             .tools(self.executor.anthropic_tools())
             .call()

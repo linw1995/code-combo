@@ -3,7 +3,6 @@ use std::{
     time::Duration,
 };
 
-use code_combo::Config;
 use crossterm::{
     cursor,
     event::{Event as CrosstermEvent, EventStream, KeyEvent},
@@ -20,13 +19,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, trace, warn};
 
-use crate::{
-    actions::Action,
-    components::{Chat, Component},
-    error::Result,
-    events::Event,
-    global,
-};
+use crate::{actions::Action, components::Component, error::Result, events::Event, global};
 
 pub struct App {
     terminal: ratatui::Terminal<Backend<Stdout>>,
@@ -49,7 +42,7 @@ pub struct App {
 
 impl App {
     /// Construct a new instance of [`App`].
-    pub fn new(config: Config) -> Result<Self> {
+    pub fn new(root: Box<dyn Component>) -> Result<Self> {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (action_tx, action_rx) = mpsc::unbounded_channel();
 
@@ -66,7 +59,7 @@ impl App {
             action_tx,
             action_rx,
             dirty: true,
-            root: Box::new(Chat::new(config)),
+            root,
             frame_rate: 60.0,
             tick_rate: 4.0,
         })
