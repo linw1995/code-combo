@@ -8,7 +8,7 @@ use ratatui::{
     Frame,
     layout::Alignment,
     prelude::Rect,
-    style::Stylize,
+    style::Style,
     symbols::border,
     text::{Line, Span},
     widgets::{Block, Borders},
@@ -25,6 +25,7 @@ use crate::{
     events::{AnswerEvent, AskEvent, Event},
     global::{self, State},
     session::{self, Session},
+    theme::FinalizedTheme,
 };
 
 mod bash;
@@ -110,36 +111,57 @@ impl Tool {
         self.inner.write().state = new_state
     }
 
-    fn get_title_spans(&self) -> Vec<Span<'_>> {
-        let mut spans = vec![
-            " 󱁤  ".blue(),
-            "Tool: ".into(),
-            self.inner.tool_use.name.clone().cyan(),
-        ];
-        match self.inner.state {
-            ToolState::Initing => spans.push("   Initing...".yellow()),
-            ToolState::PendingConfirmation => {
-                spans.push("   Awaiting confirmation".blue());
-            }
-            ToolState::Executing => {
-                spans.push("   Executing...".yellow());
-            }
-            ToolState::Completed => {
-                spans.push("   Completed".green());
-            }
-            ToolState::Failed => {
-                spans.push("   Failed".red());
-            }
-            ToolState::Cancelled => {
-                spans.push("   Cancelled".red());
-            }
+    fn capitalize_first_ascii(s: &str) -> String {
+        let mut bytes = s.as_bytes().to_vec();
+        if let Some(b) = bytes.first_mut() {
+            b.make_ascii_uppercase();
         }
+        String::from_utf8(bytes).unwrap()
+    }
+
+    fn get_title_spans(&self, theme: &FinalizedTheme) -> Vec<Span<'_>> {
+        let apply_dim = |style: Style| {
+            if self.is_focused {
+                style
+            } else {
+                style.patch(theme.ui.tool_title_dim)
+            }
+        };
+
+        let (state_text, state_style) = {
+            use ToolState::*;
+            match self.inner.state {
+                Initing => ("Initing...", theme.ui.tool_title_state_initing),
+                PendingConfirmation => (
+                    "Awaiting confirmation",
+                    theme.ui.tool_title_state_pending_confirmation,
+                ),
+                Executing => ("Executing...", theme.ui.tool_title_state_executing),
+                Completed => ("Completed", theme.ui.tool_title_state_completed),
+                Failed => ("Failed", theme.ui.tool_title_state_failed),
+                Cancelled => ("Cancelled", theme.ui.tool_title_state_cancelled),
+            }
+        };
+
+        let mut spans = vec![
+            Span::styled(
+                format!(
+                    " {} ",
+                    Self::capitalize_first_ascii(&self.inner.tool_use.name)
+                ),
+                apply_dim(theme.ui.tool_title_name),
+            ),
+            Span::styled(state_text, apply_dim(state_style)),
+        ];
         if matches!(self.inner.state, ToolState::Completed | ToolState::Failed)
             && let Some(line) = self.widget.reminder_line()
         {
-            spans.extend(line.spans);
+            spans.extend(line.spans.into_iter().map(|mut span| {
+                span.style = apply_dim(span.style);
+                span
+            }));
         }
-        spans.push(" ".into());
+        spans.push(Span::raw(" "));
         spans
     }
 }
@@ -253,7 +275,7 @@ impl Component for Tool {
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         // Create block with title containing tool name and status
         let theme = global::theme();
-        let title_spans = self.get_title_spans();
+        let title_spans = self.get_title_spans(theme);
         let mut block = Block::new()
             .borders(Borders::TOP)
             .title(Line::from("")) // placeholder for border on the left of the actual title
