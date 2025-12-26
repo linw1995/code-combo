@@ -13,6 +13,56 @@
             "add_modifier": "BOLD|ITALIC"
         },
         "shortcut_desc": "overlay0",
+        "auto_accept_on": "green",
+        "auto_accept_off": "overlay0",
+        "block_border_active": "text",
+        "block_border_inactive": "overlay0",
+        "command_palette_bg": {
+            "fg": "surface0",
+            "bg": "mantle"
+        },
+        "command_palette_item_bg": {
+            "fg": "surface0",
+            "bg": "mantle"
+        },
+        "command_palette_item_bg_focus": {
+            "fg": "surface0",
+            "bg": "mantle"
+        },
+        "tool_title_name": {
+            "color": "blue",
+            "add_modifier": "BOLD"
+        },
+        "tool_title_state_initing": "yellow",
+        "tool_title_state_pending_confirmation": "blue",
+        "tool_title_state_executing": "yellow",
+        "tool_title_state_completed": "green",
+        "tool_title_state_failed": "red",
+        "tool_title_state_cancelled": "red",
+        "tool_title_dim": {
+            "add_modifier": "DIM"
+        },
+        "combo_title_name": {
+            "fg": "blue",
+            "add_modifier": "BOLD"
+        },
+        "combo_title_state_discovering": "yellow",
+        "combo_title_state_not_found": "red",
+        "combo_title_state_cancelled": "red",
+        "combo_title_state_executing": "yellow",
+        "combo_title_state_completed": "green",
+        "combo_title_state_failed": "red",
+        "combo_title_dim": {
+            "add_modifier": "DIM"
+        },
+        "bash_tab_stdout": "blue",
+        "bash_tab_stderr": "red",
+        "bash_tab_mixed": "overlay0",
+        "bash_tab_active": {
+            "add_modifier": "REVERSED"
+        },
+        "bash_stdout_marker": "blue",
+        "bash_stderr_marker": "red",
         "tab_spaces": "overlay0"
     },
     "tree_sitter": {

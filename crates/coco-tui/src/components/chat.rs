@@ -453,11 +453,9 @@ impl Chat<'static> {
         block = block.title_bottom(Line::from(""));
         match self.state.focus {
             Focus::Input => block
-                .title_bottom(shortcuts_desc(&[("AutoAccept", "S-Tab")]))
                 .title_bottom(shortcuts_desc(&[("Blur", "Esc")]))
                 .title_bottom(shortcuts_desc(&[("Submit", "CR")])),
             Focus::InputBlur => block
-                .title_bottom(shortcuts_desc(&[("AutoAccept", "S-Tab")]))
                 .title_bottom(shortcuts_desc(&[("Focus", "CR")]))
                 .title_bottom(shortcuts_desc(&[("Commands", "C-p")]))
                 .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")])),
@@ -467,7 +465,6 @@ impl Chat<'static> {
                     block = block.title_bottom(shortcuts_desc(&[("Back", "Esc")]));
                 }
                 block
-                    .title_bottom(shortcuts_desc(&[("AutoAccept", "S-Tab")]))
                     .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")]))
                     .title_bottom(shortcuts_desc(&[("Scroll Up", "C-y"), ("Down", "C-e")]))
                     .title_bottom(shortcuts_desc(&[("Scroll+ Up", "C-u"), ("Down", "C-d")]))
@@ -504,17 +501,19 @@ impl Chat<'static> {
     }
 
     fn auto_accept_indicator(&self) -> Line<'static> {
-        let label = if self.state.auto_accept_edits {
-            "AutoAccept: ON"
+        let theme = global::theme();
+        let (status, status_style) = if self.state.auto_accept_edits {
+            ("on", theme.ui.auto_accept_on)
         } else {
-            "AutoAccept: OFF"
+            ("off", theme.ui.auto_accept_off)
         };
-        let style = if self.state.auto_accept_edits {
-            Style::default().green()
-        } else {
-            Style::default().dark_gray()
-        };
-        Line::from(Span::styled(format!(" {label} "), style))
+        Line::from(vec![
+            Span::styled(" accept edits: ", theme.ui.shortcut_desc),
+            Span::styled(status, status_style),
+            Span::raw(" "),
+            Span::styled("<S-Tab>", theme.ui.shortcut),
+            Span::raw(" "),
+        ])
     }
 
     fn reject_text_edit(
@@ -945,15 +944,16 @@ impl Component for Chat<'static> {
             .border_set(border::THICK);
         frame.render_widget(self.block_bottom_with_shortcuts_desc(block), divider);
 
+        let theme = global::theme();
         let mut bottom_block = Block::new().borders(Borders::BOTTOM);
         bottom_block = if !matches!(self.state.focus, Focus::Messages) {
             bottom_block
                 .border_set(border::THICK)
-                .border_style(Style::reset())
+                .border_style(theme.ui.block_border_active)
         } else {
             bottom_block
                 .border_set(border::PLAIN)
-                .border_style(Style::default().dark_gray())
+                .border_style(theme.ui.block_border_inactive)
         };
         bottom_block = bottom_block
             .title_bottom(Line::from(""))

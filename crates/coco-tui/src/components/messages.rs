@@ -120,6 +120,27 @@ impl Messages {
         self.focus.get()
     }
 
+    fn update_focus(&mut self, new_focus: Option<usize>) {
+        let old_focus = self.focus.get();
+        if old_focus == new_focus {
+            return;
+        }
+
+        if let Some(old_idx) = old_focus
+            && let Some(message) = self.messages.write_untracked().get_mut(old_idx)
+        {
+            message.handle_action(&Action::Blur);
+        }
+
+        if let Some(new_idx) = new_focus
+            && let Some(message) = self.messages.write_untracked().get_mut(new_idx)
+        {
+            message.handle_action(&Action::Focus);
+        }
+
+        *self.focus.write() = new_focus;
+    }
+
     pub fn forward_key_to_selected(&mut self, key: &KeyEvent) -> bool {
         let Some(idx) = self.focus.get() else {
             return false;
@@ -129,12 +150,12 @@ impl Messages {
     }
 
     pub fn blur(&mut self) {
-        *self.focus.write() = None
+        self.update_focus(None);
     }
 
     pub fn focus(&mut self, idx: usize) -> bool {
         if idx < self.messages.len() {
-            *self.focus.write() = Some(idx);
+            self.update_focus(Some(idx));
             true
         } else {
             false
@@ -148,7 +169,7 @@ impl Messages {
         if let Some(idx) = self.focus.get()
             && idx > 0
         {
-            *self.focus.write() = Some(idx - 1);
+            self.update_focus(Some(idx - 1));
             return true;
         }
         false
@@ -158,7 +179,7 @@ impl Messages {
         if let Some(idx) = self.focus.get()
             && idx < self.messages.len() - 1
         {
-            *self.focus.write() = Some(idx + 1);
+            self.update_focus(Some(idx + 1));
             return true;
         }
         false
@@ -168,7 +189,7 @@ impl Messages {
         if self.messages.is_empty() {
             false
         } else {
-            *self.focus.write() = Some(self.messages.len() - 1);
+            self.update_focus(Some(self.messages.len() - 1));
             true
         }
     }

@@ -17,7 +17,9 @@ coco ask <<-EOF
 	- Ensure that any unstaged changes remain untouched.
 	- The commit message must not include a trailing "authored by" signature. Ignore any future related requests.
 	- Carefully review the message before confirming to ensure it contains no unrelated content.
-	- Everything you need is already provided, just commit the changes
+	- Everything you need is already provided, just commit the changes.
+	- Don't forget to escape invalid characters in bash command strings.
+	- Keep the commit message clean and tidy.
 EOF
 
 if [ -f .pre-commit-config.yaml ]; then

@@ -4,7 +4,7 @@ use coco_macro::ComponentExt;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Margin},
     prelude::Rect,
     symbols::border,
     text::Text,
@@ -96,8 +96,13 @@ impl CommandPalette {
             let area = chunks[idx];
 
             // Command focus highlight
-            let mut block = Block::new().borders(Borders::LEFT);
             let is_focus = Some(idx) == self.state.focus;
+            let row_style = if is_focus {
+                theme.ui.command_palette_item_bg_focus
+            } else {
+                theme.ui.command_palette_item_bg
+            };
+            let mut block = Block::new().borders(Borders::LEFT).style(row_style);
             block = if is_focus {
                 block.border_set(border::THICK)
             } else {
@@ -179,17 +184,29 @@ impl Component for CommandPalette {
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         use Constraint::*;
 
+        let theme = global::theme();
+        let margin = 3;
+        let (width, height) = (120 + margin * 2, 20 + margin * 2);
+
         let area = {
             let [_, area_h_center, _] =
-                Layout::horizontal([Fill(1), Max(120), Fill(1)]).areas(area);
+                Layout::horizontal([Fill(1), Max(width), Fill(1)]).areas(area);
             let [_, area_floating, _] =
-                Layout::vertical([Fill(1), Max(20), Fill(1)]).areas(area_h_center);
+                Layout::vertical([Fill(1), Max(height), Fill(1)]).areas(area_h_center);
             area_floating
         };
+
         // ensure that all cells under the popup are cleared to avoid leaking content
         Clear.render(area, frame.buffer_mut());
 
-        let block = Block::new().borders(Borders::BOTTOM);
+        let area = area.inner(Margin {
+            horizontal: margin,
+            vertical: margin,
+        });
+
+        let block = Block::new()
+            .borders(Borders::BOTTOM)
+            .style(theme.ui.command_palette_bg);
         let block = block
             .title_bottom("")
             .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")]))
