@@ -17,6 +17,18 @@
         "auto_accept_off": "overlay0",
         "block_border_active": "text",
         "block_border_inactive": "overlay0",
+        "command_palette_bg": {
+            "fg": "surface0",
+            "bg": "mantle"
+        },
+        "command_palette_item_bg": {
+            "fg": "surface0",
+            "bg": "mantle"
+        },
+        "command_palette_item_bg_focus": {
+            "fg": "surface0",
+            "bg": "mantle"
+        },
         "tool_title_name": {
             "color": "blue",
             "add_modifier": "BOLD"
