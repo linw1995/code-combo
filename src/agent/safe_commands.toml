@@ -120,5 +120,9 @@ allow_positional = true
 positional_path_from = 0
 
 [[commands]]
+command = ["git", "commit"]
+flags = [{ name = "--dry-run", arg = "none" }]
+
+[[commands]]
 command = ["cargo", "check"]
 allow_any = true
