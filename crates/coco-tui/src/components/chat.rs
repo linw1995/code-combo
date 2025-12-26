@@ -944,15 +944,16 @@ impl Component for Chat<'static> {
             .border_set(border::THICK);
         frame.render_widget(self.block_bottom_with_shortcuts_desc(block), divider);
 
+        let theme = global::theme();
         let mut bottom_block = Block::new().borders(Borders::BOTTOM);
         bottom_block = if !matches!(self.state.focus, Focus::Messages) {
             bottom_block
                 .border_set(border::THICK)
-                .border_style(Style::reset())
+                .border_style(theme.ui.block_border_active)
         } else {
             bottom_block
                 .border_set(border::PLAIN)
-                .border_style(Style::default().dark_gray())
+                .border_style(theme.ui.block_border_inactive)
         };
         bottom_block = bottom_block
             .title_bottom(Line::from(""))

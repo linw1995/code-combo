@@ -23,7 +23,7 @@ use crate::{
     components::{Component, Content, ContentComponent, Persistable},
     error::*,
     events::{AnswerEvent, AskEvent, Event},
-    global::State,
+    global::{self, State},
     session::{self, Session},
 };
 
@@ -62,6 +62,7 @@ struct Inner {
 pub struct Tool {
     inner: State<Inner>,
     widget: Box<dyn ContentComponent>,
+    is_focused: bool,
 }
 
 // TODO: Allow user to edit tool input parameters
@@ -92,6 +93,7 @@ impl Tool {
                 state: ToolState::default(),
             }),
             widget,
+            is_focused: false,
         }
     }
 
@@ -160,6 +162,7 @@ impl Persistable for Tool {
         Ok(Self {
             inner: State::new(inner),
             widget,
+            is_focused: false,
         })
     }
 }
@@ -211,6 +214,12 @@ impl Component for Tool {
 
     fn update(&mut self, action: &Action) {
         match action {
+            Action::Focus => {
+                self.is_focused = true;
+            }
+            Action::Blur => {
+                self.is_focused = false;
+            }
             Action::Tool(ToolAction::Grant(ToolUse { id, .. })) => {
                 if self.tool_use_id() == id {
                     self.update_state(ToolState::Executing);
@@ -243,13 +252,22 @@ impl Component for Tool {
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         // Create block with title containing tool name and status
+        let theme = global::theme();
         let title_spans = self.get_title_spans();
-        let block = Block::new()
+        let mut block = Block::new()
             .borders(Borders::TOP)
-            .border_set(border::THICK)
             .title(Line::from("")) // placeholder for border on the left of the actual title
             .title(Line::from(title_spans))
             .title_alignment(Alignment::Left);
+        block = if self.is_focused {
+            block
+                .border_set(border::THICK)
+                .border_style(theme.ui.block_border_active)
+        } else {
+            block
+                .border_set(border::PLAIN)
+                .border_style(theme.ui.block_border_inactive)
+        };
 
         // Get content area inside the block
         frame.render_widget(&block, area);
