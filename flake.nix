@@ -78,6 +78,7 @@
                 bash
               ];
               cargoTestFlags = [
+                "--all"
                 "--no-capture"
               ];
               useNextest = true;
