@@ -42,6 +42,19 @@
         "tool_title_dim": {
             "add_modifier": "DIM"
         },
+        "combo_title_name": {
+            "fg": "blue",
+            "add_modifier": "BOLD"
+        },
+        "combo_title_state_discovering": "yellow",
+        "combo_title_state_not_found": "red",
+        "combo_title_state_cancelled": "red",
+        "combo_title_state_executing": "yellow",
+        "combo_title_state_completed": "green",
+        "combo_title_state_failed": "red",
+        "combo_title_dim": {
+            "add_modifier": "DIM"
+        },
         "bash_tab_stdout": "blue",
         "bash_tab_stderr": "red",
         "bash_tab_mixed": "overlay0",

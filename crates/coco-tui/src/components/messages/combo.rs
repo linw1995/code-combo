@@ -4,7 +4,7 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout},
     prelude::Rect,
-    style::Stylize,
+    style::{Style, Stylize},
     text::{Line, Span},
     widgets::{Block, Borders},
 };
@@ -17,8 +17,9 @@ use crate::{
     components::{Component, Content, ContentComponent, Persistable, Plain},
     error::*,
     events::{ComboEvent, Event},
-    global::State,
+    global::{self, State},
     session::{self, Session},
+    theme::FinalizedTheme,
     widgets::Paragraph,
 };
 
@@ -62,6 +63,7 @@ pub struct Combo {
     state: State<Inner>,
 
     widget: Option<Plain>,
+    is_focused: bool,
 }
 
 const LIMIT: usize = 10;
@@ -78,6 +80,7 @@ impl Combo {
                 ..Default::default()
             }),
             widget: None,
+            is_focused: false,
         }
     }
 
@@ -158,36 +161,59 @@ impl Combo {
         }
     }
 
-    fn get_title_spans(&self) -> Vec<Span<'_>> {
-        // Use block title to show progress message and indicator with simple loading character
-        let mut spans = vec![" 󱐋 ".yellow(), " Combo:".into()];
-        match self.state.starter_state {
-            StarterState::Discovering => spans.push("   Discovering combo starters...".yellow()),
-            StarterState::NotFound => {
-                spans.push(self.state.name.clone().cyan());
-                spans.push("   Not found".red())
+    fn get_title_spans(&self, theme: &FinalizedTheme) -> Vec<Span<'_>> {
+        let apply_dim = |style: Style| {
+            if self.is_focused {
+                style
+            } else {
+                style.patch(theme.ui.combo_title_dim)
             }
-            StarterState::Cancelled => {
-                spans.push(self.state.name.clone().cyan());
-                spans.push("   Cancelled".red());
-            }
+        };
+
+        let (state_text, state_style) = match self.state.starter_state {
+            StarterState::Discovering => (
+                " Discovering combo starters...",
+                theme.ui.combo_title_state_discovering,
+            ),
+            StarterState::NotFound => (" Not found", theme.ui.combo_title_state_not_found),
+            StarterState::Cancelled => (" Cancelled", theme.ui.combo_title_state_cancelled),
             StarterState::Executing { .. } => {
-                spans.push(self.state.name.clone().cyan());
-                spans.push("   Executing...".yellow());
+                (" Executing...", theme.ui.combo_title_state_executing)
             }
             StarterState::Finalized { .. } => {
-                spans.push(self.state.name.clone().cyan());
-                spans.push(if self.state.is_error {
-                    "   Failed".red()
+                if self.state.is_error {
+                    (" Failed", theme.ui.combo_title_state_failed)
                 } else {
-                    "   Completed".green()
-                });
+                    (" Completed", theme.ui.combo_title_state_completed)
+                }
+            }
+        };
+
+        let mut spans = vec![Span::styled(
+            " Combo:",
+            apply_dim(theme.ui.combo_title_name),
+        )];
+
+        match self.state.starter_state {
+            StarterState::Discovering => {
+                spans.push(Span::styled(state_text, apply_dim(state_style)));
+            }
+            _ => {
+                spans.push(Span::styled(
+                    format!(" {}", self.state.name),
+                    apply_dim(theme.ui.combo_title_name),
+                ));
+                spans.push(Span::styled(state_text, apply_dim(state_style)));
             }
         }
+
         if let Some(line) = self.reminder_line() {
-            spans.extend(line.spans);
+            spans.extend(line.spans.into_iter().map(|mut span| {
+                span.style = apply_dim(span.style);
+                span
+            }));
         }
-        spans.push(" ".into());
+        spans.push(Span::raw(" "));
         spans
     }
 }
@@ -226,7 +252,10 @@ impl Content for Combo {
 
     fn reminder_line(&self) -> Option<Line<'static>> {
         if self.has_collapsible_body() && self.state.display_state.is_collapsed() {
-            Some(Line::from(Span::raw(" (folded)").dark_gray()))
+            Some(Line::from(Span::styled(
+                " (folded)",
+                Style::default().dark_gray(),
+            )))
         } else {
             None
         }
@@ -248,6 +277,7 @@ impl Persistable for Combo {
         Ok(Self {
             state: State::new(state),
             widget,
+            is_focused: false,
         })
     }
 }
@@ -288,15 +318,23 @@ impl Component for Combo {
     }
 
     fn update(&mut self, action: &Action) {
-        if let Action::Blur = action {
-            self.on_blur()
+        match action {
+            Action::Focus => {
+                self.is_focused = true;
+            }
+            Action::Blur => {
+                self.is_focused = false;
+                self.on_blur();
+            }
+            _ => (),
         }
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         use Constraint::Length;
 
-        let title_spans = self.get_title_spans();
+        let theme = global::theme();
+        let title_spans = self.get_title_spans(theme);
         let block = Block::new()
             .borders(Borders::TOP)
             .title(Line::from("")) // placeholder for border on the left of the actual title
