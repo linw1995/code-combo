@@ -5,6 +5,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout},
     prelude::Rect,
     style::{Style, Stylize},
+    symbols::border,
     text::{Line, Span},
     widgets::{Block, Borders},
 };
@@ -335,11 +336,20 @@ impl Component for Combo {
 
         let theme = global::theme();
         let title_spans = self.get_title_spans(theme);
-        let block = Block::new()
+        let mut block = Block::new()
             .borders(Borders::TOP)
             .title(Line::from("")) // placeholder for border on the left of the actual title
             .title(Line::from(title_spans))
             .title_alignment(Alignment::Left);
+        block = if self.is_focused {
+            block
+                .border_set(border::THICK)
+                .border_style(theme.ui.block_border_active)
+        } else {
+            block
+                .border_set(border::PLAIN)
+                .border_style(theme.ui.block_border_inactive)
+        };
         frame.render_widget(&block, area);
 
         if self.has_collapsible_body() && self.state.display_state.is_collapsed() {
