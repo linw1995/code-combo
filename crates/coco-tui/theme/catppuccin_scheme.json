@@ -13,6 +13,8 @@
             "add_modifier": "BOLD|ITALIC"
         },
         "shortcut_desc": "overlay0",
+        "auto_accept_on": "green",
+        "auto_accept_off": "overlay0",
         "tab_spaces": "overlay0"
     },
     "tree_sitter": {

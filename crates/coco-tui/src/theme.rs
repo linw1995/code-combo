@@ -75,6 +75,8 @@ build_theme_type!(FinalizedUiTheme {
     bot_role,
     shortcut,
     shortcut_desc,
+    auto_accept_on,
+    auto_accept_off,
     tab_spaces,
 });
 
@@ -101,6 +103,8 @@ impl Theme {
                     bot_role,
                     shortcut,
                     shortcut_desc,
+                    auto_accept_on,
+                    auto_accept_off,
                     tab_spaces,
                 }
             )?,
