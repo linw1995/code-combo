@@ -15,6 +15,12 @@
         "shortcut_desc": "overlay0",
         "auto_accept_on": "green",
         "auto_accept_off": "overlay0",
+        "bash_tab_stdout": "blue",
+        "bash_tab_stderr": "red",
+        "bash_tab_mixed": "overlay0",
+        "bash_tab_active": {
+            "add_modifier": "REVERSED"
+        },
         "bash_stdout_marker": "blue",
         "bash_stderr_marker": "red",
         "tab_spaces": "overlay0"

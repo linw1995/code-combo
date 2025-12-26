@@ -94,11 +94,12 @@ fn output_marker_width(view: BashOutputView) -> u16 {
 }
 
 fn render_tabs_panel(view: BashOutputView) -> Paragraph<'static> {
-    let highlight = Style::default().reversed();
+    let theme = global::theme();
+    let highlight = theme.ui.bash_tab_active;
     let items = [
-        (BashOutputView::Stdout, " 1 ", Style::default().blue()),
-        (BashOutputView::Stderr, " 2 ", Style::default().red()),
-        (BashOutputView::Mixed, " 3 ", Style::default().dark_gray()),
+        (BashOutputView::Stdout, " 1 ", theme.ui.bash_tab_stdout),
+        (BashOutputView::Stderr, " 2 ", theme.ui.bash_tab_stderr),
+        (BashOutputView::Mixed, " 3 ", theme.ui.bash_tab_mixed),
     ];
     let lines = items
         .into_iter()
