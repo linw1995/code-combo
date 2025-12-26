@@ -77,6 +77,8 @@ build_theme_type!(FinalizedUiTheme {
     shortcut_desc,
     auto_accept_on,
     auto_accept_off,
+    bash_stdout_marker,
+    bash_stderr_marker,
     tab_spaces,
 });
 
@@ -105,6 +107,8 @@ impl Theme {
                     shortcut_desc,
                     auto_accept_on,
                     auto_accept_off,
+                    bash_stdout_marker,
+                    bash_stderr_marker,
                     tab_spaces,
                 }
             )?,

@@ -125,12 +125,15 @@ fn limit_tail_lines<T>(mut lines: Vec<T>, max_lines: Option<usize>) -> Vec<T> {
     lines
 }
 
+const OUTPUT_MARKER: &str = "▐";
+
 fn build_output_view<'a>(
     output: Option<&BashOutput>,
     streamed_lines: &StreamedLines,
     view: BashOutputView,
     max_lines: Option<usize>,
 ) -> (Paragraph<'a>, Option<Paragraph<'a>>) {
+    let theme = global::theme();
     let mut lines: Vec<Line<'a>> = Vec::new();
     let Some(output) = output else {
         return (
@@ -163,34 +166,34 @@ fn build_output_view<'a>(
             if !streamed_lines.is_empty() {
                 for line in streamed_lines.iter() {
                     let marker_style = match line.stream {
-                        code_combo::StreamKind::Stdout => Style::default().blue(),
-                        code_combo::StreamKind::Stderr => Style::default().red(),
+                        code_combo::StreamKind::Stdout => theme.ui.bash_stdout_marker,
+                        code_combo::StreamKind::Stderr => theme.ui.bash_stderr_marker,
                     };
                     lines.push(Line::from(line.text.clone()));
-                    markers.push(Line::from(Span::styled("▌", marker_style)));
+                    markers.push(Line::from(Span::styled(OUTPUT_MARKER, marker_style)));
                 }
             } else if output.chunks.is_empty() {
                 for (marker_style, text) in [
-                    (Style::default().red(), &output.stderr),
-                    (Style::default().blue(), &output.stdout),
+                    (theme.ui.bash_stderr_marker, &output.stderr),
+                    (theme.ui.bash_stdout_marker, &output.stdout),
                 ] {
                     if text.is_empty() {
                         continue;
                     }
                     for line in text.lines() {
                         lines.push(Line::from(line.to_string()));
-                        markers.push(Line::from(Span::styled("▌", marker_style)));
+                        markers.push(Line::from(Span::styled(OUTPUT_MARKER, marker_style)));
                     }
                 }
             } else {
                 for chunk in &output.chunks {
                     let marker_style = match chunk.stream {
-                        code_combo::StreamKind::Stdout => Style::default().blue(),
-                        code_combo::StreamKind::Stderr => Style::default().red(),
+                        code_combo::StreamKind::Stdout => theme.ui.bash_stdout_marker,
+                        code_combo::StreamKind::Stderr => theme.ui.bash_stderr_marker,
                     };
                     for line in &chunk.lines {
                         lines.push(Line::from(line.clone()));
-                        markers.push(Line::from(Span::styled("▌", marker_style)));
+                        markers.push(Line::from(Span::styled(OUTPUT_MARKER, marker_style)));
                     }
                 }
             }
