@@ -55,6 +55,13 @@ impl CommandPalette {
         }
     }
 
+    pub fn set_commands(&mut self, commands: Vec<Command>) {
+        let focus = if commands.is_empty() { None } else { Some(0) };
+        let mut state = self.state.write();
+        state.commands = commands;
+        state.focus = focus;
+    }
+
     fn select_prev(&mut self) -> bool {
         if let Some(idx) = self.state.focus
             && idx > 0
