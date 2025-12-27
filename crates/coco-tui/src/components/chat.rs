@@ -1000,70 +1000,82 @@ impl Component for Chat<'static> {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        use Constraint::{Length, Min};
-
         match self.view {
-            ViewMode::Chat => {
-                let vertical = Layout::vertical([Min(0), Length(1), Length(1), Length(1)]);
-                let [area_messages, divider, area_input, bottom] = vertical.areas(area);
-
-                self.messages.draw(frame, area_messages)?;
-
-                let block = Block::new()
-                    .borders(Borders::BOTTOM)
-                    .border_set(border::THICK);
-                frame.render_widget(self.block_bottom_with_shortcuts_desc(block), divider);
-
-                let theme = global::theme();
-                let mut bottom_block = Block::new().borders(Borders::BOTTOM);
-                bottom_block = if !matches!(self.state.focus, Focus::Messages) {
-                    bottom_block
-                        .border_set(border::THICK)
-                        .border_style(theme.ui.block_border_active)
-                } else {
-                    bottom_block
-                        .border_set(border::PLAIN)
-                        .border_style(theme.ui.block_border_inactive)
-                };
-                bottom_block = bottom_block
-                    .title_bottom(Line::from(""))
-                    .title_bottom(self.widget_state_indicator());
-                bottom_block = bottom_block.title_bottom(self.auto_accept_indicator());
-                if let Some(line) = self.ctrl_c_reminder_line() {
-                    bottom_block = bottom_block.title_bottom(line);
-                }
-                frame.render_widget(bottom_block, bottom);
-                self.input.draw(frame, area_input)?;
-            }
-            ViewMode::Transcript => {
-                let vertical = Layout::vertical([Min(0), Length(1)]);
-                let [area_messages, bottom] = vertical.areas(area);
-                self.transcript.draw(frame, area_messages)?;
-
-                let theme = global::theme();
-                let mut bottom_block = Block::new()
-                    .borders(Borders::BOTTOM)
-                    .border_set(border::THICK)
-                    .border_style(theme.ui.block_border_active);
-                bottom_block = bottom_block
-                    .title_bottom(Line::from(""))
-                    .title_bottom(Line::from(" Transcript ").bold());
-                bottom_block = bottom_block
-                    .title_bottom(shortcuts_desc(&[("Back", "Esc")]))
-                    .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")]))
-                    .title_bottom(shortcuts_desc(&[("Scroll Up", "C-y"), ("Down", "C-e")]))
-                    .title_bottom(shortcuts_desc(&[("Scroll+ Up", "C-u"), ("Down", "C-d")]));
-                if let Some(line) = self.ctrl_c_reminder_line() {
-                    bottom_block = bottom_block.title_bottom(line);
-                }
-                frame.render_widget(bottom_block, bottom);
-            }
+            ViewMode::Chat => self.draw_chat(frame, area)?,
+            ViewMode::Transcript => self.draw_transcript(frame, area)?,
         }
 
         if self.state.focus == Focus::CommandPalette {
             // popup floating window
             self.command_palette.draw(frame, area)?;
         }
+
+        Ok(())
+    }
+}
+
+impl Chat<'static> {
+    fn draw_chat(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        use Constraint::{Length, Min};
+
+        let vertical = Layout::vertical([Min(0), Length(1), Length(1), Length(1)]);
+        let [area_messages, divider, area_input, bottom] = vertical.areas(area);
+
+        self.messages.draw(frame, area_messages)?;
+
+        let block = Block::new()
+            .borders(Borders::BOTTOM)
+            .border_set(border::THICK);
+        frame.render_widget(self.block_bottom_with_shortcuts_desc(block), divider);
+
+        let theme = global::theme();
+        let mut bottom_block = Block::new().borders(Borders::BOTTOM);
+        bottom_block = if !matches!(self.state.focus, Focus::Messages) {
+            bottom_block
+                .border_set(border::THICK)
+                .border_style(theme.ui.block_border_active)
+        } else {
+            bottom_block
+                .border_set(border::PLAIN)
+                .border_style(theme.ui.block_border_inactive)
+        };
+        bottom_block = bottom_block
+            .title_bottom(Line::from(""))
+            .title_bottom(self.widget_state_indicator());
+        bottom_block = bottom_block.title_bottom(self.auto_accept_indicator());
+        if let Some(line) = self.ctrl_c_reminder_line() {
+            bottom_block = bottom_block.title_bottom(line);
+        }
+        frame.render_widget(bottom_block, bottom);
+        self.input.draw(frame, area_input)?;
+
+        Ok(())
+    }
+
+    fn draw_transcript(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        use Constraint::{Length, Min};
+
+        let vertical = Layout::vertical([Min(0), Length(1)]);
+        let [area_messages, bottom] = vertical.areas(area);
+        self.transcript.draw(frame, area_messages)?;
+
+        let theme = global::theme();
+        let mut bottom_block = Block::new()
+            .borders(Borders::BOTTOM)
+            .border_set(border::THICK)
+            .border_style(theme.ui.block_border_active);
+        bottom_block = bottom_block
+            .title_bottom(Line::from(""))
+            .title_bottom(Line::from(" Transcript ").bold());
+        bottom_block = bottom_block
+            .title_bottom(shortcuts_desc(&[("Back", "Esc")]))
+            .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")]))
+            .title_bottom(shortcuts_desc(&[("Scroll Up", "C-y"), ("Down", "C-e")]))
+            .title_bottom(shortcuts_desc(&[("Scroll+ Up", "C-u"), ("Down", "C-d")]));
+        if let Some(line) = self.ctrl_c_reminder_line() {
+            bottom_block = bottom_block.title_bottom(line);
+        }
+        frame.render_widget(bottom_block, bottom);
 
         Ok(())
     }
