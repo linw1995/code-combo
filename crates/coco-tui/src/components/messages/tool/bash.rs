@@ -197,163 +197,127 @@ impl<'a> Bash<'a> {
 
     fn render_output(&self, max_lines: Option<usize>) -> (Paragraph<'a>, Option<Paragraph<'a>>) {
         let theme = global::theme();
-        let view = self.exec_view();
-        let exec_state = &self.state.exec_state;
-        let output = self.exec_output();
-        let has_any =
-            output.is_some() || !self.exec_chunks().is_empty() || !self.streamed_lines.is_empty();
-        if !has_any {
-            return (
+        let empty = |view: BashOutputView| {
+            (
                 Paragraph::new_wrap(Vec::new(), Wrap { trim: false }),
                 if view == BashOutputView::Mixed {
                     Some(Paragraph::new(Vec::<Line>::new()))
                 } else {
                     None
                 },
-            );
-        }
+            )
+        };
 
-        match view {
-            BashOutputView::Stdout => {
-                let mut lines: Vec<Line<'a>> = Vec::new();
-                let use_chunks = matches!(
-                    exec_state,
-                    ExecState::Executing { .. } | ExecState::Finished { .. }
-                ) && !self.exec_chunks().is_empty();
-                if use_chunks {
-                    for chunk in self.exec_chunks() {
-                        if chunk.stream != code_combo::StreamKind::Stdout {
-                            continue;
-                        }
-                        for line in &chunk.lines {
-                            lines.push(Line::from(line.clone()));
-                        }
-                    }
-                } else if let Some(output) = output {
-                    for line in output.stdout.lines() {
-                        lines.push(Line::from(line.to_string()));
-                    }
+        let push_chunk_lines =
+            |lines: &mut Vec<Line<'a>>, markers: &mut Vec<Line<'a>>, chunk: &OutputChunk| {
+                let marker_style = match chunk.stream {
+                    code_combo::StreamKind::Stdout => theme.ui.bash_stdout_marker,
+                    code_combo::StreamKind::Stderr => theme.ui.bash_stderr_marker,
+                };
+                for line in &chunk.lines {
+                    lines.push(Line::from(line.clone()));
+                    markers.push(Line::from(Span::styled(OUTPUT_MARKER, marker_style)));
                 }
-                let lines = limit_tail_lines(lines, max_lines);
-                (Paragraph::new_wrap(lines, Wrap { trim: false }), None)
-            }
-            BashOutputView::Stderr => {
-                let mut lines: Vec<Line<'a>> = Vec::new();
-                let use_chunks = matches!(
-                    exec_state,
-                    ExecState::Executing { .. } | ExecState::Finished { .. }
-                ) && !self.exec_chunks().is_empty();
-                if use_chunks {
-                    for chunk in self.exec_chunks() {
-                        if chunk.stream != code_combo::StreamKind::Stderr {
-                            continue;
-                        }
-                        for line in &chunk.lines {
-                            lines.push(Line::from(line.clone()));
-                        }
-                    }
-                } else if let Some(output) = output {
-                    for line in output.stderr.lines() {
-                        lines.push(Line::from(line.to_string()));
-                    }
+            };
+
+        match &self.state.exec_state {
+            ExecState::Initial { .. } => empty(BashOutputView::Mixed),
+            ExecState::Executing { chunks } => {
+                if self.streamed_lines.is_empty() && chunks.is_empty() {
+                    return empty(BashOutputView::Mixed);
                 }
-                let lines = limit_tail_lines(lines, max_lines);
-                (Paragraph::new_wrap(lines, Wrap { trim: false }), None)
-            }
-            BashOutputView::Mixed => {
                 let mut lines: Vec<Line<'a>> = Vec::new();
                 let mut markers: Vec<Line<'a>> = Vec::new();
-                let mut push_chunk_lines = |chunk: &OutputChunk| {
-                    let marker_style = match chunk.stream {
-                        code_combo::StreamKind::Stdout => theme.ui.bash_stdout_marker,
-                        code_combo::StreamKind::Stderr => theme.ui.bash_stderr_marker,
-                    };
-                    for line in &chunk.lines {
-                        lines.push(Line::from(line.clone()));
+                if !self.streamed_lines.is_empty() {
+                    for line in self.streamed_lines.iter() {
+                        let marker_style = match line.stream {
+                            code_combo::StreamKind::Stdout => theme.ui.bash_stdout_marker,
+                            code_combo::StreamKind::Stderr => theme.ui.bash_stderr_marker,
+                        };
+                        lines.push(Line::from(line.text.clone()));
                         markers.push(Line::from(Span::styled(OUTPUT_MARKER, marker_style)));
                     }
-                };
-
-                match exec_state {
-                    ExecState::Executing { .. } => {
-                        if !self.streamed_lines.is_empty() {
-                            for line in self.streamed_lines.iter() {
-                                let marker_style = match line.stream {
-                                    code_combo::StreamKind::Stdout => theme.ui.bash_stdout_marker,
-                                    code_combo::StreamKind::Stderr => theme.ui.bash_stderr_marker,
-                                };
-                                lines.push(Line::from(line.text.clone()));
-                                markers.push(Line::from(Span::styled(OUTPUT_MARKER, marker_style)));
-                            }
-                        } else if !self.exec_chunks().is_empty() {
-                            for chunk in self.exec_chunks() {
-                                push_chunk_lines(chunk);
-                            }
-                        } else if let Some(output) = output {
-                            for (marker_style, text) in [
-                                (theme.ui.bash_stderr_marker, &output.stderr),
-                                (theme.ui.bash_stdout_marker, &output.stdout),
-                            ] {
-                                if text.is_empty() {
-                                    continue;
-                                }
-                                for line in text.lines() {
-                                    lines.push(Line::from(line.to_string()));
-                                    markers.push(Line::from(Span::styled(
-                                        OUTPUT_MARKER,
-                                        marker_style,
-                                    )));
-                                }
-                            }
-                        }
-                    }
-                    ExecState::Finished { .. } => {
-                        if !self.exec_chunks().is_empty() {
-                            for chunk in self.exec_chunks() {
-                                push_chunk_lines(chunk);
-                            }
-                        } else if let Some(output) = output {
-                            for (marker_style, text) in [
-                                (theme.ui.bash_stderr_marker, &output.stderr),
-                                (theme.ui.bash_stdout_marker, &output.stdout),
-                            ] {
-                                if text.is_empty() {
-                                    continue;
-                                }
-                                for line in text.lines() {
-                                    lines.push(Line::from(line.to_string()));
-                                    markers.push(Line::from(Span::styled(
-                                        OUTPUT_MARKER,
-                                        marker_style,
-                                    )));
-                                }
-                            }
-                        }
-                    }
-                    ExecState::Initial { .. } => {
-                        if let Some(output) = output {
-                            for (marker_style, text) in [
-                                (theme.ui.bash_stderr_marker, &output.stderr),
-                                (theme.ui.bash_stdout_marker, &output.stdout),
-                            ] {
-                                if text.is_empty() {
-                                    continue;
-                                }
-                                for line in text.lines() {
-                                    lines.push(Line::from(line.to_string()));
-                                    markers.push(Line::from(Span::styled(
-                                        OUTPUT_MARKER,
-                                        marker_style,
-                                    )));
-                                }
-                            }
-                        }
+                } else {
+                    for chunk in chunks {
+                        push_chunk_lines(&mut lines, &mut markers, chunk);
                     }
                 }
                 let lines = limit_tail_lines(lines, max_lines);
                 let markers = limit_tail_lines(markers, max_lines);
                 (Paragraph::new(lines), Some(Paragraph::new(markers)))
             }
+            ExecState::Finished {
+                output,
+                chunks,
+                view,
+            } => match view {
+                BashOutputView::Stdout => {
+                    let mut lines: Vec<Line<'a>> = Vec::new();
+                    if !chunks.is_empty() {
+                        for chunk in chunks {
+                            if chunk.stream != code_combo::StreamKind::Stdout {
+                                continue;
+                            }
+                            for line in &chunk.lines {
+                                lines.push(Line::from(line.clone()));
+                            }
+                        }
+                    } else {
+                        for line in output.stdout.lines() {
+                            lines.push(Line::from(line.to_string()));
+                        }
+                    }
+                    let lines = limit_tail_lines(lines, max_lines);
+                    (Paragraph::new_wrap(lines, Wrap { trim: false }), None)
+                }
+                BashOutputView::Stderr => {
+                    let mut lines: Vec<Line<'a>> = Vec::new();
+                    if !chunks.is_empty() {
+                        for chunk in chunks {
+                            if chunk.stream != code_combo::StreamKind::Stderr {
+                                continue;
+                            }
+                            for line in &chunk.lines {
+                                lines.push(Line::from(line.clone()));
+                            }
+                        }
+                    } else {
+                        for line in output.stderr.lines() {
+                            lines.push(Line::from(line.to_string()));
+                        }
+                    }
+                    let lines = limit_tail_lines(lines, max_lines);
+                    (Paragraph::new_wrap(lines, Wrap { trim: false }), None)
+                }
+                BashOutputView::Mixed => {
+                    if chunks.is_empty() && output.stdout.is_empty() && output.stderr.is_empty() {
+                        return empty(BashOutputView::Mixed);
+                    }
+                    let mut lines: Vec<Line<'a>> = Vec::new();
+                    let mut markers: Vec<Line<'a>> = Vec::new();
+                    if !chunks.is_empty() {
+                        for chunk in chunks {
+                            push_chunk_lines(&mut lines, &mut markers, chunk);
+                        }
+                    } else {
+                        for (marker_style, text) in [
+                            (theme.ui.bash_stderr_marker, &output.stderr),
+                            (theme.ui.bash_stdout_marker, &output.stdout),
+                        ] {
+                            if text.is_empty() {
+                                continue;
+                            }
+                            for line in text.lines() {
+                                lines.push(Line::from(line.to_string()));
+                                markers.push(Line::from(Span::styled(OUTPUT_MARKER, marker_style)));
+                            }
+                        }
+                    }
+                    let lines = limit_tail_lines(lines, max_lines);
+                    let markers = limit_tail_lines(markers, max_lines);
+                    (Paragraph::new(lines), Some(Paragraph::new(markers)))
+                }
+            },
         }
     }
 
