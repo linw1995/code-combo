@@ -35,8 +35,6 @@ use crate::{
 #[derive(Serialize, Deserialize)]
 struct Inner {
     tool_use: ToolUse,
-    requiring_confirmation: bool,
-    chunks: Vec<OutputChunk>,
     exec_state: ExecState,
     #[serde(default)]
     view: BashOutputView,
@@ -50,9 +48,11 @@ pub struct Bash<'a> {
     state: State<Inner>,
 
     input: CodeHighlight<'a>,
-    streamed_lines: StreamedLines,
+
     output_text: Paragraph<'a>,
     output_markers: Option<Paragraph<'a>>,
+
+    streamed_lines: StreamedLines,
     output_preview_text: Paragraph<'a>,
     output_preview_markers: Option<Paragraph<'a>>,
 }
@@ -76,13 +76,27 @@ impl BashOutputView {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ExecState {
-    #[default]
-    Initial,
-    Executing,
-    Finished(BashOutput),
+    Initial {
+        requiring_confirmation: bool,
+    },
+    Executing {
+        chunks: Vec<OutputChunk>,
+    },
+    Finished {
+        output: BashOutput,
+        chunks: Vec<OutputChunk>,
+    },
+}
+
+impl Default for ExecState {
+    fn default() -> Self {
+        Self::Initial {
+            requiring_confirmation: false,
+        }
+    }
 }
 
 const OUTPUT_PREVIEW_LINES: usize = 6;
@@ -155,16 +169,18 @@ impl<'a> Bash<'a> {
             .whatever_context("failed to parse BashOutput")?;
         let display_state = display_state_for_output(output.as_ref(), FoldState::Preview);
         let exec_state = match output {
-            Some(output) => ExecState::Finished(output),
-            None => ExecState::Initial,
+            Some(output) => ExecState::Finished {
+                output,
+                chunks: Vec::new(),
+            },
+            None => ExecState::Initial {
+                requiring_confirmation: false,
+            },
         };
-        let chunks = Vec::new();
         let streamed_lines = StreamedLines::new(None);
         let mut component = Self {
             state: State::new(Inner {
                 tool_use: tool_use.to_owned(),
-                requiring_confirmation: false,
-                chunks,
                 exec_state,
                 view: BashOutputView::default(),
                 display_state,
@@ -186,7 +202,7 @@ impl<'a> Bash<'a> {
         let exec_state = &self.state.exec_state;
         let output = self.exec_output();
         let has_any =
-            output.is_some() || !self.state.chunks.is_empty() || !self.streamed_lines.is_empty();
+            output.is_some() || !self.exec_chunks().is_empty() || !self.streamed_lines.is_empty();
         if !has_any {
             return (
                 Paragraph::new_wrap(Vec::new(), Wrap { trim: false }),
@@ -201,11 +217,12 @@ impl<'a> Bash<'a> {
         match view {
             BashOutputView::Stdout => {
                 let mut lines: Vec<Line<'a>> = Vec::new();
-                let use_chunks =
-                    matches!(exec_state, ExecState::Executing | ExecState::Finished(_))
-                        && !self.state.chunks.is_empty();
+                let use_chunks = matches!(
+                    exec_state,
+                    ExecState::Executing { .. } | ExecState::Finished { .. }
+                ) && !self.exec_chunks().is_empty();
                 if use_chunks {
-                    for chunk in &self.state.chunks {
+                    for chunk in self.exec_chunks() {
                         if chunk.stream != code_combo::StreamKind::Stdout {
                             continue;
                         }
@@ -223,11 +240,12 @@ impl<'a> Bash<'a> {
             }
             BashOutputView::Stderr => {
                 let mut lines: Vec<Line<'a>> = Vec::new();
-                let use_chunks =
-                    matches!(exec_state, ExecState::Executing | ExecState::Finished(_))
-                        && !self.state.chunks.is_empty();
+                let use_chunks = matches!(
+                    exec_state,
+                    ExecState::Executing { .. } | ExecState::Finished { .. }
+                ) && !self.exec_chunks().is_empty();
                 if use_chunks {
-                    for chunk in &self.state.chunks {
+                    for chunk in self.exec_chunks() {
                         if chunk.stream != code_combo::StreamKind::Stderr {
                             continue;
                         }
@@ -258,7 +276,7 @@ impl<'a> Bash<'a> {
                 };
 
                 match exec_state {
-                    ExecState::Executing => {
+                    ExecState::Executing { .. } => {
                         if !self.streamed_lines.is_empty() {
                             for line in self.streamed_lines.iter() {
                                 let marker_style = match line.stream {
@@ -268,8 +286,8 @@ impl<'a> Bash<'a> {
                                 lines.push(Line::from(line.text.clone()));
                                 markers.push(Line::from(Span::styled(OUTPUT_MARKER, marker_style)));
                             }
-                        } else if !self.state.chunks.is_empty() {
-                            for chunk in &self.state.chunks {
+                        } else if !self.exec_chunks().is_empty() {
+                            for chunk in self.exec_chunks() {
                                 push_chunk_lines(chunk);
                             }
                         } else if let Some(output) = output {
@@ -290,9 +308,9 @@ impl<'a> Bash<'a> {
                             }
                         }
                     }
-                    ExecState::Finished(_) => {
-                        if !self.state.chunks.is_empty() {
-                            for chunk in &self.state.chunks {
+                    ExecState::Finished { .. } => {
+                        if !self.exec_chunks().is_empty() {
+                            for chunk in self.exec_chunks() {
                                 push_chunk_lines(chunk);
                             }
                         } else if let Some(output) = output {
@@ -313,7 +331,7 @@ impl<'a> Bash<'a> {
                             }
                         }
                     }
-                    ExecState::Initial => {
+                    ExecState::Initial { .. } => {
                         if let Some(output) = output {
                             for (marker_style, text) in [
                                 (theme.ui.bash_stderr_marker, &output.stderr),
@@ -352,8 +370,47 @@ impl<'a> Bash<'a> {
 
     fn exec_output(&self) -> Option<&BashOutput> {
         match &self.state.exec_state {
-            ExecState::Finished(output) => Some(output),
+            ExecState::Finished { output, .. } => Some(output),
             _ => None,
+        }
+    }
+
+    fn exec_chunks(&self) -> &[OutputChunk] {
+        match &self.state.exec_state {
+            ExecState::Executing { chunks } | ExecState::Finished { chunks, .. } => chunks,
+            ExecState::Initial { .. } => &[],
+        }
+    }
+
+    fn requiring_confirmation(&self) -> bool {
+        matches!(
+            &self.state.exec_state,
+            ExecState::Initial {
+                requiring_confirmation: true
+            }
+        )
+    }
+
+    fn set_requiring_confirmation(&mut self, value: bool) {
+        let mut state = self.state.write();
+        if let ExecState::Initial {
+            requiring_confirmation,
+        } = &mut state.exec_state
+        {
+            *requiring_confirmation = value;
+        }
+    }
+
+    fn push_chunk(&mut self, chunk: OutputChunk) {
+        let mut state = self.state.write();
+        match &mut state.exec_state {
+            ExecState::Executing { chunks } => chunks.push(chunk),
+            ExecState::Finished { chunks, .. } => chunks.push(chunk),
+            ExecState::Initial { .. } => {
+                state.exec_state = ExecState::Executing {
+                    chunks: vec![chunk],
+                };
+            }
         }
     }
 
@@ -363,9 +420,14 @@ impl<'a> Bash<'a> {
                 .whatever_context("failed to parse BashOutput")?;
             {
                 let mut state = self.state.write();
-                state.exec_state = ExecState::Finished(output);
+                let chunks = match &mut state.exec_state {
+                    ExecState::Executing { chunks } => std::mem::take(chunks),
+                    ExecState::Finished { chunks, .. } => std::mem::take(chunks),
+                    ExecState::Initial { .. } => Vec::new(),
+                };
+                state.exec_state = ExecState::Finished { output, chunks };
             }
-            self.streamed_lines = StreamedLines::from_chunks(&self.state.chunks, None);
+            self.streamed_lines = StreamedLines::from_chunks(self.exec_chunks(), None);
             self.rebuild_output();
         }
         Ok(())
@@ -375,7 +437,7 @@ impl<'a> Bash<'a> {
         let output = self.exec_output();
         let has_text =
             output.is_some_and(|output| !(output.stdout.is_empty() && output.stderr.is_empty()));
-        has_text || !self.state.chunks.is_empty() || !self.streamed_lines.is_empty()
+        has_text || !self.exec_chunks().is_empty() || !self.streamed_lines.is_empty()
     }
 
     pub fn empty_output_summary(&self) -> Option<String> {
@@ -392,7 +454,7 @@ impl<'a> Bash<'a> {
 
 impl<'a> Content for Bash<'a> {
     fn height(&self, width: u16) -> usize {
-        if self.state.requiring_confirmation
+        if self.requiring_confirmation()
             || self.state.display_state == FoldState::Collapsed
             || !self.has_output_content()
         {
@@ -423,7 +485,7 @@ impl<'a> Content for Bash<'a> {
     }
 
     fn block_with_shortcuts_desc<'b>(&self, mut block: Block<'b>) -> Block<'b> {
-        if self.state.requiring_confirmation {
+        if self.requiring_confirmation() {
             return block
                 .title_bottom(shortcuts_desc(&[("Run", "CR"), ("Allow in Session", "A")]))
                 .title_bottom(shortcuts_desc(&[("Cancel", "Esc")]));
@@ -477,7 +539,12 @@ impl Persistable for Bash<'static> {
 
     fn load(session: Session) -> Result<Self> {
         let state: Inner = session::load(session)?;
-        let streamed_lines = StreamedLines::from_chunks(&state.chunks, None);
+        let streamed_lines = match &state.exec_state {
+            ExecState::Executing { chunks } | ExecState::Finished { chunks, .. } => {
+                StreamedLines::from_chunks(chunks, None)
+            }
+            ExecState::Initial { .. } => StreamedLines::new(None),
+        };
         let mut component = Self {
             input: generate_input(&state.tool_use),
             streamed_lines,
@@ -496,19 +563,15 @@ impl Component for Bash<'static> {
     fn handle_event(&mut self, event: &Event) {
         match event {
             Event::Ask(AskEvent::ToolUsePermission(_)) => {
-                let mut state = self.state.write();
-                state.requiring_confirmation = true;
-                state.display_state.preview();
+                self.set_requiring_confirmation(true);
+                self.state.write().display_state.preview();
             }
             Event::Answer(AnswerEvent::ToolOutput { id, chunk }) => {
                 if id != &self.state.tool_use.id {
                     return;
                 }
-                let mut state = self.state.write();
-                state.exec_state = ExecState::Executing;
-                state.chunks.push(chunk.clone());
+                self.push_chunk(chunk.clone());
                 self.streamed_lines.push_chunk(chunk);
-                drop(state);
                 self.rebuild_output();
             }
             Event::Answer(AnswerEvent::ToolResult { output, .. }) => {
@@ -519,7 +582,8 @@ impl Component for Bash<'static> {
                     display_state_for_output(self.exec_output(), self.state.display_state);
                 let mut state = self.state.write();
                 state.display_state = display_state;
-                state.requiring_confirmation = false;
+                drop(state);
+                self.set_requiring_confirmation(false);
             }
             _ => (),
         }
@@ -566,33 +630,33 @@ impl Component for Bash<'static> {
                 };
             }
             (_, KeyModifiers::NONE, KeyCode::Enter) => {
-                if !self.state.requiring_confirmation {
+                if !self.requiring_confirmation() {
                     return;
                 }
                 self.state.write().display_state.preview();
                 global::action_tx()
                     .send(ToolAction::Grant(self.state.tool_use.to_owned()).into())
                     .unwrap();
-                self.state.write().requiring_confirmation = false;
+                self.set_requiring_confirmation(false);
             }
             (_, KeyModifiers::NONE, KeyCode::Char('a') | KeyCode::Char('A')) => {
-                if !self.state.requiring_confirmation {
+                if !self.requiring_confirmation() {
                     return;
                 }
                 self.state.write().display_state.preview();
                 global::action_tx()
                     .send(ToolAction::GrantSession(self.state.tool_use.to_owned()).into())
                     .unwrap();
-                self.state.write().requiring_confirmation = false;
+                self.set_requiring_confirmation(false);
             }
             (_, KeyModifiers::NONE, KeyCode::Esc) => {
-                if !self.state.requiring_confirmation {
+                if !self.requiring_confirmation() {
                     return;
                 }
                 global::action_tx()
                     .send(ToolAction::Cancel(self.state.tool_use.to_owned()).into())
                     .unwrap();
-                self.state.write().requiring_confirmation = false;
+                self.set_requiring_confirmation(false);
             }
             _ => (), // ignore
         }
@@ -602,7 +666,7 @@ impl Component for Bash<'static> {
         if !matches!(action, Action::Blur) {
             return;
         }
-        if self.state.requiring_confirmation {
+        if self.requiring_confirmation() {
             return;
         }
         if !self.has_output_content() {
@@ -631,7 +695,7 @@ impl Component for Bash<'static> {
         let height_input = self.input.height(width);
 
         if self.state.display_state == FoldState::Collapsed
-            || self.state.requiring_confirmation
+            || self.requiring_confirmation()
             || !self.has_output_content()
         {
             let [area_input] = Layout::vertical([Length(height_input as u16)]).areas(area);
@@ -768,7 +832,7 @@ mod tests {
             is_user_cancelled: false,
             output: Final::Json(value),
         }));
-        assert!(matches!(&bash.state.exec_state, ExecState::Finished(_)));
+        assert!(matches!(&bash.state.exec_state, ExecState::Finished { .. }));
         assert_eq!(bash.state.display_state, FoldState::Preview);
         bash.update(&Action::Blur);
         assert_eq!(bash.state.display_state, FoldState::Collapsed);
@@ -842,10 +906,17 @@ mod tests {
             },
         }));
 
-        assert!(matches!(&bash.state.exec_state, ExecState::Executing));
-        assert_eq!(bash.state.chunks.len(), 1);
+        assert!(matches!(
+            &bash.state.exec_state,
+            ExecState::Executing { .. }
+        ));
+        let chunks = match &bash.state.exec_state {
+            ExecState::Executing { chunks } => chunks,
+            _ => panic!("expected executing state"),
+        };
+        assert_eq!(chunks.len(), 1);
         assert_eq!(
-            bash.state.chunks[0].lines,
+            chunks[0].lines,
             vec!["out1".to_string(), "out2".to_string()]
         );
     }
@@ -853,20 +924,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bash_hides_tabs_while_requiring_confirmation() {
         let tool_use = tool_use();
-        let value = serde_json::to_value(bash_output()).unwrap();
-        let mut bash = Bash::try_new()
-            .tool_use(&tool_use)
-            .output(value)
-            .call()
-            .unwrap();
-
-        let height_with_output = bash.height(80);
+        let mut bash = Bash::try_new().tool_use(&tool_use).call().unwrap();
+        assert!(!bash.requiring_confirmation());
         bash.handle_event(&Event::Ask(AskEvent::ToolUsePermission(
             "tool_1".to_string(),
         )));
-        let height_confirm = bash.height(80);
-
-        assert!(height_with_output > height_confirm);
+        assert!(bash.requiring_confirmation());
+        assert_eq!(bash.height(80), bash.input.height(80));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
