@@ -412,6 +412,14 @@ impl Component for CommandPalette {
         use KeyModifiers as KM;
 
         let action = match (key.modifiers, key.code) {
+            (KM::CONTROL, Char('n' | 'N')) => Some(CommandPaletteAction::NewSession),
+            (KM::CONTROL, Char('t' | 'T')) => Some(CommandPaletteAction::Transcript),
+            (KM::CONTROL, Char('s' | 'S')) => {
+                if self.mode == CommandPaletteMode::Main {
+                    self.open_session_switcher();
+                }
+                None
+            }
             (KM::NONE, Char('k')) => {
                 self.command_list.select_prev();
                 None
