@@ -43,6 +43,8 @@ pub struct Chat<'a> {
     command_palette: CommandPalette,
     input: Input<'a>,
     messages: Messages,
+    transcript: Messages,
+    view: ViewMode,
     indicator: ThrobberState,
 
     token_schedule_session_save: Option<CancellationToken>,
@@ -113,6 +115,12 @@ enum Focus {
     CommandPalette,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ViewMode {
+    Chat,
+    Transcript,
+}
+
 const CTRL_C_WINDOW: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Default)]
@@ -178,6 +186,7 @@ impl CancellationGuard {
 }
 
 const COMMAND_NEW_SESSION: &str = "New Session";
+const COMMAND_TRANSCRIPT: &str = "Transcript";
 
 const AGENTS_MD_FILENAME: &str = "AGENTS.md";
 
@@ -193,10 +202,16 @@ impl Chat<'static> {
                     name: COMMAND_NEW_SESSION.to_string(),
                     shortcut: Some("<C-n>".to_string()),
                 },
+                Command {
+                    name: COMMAND_TRANSCRIPT.to_string(),
+                    shortcut: Some("<C-t>".to_string()),
+                },
                 // TODO: Switch Session
             ]),
             input: Input::default(),
             messages: Messages::default(),
+            transcript: Messages::default(),
+            view: ViewMode::Chat,
             indicator: ThrobberState::default(),
             token_schedule_session_save: None,
             cancellation_guard: CancellationGuard::default(),
@@ -563,6 +578,28 @@ impl Chat<'static> {
         }
     }
 
+    fn open_transcript(&mut self) {
+        self.update_focus(Focus::InputBlur);
+        let agent_messages = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.agent.dump_messages())
+        });
+
+        self.transcript.clear();
+        let iter = agent_messages.iter().map(|message| {
+            let text = format_transcript_message(message);
+            Message::system(Plain::new(text).into())
+        });
+        self.transcript.extend(iter);
+        self.view = ViewMode::Transcript;
+        global::signal_dirty();
+    }
+
+    fn close_transcript(&mut self) {
+        self.view = ViewMode::Chat;
+        self.update_focus(Focus::InputBlur);
+        global::signal_dirty();
+    }
+
     /// Handle the "New Session" command
     /// Optionally saves the current session before clearing
     fn new_session(&mut self) {
@@ -626,7 +663,8 @@ impl Persistable for Chat<'static> {
 
 impl Component for Chat<'static> {
     fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
-        let children: Vec<&mut dyn Component> = vec![&mut self.input, &mut self.messages];
+        let children: Vec<&mut dyn Component> =
+            vec![&mut self.input, &mut self.messages, &mut self.transcript];
         Box::new(children.into_iter())
     }
 
@@ -735,7 +773,9 @@ impl Component for Chat<'static> {
         use KeyModifiers as KM;
 
         if matches!(key.code, BackTab) {
-            self.toggle_auto_accept_edits();
+            if self.view == ViewMode::Chat {
+                self.toggle_auto_accept_edits();
+            }
             return;
         }
 
@@ -749,6 +789,31 @@ impl Component for Chat<'static> {
             }
         ) {
             self.handle_ctrl_c();
+            return;
+        }
+        if self.view == ViewMode::Transcript {
+            match (key.modifiers, key.code) {
+                (KM::NONE, Esc) => self.close_transcript(),
+                (KM::NONE, Char('k')) => {
+                    self.transcript.scroll_up(1);
+                }
+                (KM::NONE, Char('j')) => {
+                    self.transcript.scroll_down(1);
+                }
+                (KM::CONTROL, Char('y')) => {
+                    self.transcript.scroll_up(1);
+                }
+                (KM::CONTROL, Char('e')) => {
+                    self.transcript.scroll_down(1);
+                }
+                (KM::CONTROL, Char('u')) => {
+                    self.transcript.scroll_half_up();
+                }
+                (KM::CONTROL, Char('d')) => {
+                    self.transcript.scroll_half_down();
+                }
+                _ => (),
+            }
             return;
         }
         match (focus, key.modifiers, key.code) {
@@ -911,6 +976,9 @@ impl Component for Chat<'static> {
                     COMMAND_NEW_SESSION => {
                         self.new_session();
                     }
+                    COMMAND_TRANSCRIPT => {
+                        self.open_transcript();
+                    }
                     unknown => {
                         warn!(?unknown, "unknown command");
                     }
@@ -934,36 +1002,63 @@ impl Component for Chat<'static> {
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         use Constraint::{Length, Min};
 
-        let vertical = Layout::vertical([Min(0), Length(1), Length(1), Length(1)]);
-        let [area_messages, divider, area_input, bottom] = vertical.areas(area);
+        match self.view {
+            ViewMode::Chat => {
+                let vertical = Layout::vertical([Min(0), Length(1), Length(1), Length(1)]);
+                let [area_messages, divider, area_input, bottom] = vertical.areas(area);
 
-        self.messages.draw(frame, area_messages)?;
+                self.messages.draw(frame, area_messages)?;
 
-        let block = Block::new()
-            .borders(Borders::BOTTOM)
-            .border_set(border::THICK);
-        frame.render_widget(self.block_bottom_with_shortcuts_desc(block), divider);
+                let block = Block::new()
+                    .borders(Borders::BOTTOM)
+                    .border_set(border::THICK);
+                frame.render_widget(self.block_bottom_with_shortcuts_desc(block), divider);
 
-        let theme = global::theme();
-        let mut bottom_block = Block::new().borders(Borders::BOTTOM);
-        bottom_block = if !matches!(self.state.focus, Focus::Messages) {
-            bottom_block
-                .border_set(border::THICK)
-                .border_style(theme.ui.block_border_active)
-        } else {
-            bottom_block
-                .border_set(border::PLAIN)
-                .border_style(theme.ui.block_border_inactive)
-        };
-        bottom_block = bottom_block
-            .title_bottom(Line::from(""))
-            .title_bottom(self.widget_state_indicator());
-        bottom_block = bottom_block.title_bottom(self.auto_accept_indicator());
-        if let Some(line) = self.ctrl_c_reminder_line() {
-            bottom_block = bottom_block.title_bottom(line);
+                let theme = global::theme();
+                let mut bottom_block = Block::new().borders(Borders::BOTTOM);
+                bottom_block = if !matches!(self.state.focus, Focus::Messages) {
+                    bottom_block
+                        .border_set(border::THICK)
+                        .border_style(theme.ui.block_border_active)
+                } else {
+                    bottom_block
+                        .border_set(border::PLAIN)
+                        .border_style(theme.ui.block_border_inactive)
+                };
+                bottom_block = bottom_block
+                    .title_bottom(Line::from(""))
+                    .title_bottom(self.widget_state_indicator());
+                bottom_block = bottom_block.title_bottom(self.auto_accept_indicator());
+                if let Some(line) = self.ctrl_c_reminder_line() {
+                    bottom_block = bottom_block.title_bottom(line);
+                }
+                frame.render_widget(bottom_block, bottom);
+                self.input.draw(frame, area_input)?;
+            }
+            ViewMode::Transcript => {
+                let vertical = Layout::vertical([Min(0), Length(1)]);
+                let [area_messages, bottom] = vertical.areas(area);
+                self.transcript.draw(frame, area_messages)?;
+
+                let theme = global::theme();
+                let mut bottom_block = Block::new()
+                    .borders(Borders::BOTTOM)
+                    .border_set(border::THICK)
+                    .border_style(theme.ui.block_border_active);
+                bottom_block = bottom_block
+                    .title_bottom(Line::from(""))
+                    .title_bottom(Line::from(" Transcript ").bold());
+                bottom_block = bottom_block
+                    .title_bottom(shortcuts_desc(&[("Back", "Esc")]))
+                    .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")]))
+                    .title_bottom(shortcuts_desc(&[("Scroll Up", "C-y"), ("Down", "C-e")]))
+                    .title_bottom(shortcuts_desc(&[("Scroll+ Up", "C-u"), ("Down", "C-d")]));
+                if let Some(line) = self.ctrl_c_reminder_line() {
+                    bottom_block = bottom_block.title_bottom(line);
+                }
+                frame.render_widget(bottom_block, bottom);
+            }
         }
-        frame.render_widget(bottom_block, bottom);
-        self.input.draw(frame, area_input)?;
 
         if self.state.focus == Focus::CommandPalette {
             // popup floating window
@@ -971,6 +1066,99 @@ impl Component for Chat<'static> {
         }
 
         Ok(())
+    }
+}
+
+fn format_transcript_message(message: &ChatMessage) -> String {
+    let mut out = String::new();
+    let role = match message.role {
+        code_combo::Role::User => "user",
+        code_combo::Role::Assistant => "assistant",
+    };
+    push_line(&mut out, 0, &format!("role: {role}"));
+    push_line(&mut out, 0, "blocks:");
+    match &message.content {
+        ChatContent::Text(text) => {
+            format_text_block(&mut out, 2, text);
+        }
+        ChatContent::Multiple(blocks) => {
+            for block in blocks {
+                format_block(&mut out, 2, block);
+            }
+        }
+    }
+    if out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+fn format_text_block(out: &mut String, indent: usize, text: &str) {
+    push_line(out, indent, "- type: text");
+    push_line(out, indent + 2, "text:");
+    push_multiline(out, indent + 4, text);
+}
+
+fn format_block(out: &mut String, indent: usize, block: &ChatBlock) {
+    match block {
+        ChatBlock::Text { text } => {
+            format_text_block(out, indent, text);
+        }
+        ChatBlock::ToolUse(tool_use) => {
+            push_line(out, indent, "- type: tool_use");
+            push_line(out, indent + 2, &format!("id: {}", tool_use.id));
+            push_line(out, indent + 2, &format!("name: {}", tool_use.name));
+            push_line(out, indent + 2, "input:");
+            let input = serde_json::to_string_pretty(&tool_use.input)
+                .unwrap_or_else(|_| "[Invalid JSON]".to_string());
+            push_multiline(out, indent + 4, &input);
+        }
+        ChatBlock::ToolResult {
+            tool_use_id,
+            is_error,
+            content,
+        } => {
+            push_line(out, indent, "- type: tool_result");
+            push_line(out, indent + 2, &format!("tool_use_id: {tool_use_id}"));
+            if let Some(is_error) = is_error {
+                push_line(out, indent + 2, &format!("is_error: {is_error}"));
+            }
+            push_line(out, indent + 2, "content:");
+            format_content(out, indent + 4, content);
+        }
+    }
+}
+
+fn format_content(out: &mut String, indent: usize, content: &ChatContent) {
+    match content {
+        ChatContent::Text(text) => {
+            push_line(out, indent, "text:");
+            push_multiline(out, indent + 2, text);
+        }
+        ChatContent::Multiple(blocks) => {
+            push_line(out, indent, "blocks:");
+            for block in blocks {
+                format_block(out, indent + 2, block);
+            }
+        }
+    }
+}
+
+fn push_line(out: &mut String, indent: usize, line: &str) {
+    for _ in 0..indent {
+        out.push(' ');
+    }
+    out.push_str(line);
+    out.push('\n');
+}
+
+fn push_multiline(out: &mut String, indent: usize, text: &str) {
+    if text.is_empty() {
+        push_line(out, indent, "");
+        return;
+    }
+    for line in text.lines() {
+        push_line(out, indent, line);
     }
 }
 
