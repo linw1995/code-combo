@@ -53,6 +53,7 @@ mod command_palette;
 mod input;
 mod message;
 mod messages;
+mod transcript;
 
 pub use chat::Chat;
 pub use code_highlight::CodeHighlight;
@@ -60,6 +61,7 @@ pub use command_palette::*;
 pub use input::Input;
 pub use message::*;
 pub use messages::*;
+pub use transcript::*;
 
 /// Provides a unique identifier string for struct registry.
 ///

@@ -8,6 +8,7 @@ use super::Result;
 pub enum Lang {
     Bash,
     Diff,
+    Json,
     Markdown,
     MarkdownInline,
 }
@@ -18,6 +19,7 @@ impl Lang {
         match self {
             Bash => "bash",
             Diff => "diff",
+            Json => "json",
             Markdown => "markdown",
             MarkdownInline => "markdown_inline",
         }
@@ -35,8 +37,9 @@ pub fn new_config(lang: &Lang, names: &[&str]) -> Result<HighlightConfiguration>
     match lang {
         Bash => bash_config(names),
         Diff => diff_config(names),
+        Json => json_config(names),
         Markdown => markdown_config(names),
-        _ => unimplemented!(),
+        MarkdownInline => markdown_inline_config(names),
     }
 }
 
@@ -70,6 +73,21 @@ fn diff_config(names: &[&str]) -> Result<HighlightConfiguration> {
     Ok(config)
 }
 
+fn json_config(names: &[&str]) -> Result<HighlightConfiguration> {
+    let mut config = HighlightConfiguration::new(
+        tree_sitter_json::LANGUAGE.into(),
+        "json",
+        tree_sitter_json::HIGHLIGHTS_QUERY,
+        "",
+        "",
+    )
+    .whatever_context("failed to create json highlight configuration")?;
+
+    config.configure(names);
+
+    Ok(config)
+}
+
 fn markdown_config(names: &[&str]) -> Result<HighlightConfiguration> {
     let mut config = HighlightConfiguration::new(
         tree_sitter_md::LANGUAGE.into(),
@@ -79,6 +97,21 @@ fn markdown_config(names: &[&str]) -> Result<HighlightConfiguration> {
         "",
     )
     .whatever_context("failed to create markdown highlight configuration")?;
+
+    config.configure(names);
+
+    Ok(config)
+}
+
+fn markdown_inline_config(names: &[&str]) -> Result<HighlightConfiguration> {
+    let mut config = HighlightConfiguration::new(
+        tree_sitter_md::INLINE_LANGUAGE.into(),
+        "markdown_inline",
+        tree_sitter_md::HIGHLIGHT_QUERY_INLINE,
+        tree_sitter_md::INJECTION_QUERY_INLINE,
+        "",
+    )
+    .whatever_context("failed to create markdown inline highlight configuration")?;
 
     config.configure(names);
 

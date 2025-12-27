@@ -23,7 +23,8 @@ use tracing::{debug, warn};
 
 use super::{
     Action, AnswerEvent, AskEvent, BotMessage, Combo, ComboAction, ComboEvent, Component, Content,
-    Event, Input, Message, Messages, Plain, SessionAction, Tool, ToolAction, shortcuts_desc,
+    Event, Input, Message, Messages, Plain, SessionAction, Tool, ToolAction, TranscriptMessage,
+    shortcuts_desc,
 };
 use crate::{
     components::{Command, CommandPalette, Persistable},
@@ -43,6 +44,8 @@ pub struct Chat<'a> {
     command_palette: CommandPalette,
     input: Input<'a>,
     messages: Messages,
+    transcript: Messages,
+    view: ViewMode,
     indicator: ThrobberState,
 
     token_schedule_session_save: Option<CancellationToken>,
@@ -113,6 +116,12 @@ enum Focus {
     CommandPalette,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ViewMode {
+    Chat,
+    Transcript,
+}
+
 const CTRL_C_WINDOW: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Default)]
@@ -178,6 +187,7 @@ impl CancellationGuard {
 }
 
 const COMMAND_NEW_SESSION: &str = "New Session";
+const COMMAND_TRANSCRIPT: &str = "Transcript";
 
 const AGENTS_MD_FILENAME: &str = "AGENTS.md";
 
@@ -193,10 +203,16 @@ impl Chat<'static> {
                     name: COMMAND_NEW_SESSION.to_string(),
                     shortcut: Some("<C-n>".to_string()),
                 },
+                Command {
+                    name: COMMAND_TRANSCRIPT.to_string(),
+                    shortcut: Some("<C-t>".to_string()),
+                },
                 // TODO: Switch Session
             ]),
             input: Input::default(),
             messages: Messages::default(),
+            transcript: Messages::default(),
+            view: ViewMode::Chat,
             indicator: ThrobberState::default(),
             token_schedule_session_save: None,
             cancellation_guard: CancellationGuard::default(),
@@ -563,6 +579,27 @@ impl Chat<'static> {
         }
     }
 
+    fn open_transcript(&mut self) {
+        self.update_focus(Focus::InputBlur);
+        let agent_messages = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.agent.dump_messages())
+        });
+
+        self.transcript.clear();
+        let iter = agent_messages
+            .into_iter()
+            .map(|message| Message::system(TranscriptMessage::new(message).into()));
+        self.transcript.extend(iter);
+        self.view = ViewMode::Transcript;
+        global::signal_dirty();
+    }
+
+    fn close_transcript(&mut self) {
+        self.view = ViewMode::Chat;
+        self.update_focus(Focus::InputBlur);
+        global::signal_dirty();
+    }
+
     /// Handle the "New Session" command
     /// Optionally saves the current session before clearing
     fn new_session(&mut self) {
@@ -626,7 +663,8 @@ impl Persistable for Chat<'static> {
 
 impl Component for Chat<'static> {
     fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
-        let children: Vec<&mut dyn Component> = vec![&mut self.input, &mut self.messages];
+        let children: Vec<&mut dyn Component> =
+            vec![&mut self.input, &mut self.messages, &mut self.transcript];
         Box::new(children.into_iter())
     }
 
@@ -735,7 +773,9 @@ impl Component for Chat<'static> {
         use KeyModifiers as KM;
 
         if matches!(key.code, BackTab) {
-            self.toggle_auto_accept_edits();
+            if self.view == ViewMode::Chat {
+                self.toggle_auto_accept_edits();
+            }
             return;
         }
 
@@ -749,6 +789,31 @@ impl Component for Chat<'static> {
             }
         ) {
             self.handle_ctrl_c();
+            return;
+        }
+        if self.view == ViewMode::Transcript {
+            match (key.modifiers, key.code) {
+                (KM::NONE, Esc) => self.close_transcript(),
+                (KM::NONE, Char('k')) => {
+                    self.transcript.scroll_up(1);
+                }
+                (KM::NONE, Char('j')) => {
+                    self.transcript.scroll_down(1);
+                }
+                (KM::CONTROL, Char('y')) => {
+                    self.transcript.scroll_up(1);
+                }
+                (KM::CONTROL, Char('e')) => {
+                    self.transcript.scroll_down(1);
+                }
+                (KM::CONTROL, Char('u')) => {
+                    self.transcript.scroll_half_up();
+                }
+                (KM::CONTROL, Char('d')) => {
+                    self.transcript.scroll_half_down();
+                }
+                _ => (),
+            }
             return;
         }
         match (focus, key.modifiers, key.code) {
@@ -911,6 +976,9 @@ impl Component for Chat<'static> {
                     COMMAND_NEW_SESSION => {
                         self.new_session();
                     }
+                    COMMAND_TRANSCRIPT => {
+                        self.open_transcript();
+                    }
                     unknown => {
                         warn!(?unknown, "unknown command");
                     }
@@ -932,6 +1000,22 @@ impl Component for Chat<'static> {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        match self.view {
+            ViewMode::Chat => self.draw_chat(frame, area)?,
+            ViewMode::Transcript => self.draw_transcript(frame, area)?,
+        }
+
+        if self.state.focus == Focus::CommandPalette {
+            // popup floating window
+            self.command_palette.draw(frame, area)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl Chat<'static> {
+    fn draw_chat(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         use Constraint::{Length, Min};
 
         let vertical = Layout::vertical([Min(0), Length(1), Length(1), Length(1)]);
@@ -965,10 +1049,33 @@ impl Component for Chat<'static> {
         frame.render_widget(bottom_block, bottom);
         self.input.draw(frame, area_input)?;
 
-        if self.state.focus == Focus::CommandPalette {
-            // popup floating window
-            self.command_palette.draw(frame, area)?;
+        Ok(())
+    }
+
+    fn draw_transcript(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        use Constraint::{Length, Min};
+
+        let vertical = Layout::vertical([Min(0), Length(1)]);
+        let [area_messages, bottom] = vertical.areas(area);
+        self.transcript.draw(frame, area_messages)?;
+
+        let theme = global::theme();
+        let mut bottom_block = Block::new()
+            .borders(Borders::BOTTOM)
+            .border_set(border::THICK)
+            .border_style(theme.ui.block_border_active);
+        bottom_block = bottom_block
+            .title_bottom(Line::from(""))
+            .title_bottom(Line::from(" Transcript ").bold());
+        bottom_block = bottom_block
+            .title_bottom(shortcuts_desc(&[("Back", "Esc")]))
+            .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")]))
+            .title_bottom(shortcuts_desc(&[("Scroll Up", "C-y"), ("Down", "C-e")]))
+            .title_bottom(shortcuts_desc(&[("Scroll+ Up", "C-u"), ("Down", "C-d")]));
+        if let Some(line) = self.ctrl_c_reminder_line() {
+            bottom_block = bottom_block.title_bottom(line);
         }
+        frame.render_widget(bottom_block, bottom);
 
         Ok(())
     }
