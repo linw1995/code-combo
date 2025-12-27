@@ -73,20 +73,11 @@ fn diff_config(names: &[&str]) -> Result<HighlightConfiguration> {
     Ok(config)
 }
 
-const JSON_HIGHLIGHTS_QUERY: &str = r#"
-(string) @string
-(number) @number
-(true) @keyword
-(false) @keyword
-(null) @keyword
-(pair key: (string) @property)
-"#;
-
 fn json_config(names: &[&str]) -> Result<HighlightConfiguration> {
     let mut config = HighlightConfiguration::new(
         tree_sitter_json::LANGUAGE.into(),
         "json",
-        JSON_HIGHLIGHTS_QUERY,
+        tree_sitter_json::HIGHLIGHTS_QUERY,
         "",
         "",
     )
