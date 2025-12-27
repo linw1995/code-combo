@@ -899,7 +899,11 @@ impl Component for Chat<'static> {
 
             // Handle actionable messages
             (Messages, _, _) => self.messages.handle_key_event(key),
-            (CommandPalette, KM::NONE, Esc) => self.update_focus(InputBlur),
+            (CommandPalette, KM::NONE, Esc) => {
+                if !self.command_palette.on_escape() {
+                    self.update_focus(InputBlur);
+                }
+            }
             (CommandPalette, _, _) => self.command_palette.handle_key_event(key),
 
             (InputBlur, _, _) => {

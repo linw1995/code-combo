@@ -242,6 +242,16 @@ impl CommandPalette {
         self.open_main();
     }
 
+    pub fn on_escape(&mut self) -> bool {
+        match self.mode {
+            CommandPaletteMode::SwitchSession => {
+                self.open_main();
+                true
+            }
+            CommandPaletteMode::Main => false,
+        }
+    }
+
     fn main_commands() -> Vec<Command> {
         vec![
             Command {
