@@ -140,11 +140,9 @@ impl CommandList {
                     Layout::horizontal([Percentage(50), Percentage(50)]).areas(area);
 
                 frame.render_widget(
-                    Paragraph::new(
-                        Text::from(shortcut.to_owned())
-                            .style(theme.ui.shortcut)
-                            .right_aligned(),
-                    ),
+                    Text::from(shortcut.to_owned())
+                        .style(theme.ui.shortcut)
+                        .right_aligned(),
                     right,
                 );
 
@@ -425,11 +423,21 @@ impl Component for CommandPalette {
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         use Constraint::*;
 
-        let theme = global::theme();
-        let margin = 3;
-        let (width, height) = (120 + margin * 2, 20 + margin * 2);
+        let margin_background = Margin {
+            horizontal: 3,
+            vertical: 1,
+        };
+        let margin_content = Margin {
+            horizontal: 3,
+            vertical: 1,
+        };
+        let (width, height) = (
+            120 + (margin_background.horizontal + margin_content.horizontal) * 2,
+            20 + (margin_background.vertical + margin_content.vertical) * 2,
+        );
 
-        let area = {
+        // Get the center area of viewport
+        let area_popup = {
             let [_, area_h_center, _] =
                 Layout::horizontal([Fill(1), Max(width), Fill(1)]).areas(area);
             let [_, area_floating, _] =
@@ -437,27 +445,30 @@ impl Component for CommandPalette {
             area_floating
         };
 
-        Clear.render(area, frame.buffer_mut());
+        // Clear the center area
+        Clear.render(area_popup, frame.buffer_mut());
+        let area_background = area_popup.inner(margin_background);
 
-        let area = area.inner(Margin {
-            horizontal: margin,
-            vertical: margin,
-        });
+        // Render backgroud color
+        let theme = global::theme();
+        let block = Block::new().style(theme.ui.command_palette_bg);
+        frame.render_widget(&block, area_background);
 
-        let block = Block::new()
-            .borders(Borders::BOTTOM)
-            .style(theme.ui.command_palette_bg);
+        let area_content = area_background.inner(margin_content);
+        let block = Block::new().borders(Borders::BOTTOM);
         let block = block
             .title_bottom("")
             .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")]))
             .title_bottom(shortcuts_desc(&[("Confirm", "CR")]))
             .title_bottom(shortcuts_desc(&[("Cancel", "Esc")]));
 
-        frame.render_widget(&block, area);
-        let inner_area = block.inner(area);
-        let [breadcrumb_area, list_area] = Layout::vertical([Length(1), Min(0)]).areas(inner_area);
+        frame.render_widget(&block, area_content);
+        let area_content = block.inner(area_content);
+        let [_, area_breadcrumb, _, area_list, _] =
+            Layout::vertical([Length(1), Length(1), Length(1), Min(0), Length(1)])
+                .areas(area_content);
 
-        self.breadcrumb.draw(frame, breadcrumb_area)?;
-        self.command_list.draw(frame, list_area)
+        self.breadcrumb.draw(frame, area_breadcrumb)?;
+        self.command_list.draw(frame, area_list)
     }
 }
