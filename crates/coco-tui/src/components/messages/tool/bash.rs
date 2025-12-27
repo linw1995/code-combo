@@ -37,8 +37,6 @@ struct Inner {
     tool_use: ToolUse,
     exec_state: ExecState,
     #[serde(default)]
-    view: BashOutputView,
-    #[serde(default)]
     display_state: FoldState,
 }
 
@@ -88,6 +86,7 @@ enum ExecState {
     Finished {
         output: BashOutput,
         chunks: Vec<OutputChunk>,
+        view: BashOutputView,
     },
 }
 
@@ -172,6 +171,7 @@ impl<'a> Bash<'a> {
             Some(output) => ExecState::Finished {
                 output,
                 chunks: Vec::new(),
+                view: BashOutputView::default(),
             },
             None => ExecState::Initial {
                 requiring_confirmation: false,
@@ -182,7 +182,6 @@ impl<'a> Bash<'a> {
             state: State::new(Inner {
                 tool_use: tool_use.to_owned(),
                 exec_state,
-                view: BashOutputView::default(),
                 display_state,
             }),
             input,
@@ -198,7 +197,7 @@ impl<'a> Bash<'a> {
 
     fn render_output(&self, max_lines: Option<usize>) -> (Paragraph<'a>, Option<Paragraph<'a>>) {
         let theme = global::theme();
-        let view = self.state.view;
+        let view = self.exec_view();
         let exec_state = &self.state.exec_state;
         let output = self.exec_output();
         let has_any =
@@ -382,6 +381,22 @@ impl<'a> Bash<'a> {
         }
     }
 
+    fn exec_view(&self) -> BashOutputView {
+        match &self.state.exec_state {
+            ExecState::Finished { view, .. } => *view,
+            _ => BashOutputView::Mixed,
+        }
+    }
+
+    fn set_exec_view(&mut self, view: BashOutputView) -> bool {
+        let mut state = self.state.write();
+        if let ExecState::Finished { view: current, .. } = &mut state.exec_state {
+            *current = view;
+            return true;
+        }
+        false
+    }
+
     fn requiring_confirmation(&self) -> bool {
         matches!(
             &self.state.exec_state,
@@ -420,12 +435,18 @@ impl<'a> Bash<'a> {
                 .whatever_context("failed to parse BashOutput")?;
             {
                 let mut state = self.state.write();
-                let chunks = match &mut state.exec_state {
-                    ExecState::Executing { chunks } => std::mem::take(chunks),
-                    ExecState::Finished { chunks, .. } => std::mem::take(chunks),
-                    ExecState::Initial { .. } => Vec::new(),
+                let (chunks, view) = match &mut state.exec_state {
+                    ExecState::Executing { chunks } => {
+                        (std::mem::take(chunks), BashOutputView::default())
+                    }
+                    ExecState::Finished { chunks, view, .. } => (std::mem::take(chunks), *view),
+                    ExecState::Initial { .. } => (Vec::new(), BashOutputView::default()),
                 };
-                state.exec_state = ExecState::Finished { output, chunks };
+                state.exec_state = ExecState::Finished {
+                    output,
+                    chunks,
+                    view,
+                };
             }
             self.streamed_lines = StreamedLines::from_chunks(self.exec_chunks(), None);
             self.rebuild_output();
@@ -469,7 +490,7 @@ impl<'a> Content for Bash<'a> {
             tab_panel_width(width)
         };
         let width_body = width.saturating_sub(width_tab).max(1);
-        let width_marker = output_marker_width(self.state.view);
+        let width_marker = output_marker_width(self.exec_view());
         let width_text = width_body.saturating_sub(width_marker).max(1);
         let height_output = match self.state.display_state {
             FoldState::Preview => OUTPUT_PREVIEW_LINES.max(min_height),
@@ -501,7 +522,7 @@ impl<'a> Content for Bash<'a> {
         };
 
         if matches!(self.state.display_state, FoldState::Expanded) {
-            let view = match self.state.view {
+            let view = match self.exec_view() {
                 BashOutputView::Stdout => "Stdout",
                 BashOutputView::Stderr => "Stderr",
                 BashOutputView::Mixed => "Mixed",
@@ -595,28 +616,28 @@ impl Component for Bash<'static> {
                 if !self.has_output_content() {
                     return;
                 }
-                let mut state = self.state.write();
-                state.view = BashOutputView::Stdout;
-                drop(state);
+                if !self.set_exec_view(BashOutputView::Stdout) {
+                    return;
+                }
                 self.rebuild_output();
             }
             (FoldState::Expanded, KeyModifiers::NONE, KeyCode::Char('2')) => {
                 if !self.has_output_content() {
                     return;
                 }
-                let mut state = self.state.write();
-                state.view = BashOutputView::Stderr;
-                state.display_state.expand();
-                drop(state);
+                if !self.set_exec_view(BashOutputView::Stderr) {
+                    return;
+                }
+                self.state.write().display_state.expand();
                 self.rebuild_output();
             }
             (FoldState::Expanded, KeyModifiers::NONE, KeyCode::Char('3')) => {
                 if !self.has_output_content() {
                     return;
                 }
-                let mut state = self.state.write();
-                state.view = BashOutputView::Mixed;
-                drop(state);
+                if !self.set_exec_view(BashOutputView::Mixed) {
+                    return;
+                }
                 self.rebuild_output();
             }
             (_, KeyModifiers::NONE, KeyCode::Char('z')) => {
@@ -708,7 +729,7 @@ impl Component for Bash<'static> {
         } else {
             tab_panel_width(width)
         };
-        let width_marker = output_marker_width(self.state.view);
+        let width_marker = output_marker_width(self.exec_view());
         let width_body = width.saturating_sub(width_tabs).max(1);
         let width_text = width_body.saturating_sub(width_marker).max(1);
         let min_height = TAB_PANEL_HEIGHT;
@@ -751,7 +772,7 @@ impl Component for Bash<'static> {
         }
 
         if let Some(area_tabs) = area_output_tabs {
-            let tabs_panel = render_tabs_panel(self.state.view);
+            let tabs_panel = render_tabs_panel(self.exec_view());
             frame.render_widget(tabs_panel, area_tabs);
         }
         Ok(())
@@ -866,15 +887,15 @@ mod tests {
         bash.state.write().display_state = FoldState::Expanded;
         bash.handle_key_event(&key(KeyCode::Char('1')));
         assert_eq!(bash.state.display_state, FoldState::Expanded);
-        assert_eq!(bash.state.view.index(), 0);
+        assert_eq!(bash.exec_view().index(), 0);
 
         bash.handle_key_event(&key(KeyCode::Char('2')));
         assert_eq!(bash.state.display_state, FoldState::Expanded);
-        assert_eq!(bash.state.view.index(), 1);
+        assert_eq!(bash.exec_view().index(), 1);
 
         bash.handle_key_event(&key(KeyCode::Char('3')));
         assert_eq!(bash.state.display_state, FoldState::Expanded);
-        assert_eq!(bash.state.view.index(), 2);
+        assert_eq!(bash.exec_view().index(), 2);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
