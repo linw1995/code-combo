@@ -470,28 +470,56 @@ impl Chat<'static> {
         global::trigger_schedule_session_save();
     }
 
-    fn block_bottom_with_shortcuts_desc<'a>(&self, mut block: Block<'a>) -> Block<'a> {
-        block = block.title_bottom(Line::from(""));
-        match self.state.focus {
+    fn input_block_with_dynamic_titles<'a>(&'a self, mut block: Block<'a>) -> Block<'a> {
+        block = block.title_top(Line::from(""));
+        block = match self.state.focus {
             Focus::Input => block
-                .title_bottom(shortcuts_desc(&[("Blur", "Esc")]))
-                .title_bottom(shortcuts_desc(&[("Submit", "CR")])),
+                .title_top(shortcuts_desc(&[("Blur", "Esc")]))
+                .title_top(shortcuts_desc(&[("Submit", "CR")])),
             Focus::InputBlur => block
-                .title_bottom(shortcuts_desc(&[("Focus", "CR")]))
-                .title_bottom(shortcuts_desc(&[("Commands", "C-p")]))
-                .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")])),
+                .title_top(shortcuts_desc(&[("Focus", "CR")]))
+                .title_top(shortcuts_desc(&[("Commands", "C-p")]))
+                .title_top(shortcuts_desc(&[("Up", "k"), ("Down", "j")])),
             Focus::Messages => {
                 block = self.messages.block_with_shortcuts_desc(block);
                 if !self.messages.is_actionable() {
-                    block = block.title_bottom(shortcuts_desc(&[("Back", "Esc")]));
+                    block = block.title_top(shortcuts_desc(&[("Back", "Esc")]));
                 }
                 block
-                    .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")]))
-                    .title_bottom(shortcuts_desc(&[("Scroll Up", "C-y"), ("Down", "C-e")]))
-                    .title_bottom(shortcuts_desc(&[("Scroll+ Up", "C-u"), ("Down", "C-d")]))
+                    .title_top(shortcuts_desc(&[("Up", "k"), ("Down", "j")]))
+                    .title_top(shortcuts_desc(&[("Scroll Up", "C-y"), ("Down", "C-e")]))
+                    .title_top(shortcuts_desc(&[("Scroll+ Up", "C-u"), ("Down", "C-d")]))
             }
             Focus::CommandPalette => block,
+        };
+        block = block
+            .title_bottom(Line::from(""))
+            .title_bottom(self.widget_state_indicator())
+            .title_bottom(self.auto_accept_indicator());
+        if let Some(line) = self.ctrl_c_reminder_line() {
+            block = block.title_bottom(line);
         }
+        block
+    }
+
+    fn draw_input(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        let theme = global::theme();
+        let mut block = Block::new().borders(Borders::TOP | Borders::BOTTOM);
+        block = if matches!(self.state.focus, Focus::Input | Focus::InputBlur) {
+            block
+                .border_set(border::THICK)
+                .border_style(theme.ui.block_border_active)
+        } else {
+            block
+                .border_set(border::PLAIN)
+                .border_style(theme.ui.block_border_inactive)
+        };
+
+        block = self.input_block_with_dynamic_titles(block);
+        frame.render_widget(&block, area);
+        self.input.draw(frame, block.inner(area))?;
+
+        Ok(())
     }
 
     fn ctrl_c_reminder_line(&self) -> Option<Line<'static>> {
@@ -1026,36 +1054,11 @@ impl Chat<'static> {
     fn draw_chat(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         use Constraint::{Length, Min};
 
-        let vertical = Layout::vertical([Min(0), Length(1), Length(1), Length(1)]);
-        let [area_messages, divider, area_input, bottom] = vertical.areas(area);
+        let vertical = Layout::vertical([Min(0), Length(3)]);
+        let [area_messages, area_input] = vertical.areas(area);
 
         self.messages.draw(frame, area_messages)?;
-
-        let block = Block::new()
-            .borders(Borders::BOTTOM)
-            .border_set(border::THICK);
-        frame.render_widget(self.block_bottom_with_shortcuts_desc(block), divider);
-
-        let theme = global::theme();
-        let mut bottom_block = Block::new().borders(Borders::BOTTOM);
-        bottom_block = if !matches!(self.state.focus, Focus::Messages) {
-            bottom_block
-                .border_set(border::THICK)
-                .border_style(theme.ui.block_border_active)
-        } else {
-            bottom_block
-                .border_set(border::PLAIN)
-                .border_style(theme.ui.block_border_inactive)
-        };
-        bottom_block = bottom_block
-            .title_bottom(Line::from(""))
-            .title_bottom(self.widget_state_indicator());
-        bottom_block = bottom_block.title_bottom(self.auto_accept_indicator());
-        if let Some(line) = self.ctrl_c_reminder_line() {
-            bottom_block = bottom_block.title_bottom(line);
-        }
-        frame.render_widget(bottom_block, bottom);
-        self.input.draw(frame, area_input)?;
+        self.draw_input(frame, area_input)?;
 
         Ok(())
     }
