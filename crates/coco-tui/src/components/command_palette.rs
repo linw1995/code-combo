@@ -11,9 +11,11 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Widget},
 };
 use serde::{Deserialize, Serialize};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use tracing::warn;
 
 use crate::{
-    actions::Action,
+    actions::CommandPaletteAction,
     components::{Component, Persistable, shortcuts_desc},
     error::Result,
     global::{self, State},
@@ -21,38 +23,56 @@ use crate::{
     widgets::Paragraph,
 };
 
+const COMMAND_NEW_SESSION: &str = "New Session";
+const COMMAND_TRANSCRIPT: &str = "Transcript";
+const COMMAND_SWITCH_SESSION: &str = "Switch Session";
+
+const BREADCRUMB_ROOT: &str = "Command Palette";
+const BREADCRUMB_SESSIONS: &str = "Sessions";
+
+const SESSION_SWITCH_LIMIT: usize = 20;
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Command {
     pub name: String,
     pub shortcut: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct Inner {
-    pub commands: Vec<Command>,
-    pub focus: Option<usize>,
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CommandPaletteMode {
+    Main,
+    SwitchSession,
 }
 
-/// Command Palette is a popup floating window that allows users to quickly execute commands.
-///
-/// This component provides a floating interface that can be triggered to access various
-/// application commands and actions. It typically appears as an overlay on top of other
-/// UI elements and disappears after a command is executed or when dismissed.
-#[derive(ComponentExt)]
-#[component(type_id = "command_palette")]
-pub struct CommandPalette {
-    state: State<Inner>,
+#[derive(Clone, Serialize, Deserialize)]
+struct CommandListState {
+    commands: Vec<Command>,
+    focus: Option<usize>,
 }
 
-impl CommandPalette {
-    pub fn new(commands: &[Command]) -> Self {
+struct CommandList {
+    state: State<CommandListState>,
+}
+
+impl CommandList {
+    fn new(commands: Vec<Command>) -> Self {
         let focus = if commands.is_empty() { None } else { Some(0) };
         Self {
-            state: State::new(Inner {
-                commands: Vec::from(commands),
-                focus,
-            }),
+            state: State::new(CommandListState { commands, focus }),
         }
+    }
+
+    fn from_state(state: CommandListState) -> Self {
+        Self {
+            state: State::new(state),
+        }
+    }
+
+    fn set_commands(&mut self, commands: Vec<Command>) {
+        let focus = if commands.is_empty() { None } else { Some(0) };
+        let mut state = self.state.write();
+        state.commands = commands;
+        state.focus = focus;
     }
 
     fn select_prev(&mut self) -> bool {
@@ -77,14 +97,17 @@ impl CommandPalette {
         }
     }
 
-    /// Returns the currently focused command, if any
+    fn selected_index(&self) -> Option<usize> {
+        self.state.focus
+    }
+
     fn selected_command(&self) -> Option<&Command> {
         self.state
             .focus
             .and_then(|idx| self.state.commands.get(idx))
     }
 
-    pub fn draw_commands(&self, frame: &mut Frame, area: Rect) -> Result<()> {
+    fn draw(&self, frame: &mut Frame, area: Rect) -> Result<()> {
         use Constraint::*;
 
         let height = self.state.commands.len();
@@ -95,7 +118,6 @@ impl CommandPalette {
         for (idx, command) in self.state.commands.iter().enumerate() {
             let area = chunks[idx];
 
-            // Command focus highlight
             let is_focus = Some(idx) == self.state.focus;
             let row_style = if is_focus {
                 theme.ui.command_palette_item_bg_focus
@@ -113,17 +135,14 @@ impl CommandPalette {
             frame.render_widget(&block, area);
             let area = block.inner(area);
 
-            // Command shortcut
             let area = if let Some(shortcut) = &command.shortcut {
                 let [left, right] =
                     Layout::horizontal([Percentage(50), Percentage(50)]).areas(area);
 
                 frame.render_widget(
-                    Paragraph::new(
-                        Text::from(shortcut.to_owned())
-                            .style(theme.ui.shortcut)
-                            .right_aligned(),
-                    ),
+                    Text::from(shortcut.to_owned())
+                        .style(theme.ui.shortcut)
+                        .right_aligned(),
                     right,
                 );
 
@@ -132,7 +151,6 @@ impl CommandPalette {
                 area
             };
 
-            // Command name
             let mut name = Text::from(command.name.clone()).left_aligned();
             if !is_focus {
                 name = name.style(theme.ui.shortcut_desc)
@@ -143,14 +161,247 @@ impl CommandPalette {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct BreadcrumbState {
+    items: Vec<String>,
+}
+
+struct Breadcrumb {
+    state: State<BreadcrumbState>,
+}
+
+impl Breadcrumb {
+    fn new(items: Vec<String>) -> Self {
+        Self {
+            state: State::new(BreadcrumbState { items }),
+        }
+    }
+
+    fn set_items(&mut self, items: Vec<String>) {
+        self.state.write().items = items;
+    }
+
+    fn draw(&self, frame: &mut Frame, area: Rect) -> Result<()> {
+        let theme = global::theme();
+        let items = &self.state.items;
+        let label = if items.is_empty() {
+            String::new()
+        } else {
+            items.join(" / ")
+        };
+        frame.render_widget(
+            Paragraph::new(Text::from(label).style(theme.ui.shortcut_desc)),
+            area,
+        );
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SessionSwitchEntry {
+    label: String,
+    metadata: session::PersistentSessionMetadata,
+}
+
+/// Command Palette is a popup floating window that allows users to quickly execute commands.
+///
+/// This component provides a floating interface that can be triggered to access various
+/// application commands and actions. It typically appears as an overlay on top of other
+/// UI elements and disappears after a command is executed or when dismissed.
+#[derive(ComponentExt)]
+#[component(type_id = "command_palette")]
+pub struct CommandPalette {
+    command_list: CommandList,
+    breadcrumb: Breadcrumb,
+    mode: CommandPaletteMode,
+    session_switch_entries: Vec<SessionSwitchEntry>,
+    current_session_created_at: Option<OffsetDateTime>,
+}
+
+impl Default for CommandPalette {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CommandPalette {
+    pub fn new() -> Self {
+        let command_list = CommandList::new(Self::main_commands());
+        let breadcrumb = Breadcrumb::new(vec![BREADCRUMB_ROOT.to_string()]);
+        Self {
+            command_list,
+            breadcrumb,
+            mode: CommandPaletteMode::Main,
+            session_switch_entries: Vec::new(),
+            current_session_created_at: None,
+        }
+    }
+
+    pub fn open(&mut self, current_session_created_at: OffsetDateTime) {
+        self.current_session_created_at = Some(current_session_created_at);
+        self.open_main();
+    }
+
+    pub fn on_escape(&mut self) -> bool {
+        match self.mode {
+            CommandPaletteMode::SwitchSession => {
+                self.open_main();
+                true
+            }
+            CommandPaletteMode::Main => false,
+        }
+    }
+
+    fn main_commands() -> Vec<Command> {
+        vec![
+            Command {
+                name: COMMAND_NEW_SESSION.to_string(),
+                shortcut: Some("<C-n>".to_string()),
+            },
+            Command {
+                name: COMMAND_TRANSCRIPT.to_string(),
+                shortcut: Some("<C-t>".to_string()),
+            },
+            Command {
+                name: COMMAND_SWITCH_SESSION.to_string(),
+                shortcut: Some("<C-s>".to_string()),
+            },
+        ]
+    }
+
+    fn open_main(&mut self) {
+        self.mode = CommandPaletteMode::Main;
+        self.session_switch_entries.clear();
+        self.command_list.set_commands(Self::main_commands());
+        self.breadcrumb.set_items(vec![BREADCRUMB_ROOT.to_string()]);
+    }
+
+    fn open_session_switcher(&mut self) {
+        let entries = self.build_session_switch_entries(self.current_session_created_at);
+        self.mode = CommandPaletteMode::SwitchSession;
+        self.breadcrumb.set_items(vec![
+            BREADCRUMB_ROOT.to_string(),
+            BREADCRUMB_SESSIONS.to_string(),
+        ]);
+
+        if entries.is_empty() {
+            self.session_switch_entries.clear();
+            self.command_list.set_commands(vec![Command {
+                name: "No sessions found".to_string(),
+                shortcut: None,
+            }]);
+            return;
+        }
+
+        let commands = entries
+            .iter()
+            .map(|entry| Command {
+                name: entry.label.clone(),
+                shortcut: None,
+            })
+            .collect();
+
+        self.session_switch_entries = entries;
+        self.command_list.set_commands(commands);
+    }
+
+    fn build_session_switch_entries(
+        &self,
+        current_session_created_at: Option<OffsetDateTime>,
+    ) -> Vec<SessionSwitchEntry> {
+        let mut sessions = self.list_session_metadata();
+        if let Some(current_session_created_at) = current_session_created_at {
+            sessions.retain(|session| session.created_at != current_session_created_at);
+        }
+        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        sessions.truncate(SESSION_SWITCH_LIMIT);
+
+        sessions
+            .into_iter()
+            .map(|metadata| {
+                let label = Self::format_session_label(&metadata);
+                SessionSwitchEntry { label, metadata }
+            })
+            .collect()
+    }
+
+    fn list_session_metadata(&self) -> Vec<session::PersistentSessionMetadata> {
+        let session_dir = std::path::Path::new(".coco/sessions").to_path_buf();
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(session::list_session(&session_dir))
+        });
+
+        match result {
+            Ok(sessions) => sessions,
+            Err(err) => {
+                warn!(?err, "failed to list sessions");
+                Vec::new()
+            }
+        }
+    }
+
+    fn format_session_label(metadata: &session::PersistentSessionMetadata) -> String {
+        let updated_at = metadata
+            .updated_at
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| "unknown".to_string());
+        format!("{} [{}]", metadata.name, updated_at)
+    }
+
+    fn on_enter(&mut self) -> Option<CommandPaletteAction> {
+        match self.mode {
+            CommandPaletteMode::Main => {
+                let name = self
+                    .command_list
+                    .selected_command()
+                    .map(|command| command.name.clone());
+                match name.as_deref() {
+                    Some(COMMAND_SWITCH_SESSION) => {
+                        self.open_session_switcher();
+                        None
+                    }
+                    Some(COMMAND_NEW_SESSION) => Some(CommandPaletteAction::NewSession),
+                    Some(COMMAND_TRANSCRIPT) => Some(CommandPaletteAction::Transcript),
+                    Some(unknown) => {
+                        warn!(?unknown, "unknown command");
+                        None
+                    }
+                    None => None,
+                }
+            }
+            CommandPaletteMode::SwitchSession => {
+                let metadata = self
+                    .command_list
+                    .selected_index()
+                    .and_then(|idx| self.session_switch_entries.get(idx))
+                    .map(|entry| entry.metadata.clone());
+
+                if let Some(metadata) = metadata {
+                    self.open_main();
+                    Some(CommandPaletteAction::RestoreSession(metadata))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
 impl Persistable for CommandPalette {
     fn save(&self) -> Session {
-        session::save(&self.state)
+        session::save(&self.command_list.state)
     }
+
     fn load(state: Session) -> Result<Self> {
-        let state: Inner = session::load(state)?;
+        let state: CommandListState = session::load(state)?;
+        let command_list = CommandList::from_state(state);
+        let breadcrumb = Breadcrumb::new(vec![BREADCRUMB_ROOT.to_string()]);
         Ok(Self {
-            state: State::new(state),
+            command_list,
+            breadcrumb,
+            mode: CommandPaletteMode::Main,
+            session_switch_entries: Vec::new(),
+            current_session_created_at: None,
         })
     }
 }
@@ -160,35 +411,51 @@ impl Component for CommandPalette {
         use KeyCode::*;
         use KeyModifiers as KM;
 
-        match (key.modifiers, key.code) {
+        let action = match (key.modifiers, key.code) {
+            (KM::CONTROL, Char('n' | 'N')) => Some(CommandPaletteAction::NewSession),
+            (KM::CONTROL, Char('t' | 'T')) => Some(CommandPaletteAction::Transcript),
+            (KM::CONTROL, Char('s' | 'S')) => {
+                if self.mode == CommandPaletteMode::Main {
+                    self.open_session_switcher();
+                }
+                None
+            }
             (KM::NONE, Char('k')) => {
-                self.select_prev();
+                self.command_list.select_prev();
+                None
             }
             (KM::NONE, Char('j')) => {
-                self.select_next();
+                self.command_list.select_next();
+                None
             }
-            (KM::NONE, Enter) => {
-                if let Some(command) = self.selected_command() {
-                    global::action_tx()
-                        .send(Action::Command(command.name.clone()))
-                        .unwrap();
-                }
-            }
-            (KM::NONE, Esc) => {
-                unreachable!("Esc key should be handled by the parent component")
-            }
-            _ => (),
+            (KM::NONE, Enter) => self.on_enter(),
+            (KM::NONE, Esc) => unreachable!("Esc key should be handled by the parent component"),
+            _ => None,
+        };
+
+        if let Some(action) = action {
+            global::action_tx().send(action.into()).unwrap();
         }
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         use Constraint::*;
 
-        let theme = global::theme();
-        let margin = 3;
-        let (width, height) = (120 + margin * 2, 20 + margin * 2);
+        let margin_background = Margin {
+            horizontal: 3,
+            vertical: 1,
+        };
+        let margin_content = Margin {
+            horizontal: 3,
+            vertical: 1,
+        };
+        let (width, height) = (
+            120 + (margin_background.horizontal + margin_content.horizontal) * 2,
+            20 + (margin_background.vertical + margin_content.vertical) * 2,
+        );
 
-        let area = {
+        // Get the center area of viewport
+        let area_popup = {
             let [_, area_h_center, _] =
                 Layout::horizontal([Fill(1), Max(width), Fill(1)]).areas(area);
             let [_, area_floating, _] =
@@ -196,24 +463,30 @@ impl Component for CommandPalette {
             area_floating
         };
 
-        // ensure that all cells under the popup are cleared to avoid leaking content
-        Clear.render(area, frame.buffer_mut());
+        // Clear the center area
+        Clear.render(area_popup, frame.buffer_mut());
+        let area_background = area_popup.inner(margin_background);
 
-        let area = area.inner(Margin {
-            horizontal: margin,
-            vertical: margin,
-        });
+        // Render backgroud color
+        let theme = global::theme();
+        let block = Block::new().style(theme.ui.command_palette_bg);
+        frame.render_widget(&block, area_background);
 
-        let block = Block::new()
-            .borders(Borders::BOTTOM)
-            .style(theme.ui.command_palette_bg);
+        let area_content = area_background.inner(margin_content);
+        let block = Block::new().borders(Borders::BOTTOM);
         let block = block
             .title_bottom("")
             .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")]))
             .title_bottom(shortcuts_desc(&[("Confirm", "CR")]))
             .title_bottom(shortcuts_desc(&[("Cancel", "Esc")]));
 
-        frame.render_widget(&block, area);
-        self.draw_commands(frame, block.inner(area))
+        frame.render_widget(&block, area_content);
+        let area_content = block.inner(area_content);
+        let [_, area_breadcrumb, _, area_list, _] =
+            Layout::vertical([Length(1), Length(1), Length(1), Min(0), Length(1)])
+                .areas(area_content);
+
+        self.breadcrumb.draw(frame, area_breadcrumb)?;
+        self.command_list.draw(frame, area_list)
     }
 }

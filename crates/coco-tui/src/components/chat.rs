@@ -22,12 +22,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use super::{
-    Action, AnswerEvent, AskEvent, BotMessage, Combo, ComboAction, ComboEvent, Component, Content,
-    Event, Input, Message, Messages, Plain, SessionAction, Tool, ToolAction, TranscriptMessage,
-    shortcuts_desc,
+    Action, AnswerEvent, AskEvent, BotMessage, Combo, ComboAction, ComboEvent,
+    CommandPaletteAction, Component, Content, Event, Input, Message, Messages, Plain,
+    SessionAction, Tool, ToolAction, TranscriptMessage, shortcuts_desc,
 };
 use crate::{
-    components::{Command, CommandPalette, Persistable},
+    components::{CommandPalette, Persistable},
     error::*,
     global::{self, State},
     session::{self, Session},
@@ -186,9 +186,6 @@ impl CancellationGuard {
     }
 }
 
-const COMMAND_NEW_SESSION: &str = "New Session";
-const COMMAND_TRANSCRIPT: &str = "Transcript";
-
 const AGENTS_MD_FILENAME: &str = "AGENTS.md";
 
 impl Chat<'static> {
@@ -198,17 +195,7 @@ impl Chat<'static> {
         Self {
             state: State::default(),
             agent,
-            command_palette: CommandPalette::new(&[
-                Command {
-                    name: COMMAND_NEW_SESSION.to_string(),
-                    shortcut: Some("<C-n>".to_string()),
-                },
-                Command {
-                    name: COMMAND_TRANSCRIPT.to_string(),
-                    shortcut: Some("<C-t>".to_string()),
-                },
-                // TODO: Switch Session
-            ]),
+            command_palette: CommandPalette::new(),
             input: Input::default(),
             messages: Messages::default(),
             transcript: Messages::default(),
@@ -234,6 +221,24 @@ impl Chat<'static> {
                 }
             }
         }
+    }
+
+    fn restore_session_by_metadata(&self, metadata: session::PersistentSessionMetadata) {
+        let filename = metadata.filename();
+        let session_dir = std::path::Path::new(".coco/sessions").to_path_buf();
+        tokio::spawn(async move {
+            match crate::session::load_session(&session_dir, &filename).await {
+                Ok(persistent_session) => {
+                    global::action_tx()
+                        .send(Action::restore_session(persistent_session.inner))
+                        .unwrap();
+                    debug!(name = %persistent_session.name, "Session restore requested");
+                }
+                Err(e) => {
+                    warn!(?e, "failed to load session");
+                }
+            }
+        });
     }
 
     fn schedule_save_task(&mut self, save_at: Instant) {
@@ -848,7 +853,10 @@ impl Component for Chat<'static> {
             // Focus switching
             (Input, KM::NONE, Esc) => self.update_focus(InputBlur),
             (InputBlur, KM::NONE, Enter) => self.update_focus(Input),
-            (InputBlur, KM::CONTROL, Char('p')) => self.update_focus(CommandPalette),
+            (InputBlur, KM::CONTROL, Char('p')) => {
+                self.command_palette.open(self.state.created_at);
+                self.update_focus(CommandPalette);
+            }
             (Messages, KM::NONE, Esc) if !self.messages.is_actionable() => {
                 self.messages.blur();
                 self.update_focus(Focus::InputBlur);
@@ -891,7 +899,11 @@ impl Component for Chat<'static> {
 
             // Handle actionable messages
             (Messages, _, _) => self.messages.handle_key_event(key),
-            (CommandPalette, KM::NONE, Esc) => self.update_focus(InputBlur),
+            (CommandPalette, KM::NONE, Esc) => {
+                if !self.command_palette.on_escape() {
+                    self.update_focus(InputBlur);
+                }
+            }
             (CommandPalette, _, _) => self.command_palette.handle_key_event(key),
 
             (InputBlur, _, _) => {
@@ -995,23 +1007,23 @@ impl Component for Chat<'static> {
                     }
                 }
             }
-            Action::Command(name) => {
-                // Close command palette
-                self.update_focus(Focus::InputBlur);
-
-                // Handle command
-                match name.as_str() {
-                    COMMAND_NEW_SESSION => {
-                        self.new_session();
-                    }
-                    COMMAND_TRANSCRIPT => {
-                        self.open_transcript();
-                    }
-                    unknown => {
-                        warn!(?unknown, "unknown command");
-                    }
+            Action::CommandPalette(action) => match action {
+                CommandPaletteAction::NewSession => {
+                    self.update_focus(Focus::InputBlur);
+                    self.new_session();
                 }
-            }
+                CommandPaletteAction::Transcript => {
+                    self.update_focus(Focus::InputBlur);
+                    self.open_transcript();
+                }
+                CommandPaletteAction::RestoreSession(metadata) => {
+                    self.update_focus(Focus::InputBlur);
+                    if !self.messages.is_empty() {
+                        self.save_now();
+                    }
+                    self.restore_session_by_metadata(metadata.to_owned());
+                }
+            },
             Action::SubmitPrompt(prompt) => {
                 if self.state.state == ChatState::Ready {
                     self.submit_value(prompt.to_owned());

@@ -1,7 +1,7 @@
 use code_combo::{TextEdit, ToolUse};
 use tokio::time::Instant;
 
-use crate::session::Session;
+use crate::session::{PersistentSessionMetadata, Session};
 
 #[derive(Debug, Clone)]
 pub enum Action {
@@ -11,7 +11,7 @@ pub enum Action {
     Combo(ComboAction),
     Tool(ToolAction),
     Session(SessionAction),
-    Command(String),
+    CommandPalette(CommandPaletteAction),
     SubmitPrompt(String),
 
     Blur,
@@ -70,6 +70,19 @@ pub enum ToolAction {
 impl From<ToolAction> for Action {
     fn from(value: ToolAction) -> Self {
         Self::Tool(value)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum CommandPaletteAction {
+    NewSession,
+    Transcript,
+    RestoreSession(PersistentSessionMetadata),
+}
+
+impl From<CommandPaletteAction> for Action {
+    fn from(value: CommandPaletteAction) -> Self {
+        Self::CommandPalette(value)
     }
 }
 
