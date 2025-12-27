@@ -16,18 +16,18 @@ use ratatui::{
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::OffsetDateTime;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use super::{
-    Action, AnswerEvent, AskEvent, BotMessage, Combo, ComboAction, ComboEvent, Component, Content,
-    Event, Input, Message, Messages, Plain, SessionAction, Tool, ToolAction, TranscriptMessage,
-    shortcuts_desc,
+    Action, AnswerEvent, AskEvent, BotMessage, Combo, ComboAction, ComboEvent,
+    CommandPaletteAction, Component, Content, Event, Input, Message, Messages, Plain,
+    SessionAction, Tool, ToolAction, TranscriptMessage, shortcuts_desc,
 };
 use crate::{
-    components::{Command, CommandPalette, Persistable},
+    components::{CommandPalette, Persistable},
     error::*,
     global::{self, State},
     session::{self, Session},
@@ -42,8 +42,6 @@ pub struct Chat<'a> {
     agent: Agent,
 
     command_palette: CommandPalette,
-    command_palette_mode: CommandPaletteMode,
-    session_switch_entries: Vec<SessionSwitchEntry>,
     input: Input<'a>,
     messages: Messages,
     transcript: Messages,
@@ -124,19 +122,6 @@ enum ViewMode {
     Transcript,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
-enum CommandPaletteMode {
-    #[default]
-    Main,
-    SwitchSession,
-}
-
-#[derive(Clone, Debug)]
-struct SessionSwitchEntry {
-    label: String,
-    metadata: session::PersistentSessionMetadata,
-}
-
 const CTRL_C_WINDOW: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Default)]
@@ -201,25 +186,16 @@ impl CancellationGuard {
     }
 }
 
-const COMMAND_NEW_SESSION: &str = "New Session";
-const COMMAND_TRANSCRIPT: &str = "Transcript";
-const COMMAND_SWITCH_SESSION: &str = "Switch Session";
-
-const SESSION_SWITCH_LIMIT: usize = 20;
-
 const AGENTS_MD_FILENAME: &str = "AGENTS.md";
 
 impl Chat<'static> {
     pub fn new(config: Config) -> Self {
         let agent = Agent::new(config);
-        let commands = Self::command_palette_commands();
 
         Self {
             state: State::default(),
             agent,
-            command_palette: CommandPalette::new(&commands),
-            command_palette_mode: CommandPaletteMode::Main,
-            session_switch_entries: Vec::new(),
+            command_palette: CommandPalette::new(),
             input: Input::default(),
             messages: Messages::default(),
             transcript: Messages::default(),
@@ -247,94 +223,7 @@ impl Chat<'static> {
         }
     }
 
-    fn command_palette_commands() -> Vec<Command> {
-        vec![
-            Command {
-                name: COMMAND_NEW_SESSION.to_string(),
-                shortcut: Some("<C-n>".to_string()),
-            },
-            Command {
-                name: COMMAND_TRANSCRIPT.to_string(),
-                shortcut: Some("<C-t>".to_string()),
-            },
-            Command {
-                name: COMMAND_SWITCH_SESSION.to_string(),
-                shortcut: Some("<C-s>".to_string()),
-            },
-        ]
-    }
-
-    fn show_command_palette_main(&mut self) {
-        self.command_palette_mode = CommandPaletteMode::Main;
-        self.session_switch_entries.clear();
-        self.command_palette
-            .set_commands(Self::command_palette_commands());
-    }
-
-    fn open_session_switcher(&mut self) {
-        let entries = self.build_session_switch_entries();
-        if entries.is_empty() {
-            self.command_palette_mode = CommandPaletteMode::SwitchSession;
-            self.session_switch_entries.clear();
-            self.command_palette.set_commands(vec![Command {
-                name: "No sessions found".to_string(),
-                shortcut: None,
-            }]);
-            return;
-        }
-
-        let commands = entries
-            .iter()
-            .map(|entry| Command {
-                name: entry.label.clone(),
-                shortcut: None,
-            })
-            .collect();
-
-        self.command_palette_mode = CommandPaletteMode::SwitchSession;
-        self.session_switch_entries = entries;
-        self.command_palette.set_commands(commands);
-    }
-
-    fn build_session_switch_entries(&self) -> Vec<SessionSwitchEntry> {
-        let mut sessions = self.list_session_metadata();
-        sessions.retain(|session| session.created_at != self.state.created_at);
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        sessions.truncate(SESSION_SWITCH_LIMIT);
-
-        sessions
-            .into_iter()
-            .map(|metadata| {
-                let label = Self::format_session_label(&metadata);
-                SessionSwitchEntry { label, metadata }
-            })
-            .collect()
-    }
-
-    fn list_session_metadata(&self) -> Vec<session::PersistentSessionMetadata> {
-        let session_dir = std::path::Path::new(".coco/sessions").to_path_buf();
-        let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(session::list_session(&session_dir))
-        });
-
-        match result {
-            Ok(sessions) => sessions,
-            Err(err) => {
-                warn!(?err, "failed to list sessions");
-                Vec::new()
-            }
-        }
-    }
-
-    fn format_session_label(metadata: &session::PersistentSessionMetadata) -> String {
-        let updated_at = metadata
-            .updated_at
-            .format(&Rfc3339)
-            .unwrap_or_else(|_| "unknown".to_string());
-        format!("{} [{}]", metadata.name, updated_at)
-    }
-
-    fn restore_session_by_metadata(&self, metadata: &session::PersistentSessionMetadata) {
+    fn restore_session_by_metadata(&self, metadata: session::PersistentSessionMetadata) {
         let filename = metadata.filename();
         let session_dir = std::path::Path::new(".coco/sessions").to_path_buf();
         tokio::spawn(async move {
@@ -937,7 +826,7 @@ impl Component for Chat<'static> {
             (Input, KM::NONE, Esc) => self.update_focus(InputBlur),
             (InputBlur, KM::NONE, Enter) => self.update_focus(Input),
             (InputBlur, KM::CONTROL, Char('p')) => {
-                self.show_command_palette_main();
+                self.command_palette.open(self.state.created_at);
                 self.update_focus(CommandPalette);
             }
             (Messages, KM::NONE, Esc) if !self.messages.is_actionable() => {
@@ -1086,40 +975,21 @@ impl Component for Chat<'static> {
                     }
                 }
             }
-            Action::Command(name) => match self.command_palette_mode {
-                CommandPaletteMode::Main => match name.as_str() {
-                    COMMAND_SWITCH_SESSION => {
-                        self.open_session_switcher();
+            Action::CommandPalette(action) => match action {
+                CommandPaletteAction::NewSession => {
+                    self.update_focus(Focus::InputBlur);
+                    self.new_session();
+                }
+                CommandPaletteAction::Transcript => {
+                    self.update_focus(Focus::InputBlur);
+                    self.open_transcript();
+                }
+                CommandPaletteAction::RestoreSession(metadata) => {
+                    self.update_focus(Focus::InputBlur);
+                    if !self.messages.is_empty() {
+                        self.save_now();
                     }
-                    COMMAND_NEW_SESSION => {
-                        self.update_focus(Focus::InputBlur);
-                        self.new_session();
-                    }
-                    COMMAND_TRANSCRIPT => {
-                        self.update_focus(Focus::InputBlur);
-                        self.open_transcript();
-                    }
-                    unknown => {
-                        self.update_focus(Focus::InputBlur);
-                        warn!(?unknown, "unknown command");
-                    }
-                },
-                CommandPaletteMode::SwitchSession => {
-                    let metadata = self
-                        .session_switch_entries
-                        .iter()
-                        .find(|entry| entry.label == name.as_str())
-                        .map(|entry| entry.metadata.clone());
-                    if let Some(metadata) = metadata {
-                        self.update_focus(Focus::InputBlur);
-                        if !self.messages.is_empty() {
-                            self.save_now();
-                        }
-                        self.restore_session_by_metadata(&metadata);
-                        self.show_command_palette_main();
-                    } else {
-                        warn!(?name, "unknown session command");
-                    }
+                    self.restore_session_by_metadata(metadata.to_owned());
                 }
             },
             Action::SubmitPrompt(prompt) => {
