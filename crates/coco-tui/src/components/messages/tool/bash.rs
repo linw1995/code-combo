@@ -1,7 +1,7 @@
 use bon::bon;
 use coco_macro::{ComponentExt, ContentComponentExt};
 use code_combo::{
-    ToolUse,
+    OutputChunk, ToolUse,
     tools::{BashInput, BashOutput, Final},
 };
 use code_highlight::Lang;
@@ -37,6 +37,7 @@ struct Inner {
     tool_use: ToolUse,
     requiring_confirmation: bool,
     output: Option<BashOutput>,
+    chunks: Vec<OutputChunk>,
     #[serde(default)]
     view: BashOutputView,
     #[serde(default)]
@@ -130,6 +131,7 @@ const OUTPUT_MARKER: &str = "▐";
 
 fn build_output_view<'a>(
     output: Option<&BashOutput>,
+    chunks: &[OutputChunk],
     streamed_lines: &StreamedLines,
     view: BashOutputView,
     max_lines: Option<usize>,
@@ -173,7 +175,7 @@ fn build_output_view<'a>(
                     lines.push(Line::from(line.text.clone()));
                     markers.push(Line::from(Span::styled(OUTPUT_MARKER, marker_style)));
                 }
-            } else if output.chunks.is_empty() {
+            } else if chunks.is_empty() {
                 for (marker_style, text) in [
                     (theme.ui.bash_stderr_marker, &output.stderr),
                     (theme.ui.bash_stdout_marker, &output.stdout),
@@ -187,7 +189,7 @@ fn build_output_view<'a>(
                     }
                 }
             } else {
-                for chunk in &output.chunks {
+                for chunk in chunks {
                     let marker_style = match chunk.stream {
                         code_combo::StreamKind::Stdout => theme.ui.bash_stdout_marker,
                         code_combo::StreamKind::Stderr => theme.ui.bash_stderr_marker,
@@ -220,18 +222,18 @@ impl<'a> Bash<'a> {
             .map(serde_json::from_value)
             .transpose()
             .whatever_context("failed to parse BashOutput")?;
-        let streamed_lines = output
-            .as_ref()
-            .map(|output| StreamedLines::from_chunks(&output.chunks, None))
-            .unwrap_or_else(|| StreamedLines::new(None));
+        let chunks = Vec::new();
+        let streamed_lines = StreamedLines::new(None);
         let (output_text, output_markers) = build_output_view(
             output.as_ref(),
+            &chunks,
             &streamed_lines,
             BashOutputView::default(),
             None,
         );
         let (output_preview_text, output_preview_markers) = build_output_view(
             output.as_ref(),
+            &chunks,
             &streamed_lines,
             BashOutputView::default(),
             Some(OUTPUT_PREVIEW_LINES),
@@ -243,6 +245,7 @@ impl<'a> Bash<'a> {
                 tool_use: tool_use.to_owned(),
                 requiring_confirmation: false,
                 output,
+                chunks,
                 view: BashOutputView::default(),
                 display_state,
             }),
@@ -258,12 +261,14 @@ impl<'a> Bash<'a> {
     fn rebuild_output(&mut self) {
         let (output_text, output_markers) = build_output_view(
             self.state.output.as_ref(),
+            &self.state.chunks,
             &self.streamed_lines,
             self.state.view,
             None,
         );
         let (output_preview_text, output_preview_markers) = build_output_view(
             self.state.output.as_ref(),
+            &self.state.chunks,
             &self.streamed_lines,
             self.state.view,
             Some(OUTPUT_PREVIEW_LINES),
@@ -278,8 +283,11 @@ impl<'a> Bash<'a> {
         if let Some(Final::Json(value)) = output {
             let output = serde_json::from_value::<BashOutput>(value)
                 .whatever_context("failed to parse BashOutput")?;
-            self.streamed_lines = StreamedLines::from_chunks(&output.chunks, None);
-            self.state.write().output = Some(output);
+            {
+                let mut state = self.state.write();
+                state.output = Some(output);
+            }
+            self.streamed_lines = StreamedLines::from_chunks(&self.state.chunks, None);
             self.rebuild_output();
         }
         Ok(())
@@ -288,9 +296,11 @@ impl<'a> Bash<'a> {
     fn has_output_content(&self) -> bool {
         match self.state.output.as_ref() {
             Some(output) => {
-                !(output.stdout.is_empty() && output.stderr.is_empty() && output.chunks.is_empty())
+                !(output.stdout.is_empty()
+                    && output.stderr.is_empty()
+                    && self.state.chunks.is_empty())
             }
-            None => false,
+            None => !self.state.chunks.is_empty(),
         }
     }
 
@@ -393,15 +403,17 @@ impl Persistable for Bash<'static> {
 
     fn load(session: Session) -> Result<Self> {
         let state: Inner = session::load(session)?;
-        let streamed_lines = state
-            .output
-            .as_ref()
-            .map(|output| StreamedLines::from_chunks(&output.chunks, None))
-            .unwrap_or_else(|| StreamedLines::new(None));
-        let (output_text, output_markers) =
-            build_output_view(state.output.as_ref(), &streamed_lines, state.view, None);
+        let streamed_lines = StreamedLines::from_chunks(&state.chunks, None);
+        let (output_text, output_markers) = build_output_view(
+            state.output.as_ref(),
+            &state.chunks,
+            &streamed_lines,
+            state.view,
+            None,
+        );
         let (output_preview_text, output_preview_markers) = build_output_view(
             state.output.as_ref(),
+            &state.chunks,
             &streamed_lines,
             state.view,
             Some(OUTPUT_PREVIEW_LINES),
@@ -435,7 +447,6 @@ impl Component for Bash<'static> {
                     exit_code: 255,
                     stdout: String::new(),
                     stderr: String::new(),
-                    chunks: Vec::new(),
                     timed_out: false,
                 });
                 for line in &chunk.lines {
@@ -450,7 +461,7 @@ impl Component for Bash<'static> {
                         }
                     }
                 }
-                output.chunks.push(chunk.clone());
+                state.chunks.push(chunk.clone());
                 self.streamed_lines.push_chunk(chunk);
                 drop(state);
                 self.rebuild_output();
@@ -677,18 +688,6 @@ mod tests {
             exit_code,
             stdout: "out\n".to_string(),
             stderr: "err\n".to_string(),
-            chunks: vec![
-                code_combo::OutputChunk {
-                    timestamp: 0,
-                    stream: code_combo::StreamKind::Stdout,
-                    lines: vec!["out".to_string()],
-                },
-                code_combo::OutputChunk {
-                    timestamp: 0,
-                    stream: code_combo::StreamKind::Stderr,
-                    lines: vec!["err".to_string()],
-                },
-            ],
             timed_out: false,
         }
     }
@@ -702,7 +701,6 @@ mod tests {
             exit_code: 0,
             stdout: String::new(),
             stderr: String::new(),
-            chunks: Vec::new(),
             timed_out: false,
         }
     }
@@ -800,9 +798,9 @@ mod tests {
         let output = bash.state.output.clone().unwrap();
         assert_eq!(output.stdout, "out1\nout2\n");
         assert_eq!(output.stderr, "");
-        assert_eq!(output.chunks.len(), 1);
+        assert_eq!(bash.state.chunks.len(), 1);
         assert_eq!(
-            output.chunks[0].lines,
+            bash.state.chunks[0].lines,
             vec!["out1".to_string(), "out2".to_string()]
         );
     }
