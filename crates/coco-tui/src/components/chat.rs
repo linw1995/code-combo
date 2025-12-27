@@ -23,7 +23,8 @@ use tracing::{debug, warn};
 
 use super::{
     Action, AnswerEvent, AskEvent, BotMessage, Combo, ComboAction, ComboEvent, Component, Content,
-    Event, Input, Message, Messages, Plain, SessionAction, Tool, ToolAction, shortcuts_desc,
+    Event, Input, Message, Messages, Plain, SessionAction, Tool, ToolAction, TranscriptMessage,
+    shortcuts_desc,
 };
 use crate::{
     components::{Command, CommandPalette, Persistable},
@@ -585,10 +586,9 @@ impl Chat<'static> {
         });
 
         self.transcript.clear();
-        let iter = agent_messages.iter().map(|message| {
-            let text = format_transcript_message(message);
-            Message::system(Plain::new(text).into())
-        });
+        let iter = agent_messages
+            .into_iter()
+            .map(|message| Message::system(TranscriptMessage::new(message).into()));
         self.transcript.extend(iter);
         self.view = ViewMode::Transcript;
         global::signal_dirty();
@@ -1078,99 +1078,6 @@ impl Chat<'static> {
         frame.render_widget(bottom_block, bottom);
 
         Ok(())
-    }
-}
-
-fn format_transcript_message(message: &ChatMessage) -> String {
-    let mut out = String::new();
-    let role = match message.role {
-        code_combo::Role::User => "user",
-        code_combo::Role::Assistant => "assistant",
-    };
-    push_line(&mut out, 0, &format!("role: {role}"));
-    push_line(&mut out, 0, "blocks:");
-    match &message.content {
-        ChatContent::Text(text) => {
-            format_text_block(&mut out, 2, text);
-        }
-        ChatContent::Multiple(blocks) => {
-            for block in blocks {
-                format_block(&mut out, 2, block);
-            }
-        }
-    }
-    if out.ends_with('\n') {
-        out.pop();
-    }
-    out
-}
-
-fn format_text_block(out: &mut String, indent: usize, text: &str) {
-    push_line(out, indent, "- type: text");
-    push_line(out, indent + 2, "text:");
-    push_multiline(out, indent + 4, text);
-}
-
-fn format_block(out: &mut String, indent: usize, block: &ChatBlock) {
-    match block {
-        ChatBlock::Text { text } => {
-            format_text_block(out, indent, text);
-        }
-        ChatBlock::ToolUse(tool_use) => {
-            push_line(out, indent, "- type: tool_use");
-            push_line(out, indent + 2, &format!("id: {}", tool_use.id));
-            push_line(out, indent + 2, &format!("name: {}", tool_use.name));
-            push_line(out, indent + 2, "input:");
-            let input = serde_json::to_string_pretty(&tool_use.input)
-                .unwrap_or_else(|_| "[Invalid JSON]".to_string());
-            push_multiline(out, indent + 4, &input);
-        }
-        ChatBlock::ToolResult {
-            tool_use_id,
-            is_error,
-            content,
-        } => {
-            push_line(out, indent, "- type: tool_result");
-            push_line(out, indent + 2, &format!("tool_use_id: {tool_use_id}"));
-            if let Some(is_error) = is_error {
-                push_line(out, indent + 2, &format!("is_error: {is_error}"));
-            }
-            push_line(out, indent + 2, "content:");
-            format_content(out, indent + 4, content);
-        }
-    }
-}
-
-fn format_content(out: &mut String, indent: usize, content: &ChatContent) {
-    match content {
-        ChatContent::Text(text) => {
-            push_line(out, indent, "text:");
-            push_multiline(out, indent + 2, text);
-        }
-        ChatContent::Multiple(blocks) => {
-            push_line(out, indent, "blocks:");
-            for block in blocks {
-                format_block(out, indent + 2, block);
-            }
-        }
-    }
-}
-
-fn push_line(out: &mut String, indent: usize, line: &str) {
-    for _ in 0..indent {
-        out.push(' ');
-    }
-    out.push_str(line);
-    out.push('\n');
-}
-
-fn push_multiline(out: &mut String, indent: usize, text: &str) {
-    if text.is_empty() {
-        push_line(out, indent, "");
-        return;
-    }
-    for line in text.lines() {
-        push_line(out, indent, line);
     }
 }
 
