@@ -266,6 +266,12 @@ lazy_static! {
     pub static ref CATPPUCCIN_LATTE_PALLETE: ColorPalette =
         serde_json::from_str(include_str!("../theme/catppuccin_latte_palette.json"))
             .expect("failed to load catppuccin latte palette");
+    pub static ref CATPPUCCIN_FRAPPE_PALLETE: ColorPalette =
+        serde_json::from_str(include_str!("../theme/catppuccin_frappe_palette.json"))
+            .expect("failed to load catppuccin frappe palette");
+    pub static ref CATPPUCCIN_MACCHIATO_PALLETE: ColorPalette =
+        serde_json::from_str(include_str!("../theme/catppuccin_macchiato_palette.json"))
+            .expect("failed to load catppuccin macchiato palette");
     pub static ref CATPPUCCIN_MOCHA_THEME: FinalizedTheme = {
         Theme {
             scheme: CATPPUCCIN_SCHEME.clone(),
@@ -282,14 +288,37 @@ lazy_static! {
         .to_ratatui()
         .expect("failed to convert theme")
     };
+    pub static ref CATPPUCCIN_FRAPPE_THEME: FinalizedTheme = {
+        Theme {
+            scheme: CATPPUCCIN_SCHEME.clone(),
+            palettes: CATPPUCCIN_FRAPPE_PALLETE.clone(),
+        }
+        .to_ratatui()
+        .expect("failed to convert theme")
+    };
+    pub static ref CATPPUCCIN_MACCHIATO_THEME: FinalizedTheme = {
+        Theme {
+            scheme: CATPPUCCIN_SCHEME.clone(),
+            palettes: CATPPUCCIN_MACCHIATO_PALLETE.clone(),
+        }
+        .to_ratatui()
+        .expect("failed to convert theme")
+    };
 }
 
-pub const BUILTIN_THEME_NAMES: &[&str] = &["catppuccin_mocha", "catppuccin_latte"];
+pub const BUILTIN_THEME_NAMES: &[&str] = &[
+    "catppuccin_mocha",
+    "catppuccin_latte",
+    "catppuccin_frappe",
+    "catppuccin_macchiato",
+];
 
 pub fn use_builtin_theme(name: &str) -> &'static FinalizedTheme {
     match name {
         "catppuccin_mocha" => &CATPPUCCIN_MOCHA_THEME,
         "catppuccin_latte" => &CATPPUCCIN_LATTE_THEME,
+        "catppuccin_frappe" => &CATPPUCCIN_FRAPPE_THEME,
+        "catppuccin_macchiato" => &CATPPUCCIN_MACCHIATO_THEME,
         _ => unreachable!("unknown theme: {name}"),
     }
 }

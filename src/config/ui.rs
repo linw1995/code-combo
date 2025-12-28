@@ -6,7 +6,7 @@ pub struct UI {
 }
 
 fn default_theme() -> String {
-    "catppuccin_latte".to_string()
+    "catppuccin_mocha".to_string()
 }
 
 impl Default for UI {
