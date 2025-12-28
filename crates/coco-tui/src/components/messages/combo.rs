@@ -15,7 +15,7 @@ use super::fold::FoldState;
 use super::streaming::StreamedLines;
 use crate::{
     actions::Action,
-    components::{Component, Content, ContentComponent, Persistable, Plain},
+    components::{Component, Content, ContentComponent, Persistable, Plain, ShortcutHints},
     error::*,
     events::{ComboEvent, Event},
     global::{self, State},
@@ -239,16 +239,16 @@ impl Content for Combo {
         self.has_collapsible_body()
     }
 
-    fn block_with_shortcuts_desc<'a>(&self, block: Block<'a>) -> Block<'a> {
+    fn shortcut_hints(&self) -> ShortcutHints {
         if !self.has_collapsible_body() {
-            return block;
+            return ShortcutHints::default();
         }
         let toggle_text = if self.state.display_state.is_collapsed() {
             ("Unfold", "z")
         } else {
             ("Fold", "z")
         };
-        block.title_top(crate::components::shortcuts_desc(&[toggle_text]))
+        ShortcutHints::from_visible(&[toggle_text])
     }
 
     fn reminder_line(&self) -> Option<Line<'static>> {

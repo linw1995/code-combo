@@ -367,12 +367,13 @@ impl Content for Messages {
         component.is_actionable()
     }
 
-    fn block_with_shortcuts_desc<'a>(&self, mut block: Block<'a>) -> Block<'a> {
+    fn shortcut_hints(&self) -> ShortcutHints {
         if let Some(idx) = self.focus.get() {
             let component = &self.messages.read()[idx];
-            block = component.block_with_shortcuts_desc(block);
+            component.shortcut_hints()
+        } else {
+            ShortcutHints::default()
         }
-        block
     }
 }
 
@@ -450,9 +451,49 @@ impl Component for Messages {
     }
 }
 
-pub(super) fn shortcuts_desc<'a>(pairs: &[(&str, &str)]) -> Line<'a> {
+pub type ShortcutPair = (&'static str, &'static str);
+pub type ShortcutGroup = Vec<ShortcutPair>;
+
+#[derive(Clone, Debug, Default)]
+pub struct ShortcutHints {
+    pub visible: Vec<ShortcutGroup>,
+    pub hidden: Vec<ShortcutGroup>,
+}
+
+impl ShortcutHints {
+    pub fn from_visible(pairs: &[ShortcutPair]) -> Self {
+        let mut hints = Self::default();
+        hints.push_visible(pairs);
+        hints
+    }
+
+    pub fn push_visible(&mut self, pairs: &[ShortcutPair]) {
+        if pairs.is_empty() {
+            return;
+        }
+        self.visible.push(pairs.to_vec());
+    }
+
+    pub fn push_hidden(&mut self, pairs: &[ShortcutPair]) {
+        if pairs.is_empty() {
+            return;
+        }
+        self.hidden.push(pairs.to_vec());
+    }
+
+    pub fn extend(&mut self, other: ShortcutHints) {
+        self.visible.extend(other.visible);
+        self.hidden.extend(other.hidden);
+    }
+
+    pub fn has_hidden(&self) -> bool {
+        !self.hidden.is_empty()
+    }
+}
+
+pub(super) fn shortcuts_desc<'a>(pairs: &[ShortcutPair]) -> Line<'a> {
     let theme = global::theme();
-    let descs: Vec<&str> = pairs.iter().map(|(desc, _)| desc.to_owned()).collect();
+    let descs: Vec<&str> = pairs.iter().map(|(desc, _)| *desc).collect();
     let mut spans = vec![Span::styled(
         format!(" {} ", descs.join("/")),
         theme.ui.shortcut_desc,

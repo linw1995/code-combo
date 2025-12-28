@@ -12,7 +12,7 @@ use ratatui::{
     prelude::Rect,
     style::{Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Wrap},
+    widgets::Wrap,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -24,7 +24,7 @@ use super::super::streaming::StreamedLines;
 use super::{Component, Content, ContentComponent};
 use crate::{
     actions::{Action, ToolAction},
-    components::{CodeHighlight, Persistable, shortcuts_desc},
+    components::{CodeHighlight, Persistable, ShortcutHints},
     error::*,
     events::{AnswerEvent, AskEvent, Event},
     global::{self, State},
@@ -391,15 +391,16 @@ impl<'a> Content for Bash<'a> {
         true
     }
 
-    fn block_with_shortcuts_desc<'b>(&self, mut block: Block<'b>) -> Block<'b> {
+    fn shortcut_hints(&self) -> ShortcutHints {
         if self.requiring_confirmation() {
-            return block
-                .title_top(shortcuts_desc(&[("Run", "CR"), ("Allow in Session", "A")]))
-                .title_top(shortcuts_desc(&[("Cancel", "Esc")]));
+            let mut hints = ShortcutHints::default();
+            hints.push_visible(&[("Run", "CR"), ("Allow in Session", "A")]);
+            hints.push_visible(&[("Cancel", "Esc")]);
+            return hints;
         }
 
         if !self.has_output_content() {
-            return block;
+            return ShortcutHints::default();
         }
 
         let toggle_text = match self.state.display_state {
@@ -407,16 +408,17 @@ impl<'a> Content for Bash<'a> {
             FoldState::Preview | FoldState::Collapsed => ("Expand", "z"),
         };
 
+        let mut hints = ShortcutHints::from_visible(&[toggle_text]);
         if matches!(self.state.display_state, FoldState::Expanded) {
             let view = match self.exec_view() {
                 BashOutputView::Stdout => "Stdout",
                 BashOutputView::Stderr => "Stderr",
                 BashOutputView::Mixed => "Mixed",
             };
-            block = block.title_top(shortcuts_desc(&[(view, "1/2/3")]));
+            hints.push_hidden(&[(view, "1/2/3")]);
         }
 
-        block.title_top(shortcuts_desc(&[toggle_text]))
+        hints
     }
 
     fn reminder_line(&self) -> Option<Line<'static>> {

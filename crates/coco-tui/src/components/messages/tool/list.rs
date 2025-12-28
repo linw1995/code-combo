@@ -10,14 +10,14 @@ use ratatui::{
     prelude::Rect,
     style::Stylize,
     text::{Line, Span, Text},
-    widgets::{Block, Wrap},
+    widgets::Wrap,
 };
 use serde::{Deserialize, Serialize};
 
 use super::super::fold::FoldState;
 use crate::{
     actions::Action,
-    components::{Component, Content, ContentComponent, Persistable},
+    components::{Component, Content, ContentComponent, Persistable, ShortcutHints},
     error::Result,
     events::{AnswerEvent, Event},
     global::State,
@@ -147,16 +147,16 @@ impl Content for List<'_> {
             )
     }
 
-    fn block_with_shortcuts_desc<'b>(&self, block: Block<'b>) -> Block<'b> {
+    fn shortcut_hints(&self) -> ShortcutHints {
         if !self.is_actionable() {
-            return block;
+            return ShortcutHints::default();
         }
         let toggle_text = match self.state.display_state {
             FoldState::Collapsed => ("Unfold", "z"),
             FoldState::Expanded => ("Fold", "z"),
-            FoldState::Preview => return block,
+            FoldState::Preview => return ShortcutHints::default(),
         };
-        block.title_top(crate::components::shortcuts_desc(&[toggle_text]))
+        ShortcutHints::from_visible(&[toggle_text])
     }
 
     fn reminder_line(&self) -> Option<Line<'static>> {
