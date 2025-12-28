@@ -237,10 +237,21 @@ lazy_static! {
     pub static ref CATPPUCCIN_MOCHA_PALLETE: ColorPalette =
         serde_json::from_str(include_str!("../theme/catppuccin_mocha_palette.json"))
             .expect("failed to load catppuccin mocha palette");
+    pub static ref CATPPUCCIN_LATTE_PALLETE: ColorPalette =
+        serde_json::from_str(include_str!("../theme/catppuccin_latte_palette.json"))
+            .expect("failed to load catppuccin latte palette");
     pub static ref CATPPUCCIN_MOCHA_THEME: FinalizedTheme = {
         Theme {
             scheme: CATPPUCCIN_SCHEME.clone(),
             palettes: CATPPUCCIN_MOCHA_PALLETE.clone(),
+        }
+        .to_ratatui()
+        .expect("failed to convert theme")
+    };
+    pub static ref CATPPUCCIN_LATTE_THEME: FinalizedTheme = {
+        Theme {
+            scheme: CATPPUCCIN_SCHEME.clone(),
+            palettes: CATPPUCCIN_LATTE_PALLETE.clone(),
         }
         .to_ratatui()
         .expect("failed to convert theme")
@@ -250,6 +261,7 @@ lazy_static! {
 pub fn use_builtin_theme(name: &str) -> &'static FinalizedTheme {
     match name {
         "catppuccin_mocha" => &CATPPUCCIN_MOCHA_THEME,
+        "catppuccin_latte" => &CATPPUCCIN_LATTE_THEME,
         _ => unreachable!("unknown theme: {name}"),
     }
 }
