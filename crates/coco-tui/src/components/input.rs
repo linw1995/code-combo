@@ -2,7 +2,7 @@ use coco_macro::ComponentExt;
 use crossterm::event::KeyEvent;
 use ratatui::{Frame, prelude::*};
 
-use super::{Action, Component};
+use super::{Action, Component, ShortcutHints};
 use crate::{
     components::Persistable,
     error::*,
@@ -40,6 +40,13 @@ impl Input<'_> {
         let ans = self.textarea.yank_text();
         self.textarea.set_yank_text("");
         ans
+    }
+
+    pub fn shortcut_hints(&self) -> ShortcutHints {
+        let mut hints = ShortcutHints::default();
+        hints.push_visible(&[("Blur", "Esc")]);
+        hints.push_visible(&[("Submit", "CR")]);
+        hints
     }
 }
 

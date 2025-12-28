@@ -11,7 +11,7 @@ use ratatui::{
     prelude::*,
     symbols::border,
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders},
 };
 
 use serde::{Deserialize, Serialize};
@@ -23,11 +23,11 @@ use tracing::{debug, warn};
 
 use super::{
     Action, AnswerEvent, AskEvent, BotMessage, Combo, ComboAction, ComboEvent,
-    CommandPaletteAction, Component, Content, Event, Input, Message, Messages, Plain,
-    SessionAction, ShortcutHints, Tool, ToolAction, TranscriptMessage, shortcuts_desc,
+    CommandPaletteAction, Component, Event, Input, Message, Messages, Plain, SessionAction,
+    ShortcutHints, ShortcutHintsPanel, Tool, ToolAction, TranscriptMessage,
 };
 use crate::{
-    components::{CommandPalette, Persistable},
+    components::{CommandPalette, Content, Persistable},
     error::*,
     global::{self, State},
     session::{self, Session},
@@ -47,6 +47,7 @@ pub struct Chat<'a> {
     transcript: Messages,
     view: ViewMode,
     indicator: ThrobberState,
+    shortcut_hints: ShortcutHintsPanel,
     shortcuts_popup_open: bool,
 
     token_schedule_session_save: Option<CancellationToken>,
@@ -202,6 +203,7 @@ impl Chat<'static> {
             transcript: Messages::default(),
             view: ViewMode::Chat,
             indicator: ThrobberState::default(),
+            shortcut_hints: ShortcutHintsPanel::default(),
             shortcuts_popup_open: false,
             token_schedule_session_save: None,
             cancellation_guard: CancellationGuard::default(),
@@ -472,32 +474,16 @@ impl Chat<'static> {
         global::trigger_schedule_session_save();
     }
 
-    fn apply_shortcut_hints_top<'a>(
-        &self,
-        mut block: Block<'a>,
-        hints: &ShortcutHints,
-    ) -> Block<'a> {
-        for group in &hints.visible {
-            block = block.title_top(shortcuts_desc(group));
-        }
-        if hints.has_hidden() {
-            block = block.title_top(shortcuts_desc(&[("Help", "?")]));
-        }
-        block
+    fn input_shortcut_hints(&self) -> ShortcutHints {
+        self.input.shortcut_hints()
     }
 
-    fn apply_shortcut_hints_bottom<'a>(
-        &self,
-        mut block: Block<'a>,
-        hints: &ShortcutHints,
-    ) -> Block<'a> {
-        for group in &hints.visible {
-            block = block.title_bottom(shortcuts_desc(group));
-        }
-        if hints.has_hidden() {
-            block = block.title_bottom(shortcuts_desc(&[("Help", "?")]));
-        }
-        block
+    fn input_blur_shortcut_hints(&self) -> ShortcutHints {
+        let mut hints = ShortcutHints::default();
+        hints.push_visible(&[("Focus", "CR")]);
+        hints.push_visible(&[("Commands", "C-p")]);
+        hints.push_visible(&[("Up", "k"), ("Down", "j")]);
+        hints
     }
 
     fn chat_messages_shortcut_hints(&self) -> ShortcutHints {
@@ -512,7 +498,7 @@ impl Chat<'static> {
     }
 
     fn transcript_shortcut_hints(&self) -> ShortcutHints {
-        let mut hints = ShortcutHints::default();
+        let mut hints = self.transcript.shortcut_hints();
         hints.push_visible(&[("Back", "Esc")]);
         hints.push_visible(&[("Up", "k"), ("Down", "j")]);
         hints.push_hidden(&[("Scroll Up", "C-y"), ("Down", "C-e")]);
@@ -524,33 +510,26 @@ impl Chat<'static> {
         match self.view {
             ViewMode::Transcript => self.transcript_shortcut_hints(),
             ViewMode::Chat => match self.state.focus {
+                Focus::Input => self.input_shortcut_hints(),
+                Focus::InputBlur => self.input_blur_shortcut_hints(),
                 Focus::Messages => self.chat_messages_shortcut_hints(),
-                _ => ShortcutHints::default(),
+                Focus::CommandPalette => ShortcutHints::default(),
             },
         }
     }
 
     fn input_block_with_dynamic_titles<'a>(&'a self, mut block: Block<'a>) -> Block<'a> {
         block = block.title_top(Line::from(""));
-        block = match self.state.focus {
-            Focus::Input => {
-                let mut hints = ShortcutHints::default();
-                hints.push_visible(&[("Blur", "Esc")]);
-                hints.push_visible(&[("Submit", "CR")]);
-                self.apply_shortcut_hints_top(block, &hints)
-            }
-            Focus::InputBlur => {
-                let mut hints = ShortcutHints::default();
-                hints.push_visible(&[("Focus", "CR")]);
-                hints.push_visible(&[("Commands", "C-p")]);
-                hints.push_visible(&[("Up", "k"), ("Down", "j")]);
-                self.apply_shortcut_hints_top(block, &hints)
-            }
-            Focus::Messages => {
-                let hints = self.chat_messages_shortcut_hints();
-                self.apply_shortcut_hints_top(block, &hints)
-            }
+        let focus = self.state.focus.clone();
+        let hints = match focus {
+            Focus::Input => self.input_shortcut_hints(),
+            Focus::InputBlur => self.input_blur_shortcut_hints(),
+            Focus::Messages => self.chat_messages_shortcut_hints(),
+            Focus::CommandPalette => ShortcutHints::default(),
+        };
+        block = match focus {
             Focus::CommandPalette => block,
+            _ => self.shortcut_hints.decorate_block_top(block, &hints),
         };
         block = block
             .title_bottom(Line::from(""))
@@ -756,8 +735,12 @@ impl Persistable for Chat<'static> {
 
 impl Component for Chat<'static> {
     fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
-        let children: Vec<&mut dyn Component> =
-            vec![&mut self.input, &mut self.messages, &mut self.transcript];
+        let children: Vec<&mut dyn Component> = vec![
+            &mut self.input,
+            &mut self.messages,
+            &mut self.transcript,
+            &mut self.shortcut_hints,
+        ];
         Box::new(children.into_iter())
     }
 
@@ -1129,9 +1112,9 @@ impl Component for Chat<'static> {
             self.command_palette.draw(frame, area)?;
         }
 
-        if self.shortcuts_popup_open {
-            self.draw_shortcuts_popup(frame, area)?;
-        }
+        let hints = self.current_shortcut_hints();
+        self.shortcut_hints
+            .draw_popup(frame, area, &hints, self.shortcuts_popup_open)?;
 
         Ok(())
     }
@@ -1166,50 +1149,13 @@ impl Chat<'static> {
             .title_bottom(Line::from(""))
             .title_bottom(Line::from(" Transcript ").bold());
         let hints = self.transcript_shortcut_hints();
-        bottom_block = self.apply_shortcut_hints_bottom(bottom_block, &hints);
+        bottom_block = self
+            .shortcut_hints
+            .decorate_block_bottom(bottom_block, &hints);
         if let Some(line) = self.ctrl_c_reminder_line() {
             bottom_block = bottom_block.title_bottom(line);
         }
         frame.render_widget(bottom_block, bottom);
-
-        Ok(())
-    }
-
-    fn draw_shortcuts_popup(&self, frame: &mut Frame, area: Rect) -> Result<()> {
-        use Constraint::*;
-
-        let hints = self.current_shortcut_hints();
-        if hints.hidden.is_empty() {
-            return Ok(());
-        }
-
-        let lines: Vec<Line> = hints
-            .hidden
-            .iter()
-            .map(|group| shortcuts_desc(group))
-            .collect();
-
-        let max_width = area.width.saturating_sub(4).max(20);
-        let width = max_width.min(80);
-        let max_height = area.height.saturating_sub(2).max(1);
-        let height = (lines.len() as u16).saturating_add(4).min(max_height);
-
-        let [_, area_h_center, _] = Layout::horizontal([Fill(1), Max(width), Fill(1)]).areas(area);
-        let [_, area_popup, _] =
-            Layout::vertical([Fill(1), Max(height), Fill(1)]).areas(area_h_center);
-
-        Clear.render(area_popup, frame.buffer_mut());
-        let theme = global::theme();
-        let block = Block::new()
-            .borders(Borders::ALL)
-            .border_set(border::THICK)
-            .border_style(theme.ui.block_border_active)
-            .style(theme.ui.command_palette_bg)
-            .title(Line::from(" Shortcuts ").bold());
-        frame.render_widget(&block, area_popup);
-        let area_popup = block.inner(area_popup);
-        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: true });
-        frame.render_widget(paragraph, area_popup);
 
         Ok(())
     }
