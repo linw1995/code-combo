@@ -47,12 +47,9 @@ pub struct Bash<'a> {
 
     input: CodeHighlight<'a>,
 
+    preview_lines: StreamedLines,
     output_text: Paragraph<'a>,
     output_markers: Option<Paragraph<'a>>,
-
-    streamed_lines: StreamedLines,
-    output_preview_text: Paragraph<'a>,
-    output_preview_markers: Option<Paragraph<'a>>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,17 +135,6 @@ fn render_tabs_panel(view: BashOutputView) -> Paragraph<'static> {
     Paragraph::new(lines)
 }
 
-fn limit_tail_lines<T>(mut lines: Vec<T>, max_lines: Option<usize>) -> Vec<T> {
-    let Some(max_lines) = max_lines else {
-        return lines;
-    };
-    if lines.len() > max_lines {
-        let start = lines.len() - max_lines;
-        lines = lines.split_off(start);
-    }
-    lines
-}
-
 const OUTPUT_MARKER: &str = "▐";
 
 fn generate_input<'b>(tool_use: &ToolUse) -> CodeHighlight<'b> {
@@ -177,7 +163,7 @@ impl<'a> Bash<'a> {
                 requiring_confirmation: false,
             },
         };
-        let streamed_lines = StreamedLines::new(None);
+        let preview_lines = StreamedLines::new(Some(OUTPUT_PREVIEW_LINES));
         let mut component = Self {
             state: State::new(Inner {
                 tool_use: tool_use.to_owned(),
@@ -185,17 +171,15 @@ impl<'a> Bash<'a> {
                 display_state,
             }),
             input,
-            streamed_lines,
+            preview_lines,
             output_text: Paragraph::new(Vec::new()),
             output_markers: None,
-            output_preview_text: Paragraph::new(Vec::new()),
-            output_preview_markers: None,
         };
         component.rebuild_output();
         Ok(component)
     }
 
-    fn render_output(&self, max_lines: Option<usize>) -> (Paragraph<'a>, Option<Paragraph<'a>>) {
+    fn render_output(&self) -> (Paragraph<'a>, Option<Paragraph<'a>>) {
         let theme = global::theme();
         let empty = || {
             (
@@ -207,12 +191,12 @@ impl<'a> Bash<'a> {
         match &self.state.exec_state {
             ExecState::Initial { .. } => empty(),
             ExecState::Executing { chunks } => {
-                if self.streamed_lines.is_empty() && chunks.is_empty() {
+                if self.preview_lines.is_empty() && chunks.is_empty() {
                     return empty();
                 }
                 let mut lines: Vec<Line<'a>> = Vec::new();
                 let mut markers: Vec<Line<'a>> = Vec::new();
-                for line in self.streamed_lines.iter() {
+                for line in self.preview_lines.iter() {
                     let marker_style = match line.stream {
                         code_combo::StreamKind::Stdout => theme.ui.bash_stdout_marker,
                         code_combo::StreamKind::Stderr => theme.ui.bash_stderr_marker,
@@ -220,8 +204,6 @@ impl<'a> Bash<'a> {
                     lines.push(Line::from(line.text.clone()));
                     markers.push(Line::from(Span::styled(OUTPUT_MARKER, marker_style)));
                 }
-                let lines = limit_tail_lines(lines, max_lines);
-                let markers = limit_tail_lines(markers, max_lines);
                 (Paragraph::new(lines), Some(Paragraph::new(markers)))
             }
             ExecState::Finished {
@@ -234,7 +216,6 @@ impl<'a> Bash<'a> {
                     for line in output.stdout.lines() {
                         lines.push(Line::from(line.to_string()));
                     }
-                    let lines = limit_tail_lines(lines, max_lines);
                     (Paragraph::new_wrap(lines, Wrap { trim: false }), None)
                 }
                 BashOutputView::Stderr => {
@@ -242,7 +223,6 @@ impl<'a> Bash<'a> {
                     for line in output.stderr.lines() {
                         lines.push(Line::from(line.to_string()));
                     }
-                    let lines = limit_tail_lines(lines, max_lines);
                     (Paragraph::new_wrap(lines, Wrap { trim: false }), None)
                 }
                 BashOutputView::Mixed => {
@@ -258,8 +238,6 @@ impl<'a> Bash<'a> {
                             markers.push(Line::from(Span::styled(OUTPUT_MARKER, marker_style)));
                         }
                     }
-                    let lines = limit_tail_lines(lines, max_lines);
-                    let markers = limit_tail_lines(markers, max_lines);
                     (Paragraph::new(lines), Some(Paragraph::new(markers)))
                 }
             },
@@ -267,13 +245,9 @@ impl<'a> Bash<'a> {
     }
 
     fn rebuild_output(&mut self) {
-        let (output_text, output_markers) = self.render_output(None);
-        let (output_preview_text, output_preview_markers) =
-            self.render_output(Some(OUTPUT_PREVIEW_LINES));
+        let (output_text, output_markers) = self.render_output();
         self.output_text = output_text;
         self.output_markers = output_markers;
-        self.output_preview_text = output_preview_text;
-        self.output_preview_markers = output_preview_markers;
     }
 
     fn exec_output(&self) -> Option<&BashOutput> {
@@ -326,16 +300,18 @@ impl<'a> Bash<'a> {
     }
 
     fn push_chunk(&mut self, chunk: OutputChunk) {
+        let chunk_for_state = chunk.clone();
         let mut state = self.state.write();
         match &mut state.exec_state {
-            ExecState::Executing { chunks } => chunks.push(chunk),
-            ExecState::Finished { chunks, .. } => chunks.push(chunk),
+            ExecState::Executing { chunks } => chunks.push(chunk_for_state),
+            ExecState::Finished { chunks, .. } => chunks.push(chunk_for_state),
             ExecState::Initial { .. } => {
                 state.exec_state = ExecState::Executing {
-                    chunks: vec![chunk],
+                    chunks: vec![chunk_for_state],
                 };
             }
         }
+        self.preview_lines.push_chunk(&chunk);
     }
 
     pub fn update_output(&mut self, output: Option<Final>) -> Result<()> {
@@ -357,7 +333,8 @@ impl<'a> Bash<'a> {
                     view,
                 };
             }
-            self.streamed_lines = StreamedLines::from_chunks(self.exec_chunks(), None);
+            self.preview_lines =
+                StreamedLines::from_chunks(self.exec_chunks(), Some(OUTPUT_PREVIEW_LINES));
             self.rebuild_output();
         }
         Ok(())
@@ -367,7 +344,7 @@ impl<'a> Bash<'a> {
         let output = self.exec_output();
         let has_text =
             output.is_some_and(|output| !(output.stdout.is_empty() && output.stderr.is_empty()));
-        has_text || !self.exec_chunks().is_empty() || !self.streamed_lines.is_empty()
+        has_text || !self.exec_chunks().is_empty() || !self.preview_lines.is_empty()
     }
 
     pub fn empty_output_summary(&self) -> Option<String> {
@@ -469,19 +446,17 @@ impl Persistable for Bash<'static> {
 
     fn load(session: Session) -> Result<Self> {
         let state: Inner = session::load(session)?;
-        let streamed_lines = match &state.exec_state {
+        let streamed_preview_lines = match &state.exec_state {
             ExecState::Executing { chunks } | ExecState::Finished { chunks, .. } => {
-                StreamedLines::from_chunks(chunks, None)
+                StreamedLines::from_chunks(chunks, Some(OUTPUT_PREVIEW_LINES))
             }
-            ExecState::Initial { .. } => StreamedLines::new(None),
+            ExecState::Initial { .. } => StreamedLines::new(Some(OUTPUT_PREVIEW_LINES)),
         };
         let mut component = Self {
             input: generate_input(&state.tool_use),
-            streamed_lines,
+            preview_lines: streamed_preview_lines,
             output_text: Paragraph::new(Vec::new()),
             output_markers: None,
-            output_preview_text: Paragraph::new(Vec::new()),
-            output_preview_markers: None,
             state: global::State::new(state),
         };
         component.rebuild_output();
@@ -501,7 +476,6 @@ impl Component for Bash<'static> {
                     return;
                 }
                 self.push_chunk(chunk.clone());
-                self.streamed_lines.push_chunk(chunk);
                 self.rebuild_output();
             }
             Event::Answer(AnswerEvent::ToolResult { output, .. }) => {
@@ -662,20 +636,14 @@ impl Component for Bash<'static> {
             (view, Some(tabs))
         };
 
-        let (output_text, output_markers) = match self.state.display_state {
-            FoldState::Preview => (&self.output_preview_text, &self.output_preview_markers),
-            FoldState::Expanded => (&self.output_text, &self.output_markers),
-            FoldState::Collapsed => (&self.output_text, &self.output_markers),
-        };
-
         if width_marker == 0 {
-            frame.render_widget(output_text, area_output_view);
+            frame.render_widget(&self.output_text, area_output_view);
         } else {
             let [area_text, area_markers] =
                 Layout::horizontal([Constraint::Min(1), Constraint::Length(width_marker)])
                     .areas(area_output_view);
-            frame.render_widget(output_text, area_text);
-            if let Some(markers) = output_markers {
+            frame.render_widget(&self.output_text, area_text);
+            if let Some(markers) = &self.output_markers {
                 frame.render_widget(markers, area_markers);
             }
         }
