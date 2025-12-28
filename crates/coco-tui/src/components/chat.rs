@@ -48,7 +48,7 @@ pub struct Chat<'a> {
     view: ViewMode,
     indicator: ThrobberState,
     shortcut_hints: ShortcutHintsPanel,
-    shortcuts_popup_open: bool,
+    prev_focus: Option<Focus>,
 
     token_schedule_session_save: Option<CancellationToken>,
     cancellation_guard: CancellationGuard,
@@ -116,6 +116,7 @@ enum Focus {
     InputBlur,
     Messages,
     CommandPalette,
+    ShortcutHints,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -204,7 +205,7 @@ impl Chat<'static> {
             view: ViewMode::Chat,
             indicator: ThrobberState::default(),
             shortcut_hints: ShortcutHintsPanel::default(),
-            shortcuts_popup_open: false,
+            prev_focus: None,
             token_schedule_session_save: None,
             cancellation_guard: CancellationGuard::default(),
         }
@@ -255,6 +256,9 @@ impl Chat<'static> {
         self.token_schedule_session_save = Some(token.clone());
 
         let mut state = self.state.get();
+        if state.focus == Focus::ShortcutHints {
+            state.focus = self.prev_focus.clone().unwrap_or_default();
+        }
         let messages = self.messages.save();
         let agent = self.agent.clone();
 
@@ -354,18 +358,21 @@ impl Chat<'static> {
     }
 
     fn update_focus(&mut self, new_focus: Focus) {
-        let focus = &self.state.focus;
-        if focus == &new_focus {
+        let focus = self.state.focus.clone();
+        if focus == new_focus {
             return;
         }
         debug!(?focus, ?new_focus, "update focus");
-        if focus == &Focus::Input {
+        if focus == Focus::Input {
             self.input.update(&Action::Blur);
         }
         if new_focus == Focus::Input {
             self.input.update(&Action::Focus);
         }
-        self.state.write().focus = new_focus
+        if focus == Focus::ShortcutHints && new_focus != Focus::ShortcutHints {
+            self.prev_focus = None;
+        }
+        self.state.write().focus = new_focus;
     }
 
     /// Combines pending ToolResults (e.g., User Cancelled) with user instructions.
@@ -474,6 +481,34 @@ impl Chat<'static> {
         global::trigger_schedule_session_save();
     }
 
+    fn focus_for_shortcut_hints(&self) -> Focus {
+        if self.state.focus == Focus::ShortcutHints {
+            self.prev_focus.clone().unwrap_or(Focus::InputBlur)
+        } else {
+            self.state.focus.clone()
+        }
+    }
+
+    fn open_shortcut_hints(&mut self) {
+        if self.state.focus == Focus::ShortcutHints {
+            return;
+        }
+        let prev_focus = self.state.focus.clone();
+        self.prev_focus = Some(prev_focus);
+        self.update_focus(Focus::ShortcutHints);
+        global::signal_dirty();
+    }
+
+    fn close_shortcut_hints(&mut self) {
+        if self.state.focus != Focus::ShortcutHints {
+            self.prev_focus = None;
+            return;
+        }
+        let prev_focus = self.prev_focus.take().unwrap_or(Focus::InputBlur);
+        self.update_focus(prev_focus);
+        global::signal_dirty();
+    }
+
     fn input_shortcut_hints(&self) -> ShortcutHints {
         self.input.shortcut_hints()
     }
@@ -507,28 +542,29 @@ impl Chat<'static> {
     }
 
     fn current_shortcut_hints(&self) -> ShortcutHints {
+        let focus = self.focus_for_shortcut_hints();
         match self.view {
             ViewMode::Transcript => self.transcript_shortcut_hints(),
-            ViewMode::Chat => match self.state.focus {
+            ViewMode::Chat => match focus {
                 Focus::Input => self.input_shortcut_hints(),
                 Focus::InputBlur => self.input_blur_shortcut_hints(),
                 Focus::Messages => self.chat_messages_shortcut_hints(),
-                Focus::CommandPalette => ShortcutHints::default(),
+                Focus::CommandPalette | Focus::ShortcutHints => ShortcutHints::default(),
             },
         }
     }
 
     fn input_block_with_dynamic_titles<'a>(&'a self, mut block: Block<'a>) -> Block<'a> {
         block = block.title_top(Line::from(""));
-        let focus = self.state.focus.clone();
+        let focus = self.focus_for_shortcut_hints();
         let hints = match focus {
             Focus::Input => self.input_shortcut_hints(),
             Focus::InputBlur => self.input_blur_shortcut_hints(),
             Focus::Messages => self.chat_messages_shortcut_hints(),
-            Focus::CommandPalette => ShortcutHints::default(),
+            Focus::CommandPalette | Focus::ShortcutHints => ShortcutHints::default(),
         };
         block = match focus {
-            Focus::CommandPalette => block,
+            Focus::CommandPalette | Focus::ShortcutHints => block,
             _ => self.shortcut_hints.decorate_block_top(block, &hints),
         };
         block = block
@@ -719,6 +755,10 @@ impl Persistable for Chat<'static> {
         let mut inst = Self::new(global::config_sync());
         let auto_accept_edits = state.auto_accept_edits;
 
+        if state.focus == Focus::ShortcutHints {
+            state.focus = Focus::InputBlur;
+        }
+
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current()
                 .block_on(inst.agent.restore_messages(&state.messages));
@@ -848,22 +888,8 @@ impl Component for Chat<'static> {
         use KeyCode::*;
         use KeyModifiers as KM;
 
-        if self.shortcuts_popup_open {
-            self.shortcuts_popup_open = false;
-            global::signal_dirty();
-            return;
-        }
-
-        if key.code == Char('?')
-            && !key.modifiers.contains(KM::CONTROL)
-            && !key.modifiers.contains(KM::ALT)
-            && !matches!(self.state.focus, Focus::CommandPalette)
-        {
-            let hints = self.current_shortcut_hints();
-            if hints.has_hidden() {
-                self.shortcuts_popup_open = true;
-                global::signal_dirty();
-            }
+        if self.state.focus == Focus::ShortcutHints {
+            self.close_shortcut_hints();
             return;
         }
 
@@ -911,6 +937,9 @@ impl Component for Chat<'static> {
             }
             return;
         }
+
+        // TODO: Too expensive - consider caching or lazy evaluation
+        let current_hints = self.current_shortcut_hints();
         match (focus, key.modifiers, key.code) {
             // Focus switching
             (Input, KM::NONE, Esc) => self.update_focus(InputBlur),
@@ -922,6 +951,12 @@ impl Component for Chat<'static> {
             (Messages, KM::NONE, Esc) if !self.messages.is_actionable() => {
                 self.messages.blur();
                 self.update_focus(Focus::InputBlur);
+            }
+            (InputBlur | Messages, KM::NONE, Char('?')) if current_hints.has_hidden() => {
+                self.open_shortcut_hints();
+            }
+            (ShortcutHints, _, _) => {
+                self.close_shortcut_hints();
             }
 
             // Inputing
@@ -1112,9 +1147,11 @@ impl Component for Chat<'static> {
             self.command_palette.draw(frame, area)?;
         }
 
-        let hints = self.current_shortcut_hints();
-        self.shortcut_hints
-            .draw_popup(frame, area, &hints, self.shortcuts_popup_open)?;
+        if self.state.focus == Focus::ShortcutHints {
+            let hints = self.current_shortcut_hints();
+            self.shortcut_hints.set_hints(hints);
+            self.shortcut_hints.draw(frame, area)?;
+        }
 
         Ok(())
     }

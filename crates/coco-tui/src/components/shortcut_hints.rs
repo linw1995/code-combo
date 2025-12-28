@@ -3,7 +3,6 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     prelude::*,
-    symbols::border,
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use serde::{Deserialize, Serialize};
@@ -20,12 +19,17 @@ use crate::{
 #[component(type_id = "shortcut_hints")]
 pub struct ShortcutHintsPanel {
     state: State<Inner>,
+    hints: ShortcutHints,
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 struct Inner {}
 
 impl ShortcutHintsPanel {
+    pub fn set_hints(&mut self, hints: ShortcutHints) {
+        self.hints = hints;
+    }
+
     pub fn decorate_block_top<'a>(&self, block: Block<'a>, hints: &ShortcutHints) -> Block<'a> {
         self.apply_shortcut_hints_top(block, hints)
     }
@@ -34,33 +38,33 @@ impl ShortcutHintsPanel {
         self.apply_shortcut_hints_bottom(block, hints)
     }
 
-    pub fn draw_popup(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        hints: &ShortcutHints,
-        open: bool,
-    ) -> Result<()> {
+    fn draw_popup(&self, frame: &mut Frame, area: Rect) -> Result<()> {
         use Constraint::*;
 
-        if !open {
+        if self.hints.hidden.is_empty() {
             return Ok(());
         }
 
-        if hints.hidden.is_empty() {
-            return Ok(());
-        }
-
-        let lines: Vec<Line> = hints
+        let margin_background = Margin {
+            horizontal: 3,
+            vertical: 1,
+        };
+        let margin_content = Margin {
+            horizontal: 3,
+            vertical: 1,
+        };
+        let lines: Vec<Line> = self
+            .hints
             .hidden
             .iter()
             .map(|group| shortcuts_desc(group))
             .collect();
 
-        let max_width = area.width.saturating_sub(4).max(20);
-        let width = max_width.min(80);
-        let max_height = area.height.saturating_sub(2).max(1);
-        let height = (lines.len() as u16).saturating_add(4).min(max_height);
+        let width = 120 + (margin_background.horizontal + margin_content.horizontal) * 2;
+        let height = (lines.len() as u16)
+            .saturating_add(4 + margin_background.vertical * 2 + margin_content.vertical * 2)
+            .min(area.height.saturating_sub(2))
+            .max(1);
 
         let [_, area_h_center, _] = Layout::horizontal([Fill(1), Max(width), Fill(1)]).areas(area);
         let [_, area_popup, _] =
@@ -68,16 +72,17 @@ impl ShortcutHintsPanel {
 
         Clear.render(area_popup, frame.buffer_mut());
         let theme = global::theme();
-        let block = Block::new()
-            .borders(Borders::ALL)
-            .border_set(border::THICK)
-            .border_style(theme.ui.block_border_active)
-            .style(theme.ui.command_palette_bg)
-            .title(Line::from(" Shortcuts ").bold());
-        frame.render_widget(&block, area_popup);
-        let area_popup = block.inner(area_popup);
+        let area_background = area_popup.inner(margin_background);
+        let block = Block::new().style(theme.ui.command_palette_bg);
+        frame.render_widget(&block, area_background);
+
+        let area_content = area_background.inner(margin_content);
+        let block = Block::new().borders(Borders::BOTTOM);
+        let block = block.title_bottom(Line::from(" Shortcuts ").bold());
+        frame.render_widget(&block, area_content);
+        let area_content = block.inner(area_content);
         let paragraph = Paragraph::new(lines).wrap(Wrap { trim: true });
-        frame.render_widget(paragraph, area_popup);
+        frame.render_widget(paragraph, area_content);
 
         Ok(())
     }
@@ -120,12 +125,13 @@ impl Persistable for ShortcutHintsPanel {
         let state: Inner = session::load(session)?;
         Ok(Self {
             state: State::new(state),
+            hints: ShortcutHints::default(),
         })
     }
 }
 
 impl Component for ShortcutHintsPanel {
-    fn draw(&mut self, _frame: &mut Frame, _area: Rect) -> Result<()> {
-        Ok(())
+    fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        self.draw_popup(frame, area)
     }
 }
