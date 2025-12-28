@@ -71,6 +71,8 @@ macro_rules! build_theme {
 }
 
 build_theme_type!(FinalizedUiTheme {
+    text,
+    chat_bg,
     user_role,
     bot_role,
     shortcut,
@@ -79,6 +81,17 @@ build_theme_type!(FinalizedUiTheme {
     auto_accept_off,
     block_border_active,
     block_border_inactive,
+    message_border_inactive,
+    scrollbar_track,
+    folded_hint,
+    tool_label,
+    result_success,
+    result_error,
+    status_ready,
+    status_processing,
+    status_warning,
+    input_text,
+    input_cursor_line,
     command_palette_bg,
     command_palette_item_bg,
     command_palette_item_bg_focus,
@@ -126,6 +139,8 @@ impl Theme {
             ui: build_theme!(
                 self,
                 FinalizedUiTheme {
+                    text,
+                    chat_bg,
                     user_role,
                     bot_role,
                     shortcut,
@@ -134,6 +149,17 @@ impl Theme {
                     auto_accept_off,
                     block_border_active,
                     block_border_inactive,
+                    message_border_inactive,
+                    scrollbar_track,
+                    folded_hint,
+                    tool_label,
+                    result_success,
+                    result_error,
+                    status_ready,
+                    status_processing,
+                    status_warning,
+                    input_text,
+                    input_cursor_line,
                     command_palette_bg,
                     command_palette_item_bg,
                     command_palette_item_bg_focus,
@@ -237,6 +263,15 @@ lazy_static! {
     pub static ref CATPPUCCIN_MOCHA_PALLETE: ColorPalette =
         serde_json::from_str(include_str!("../theme/catppuccin_mocha_palette.json"))
             .expect("failed to load catppuccin mocha palette");
+    pub static ref CATPPUCCIN_LATTE_PALLETE: ColorPalette =
+        serde_json::from_str(include_str!("../theme/catppuccin_latte_palette.json"))
+            .expect("failed to load catppuccin latte palette");
+    pub static ref CATPPUCCIN_FRAPPE_PALLETE: ColorPalette =
+        serde_json::from_str(include_str!("../theme/catppuccin_frappe_palette.json"))
+            .expect("failed to load catppuccin frappe palette");
+    pub static ref CATPPUCCIN_MACCHIATO_PALLETE: ColorPalette =
+        serde_json::from_str(include_str!("../theme/catppuccin_macchiato_palette.json"))
+            .expect("failed to load catppuccin macchiato palette");
     pub static ref CATPPUCCIN_MOCHA_THEME: FinalizedTheme = {
         Theme {
             scheme: CATPPUCCIN_SCHEME.clone(),
@@ -245,11 +280,45 @@ lazy_static! {
         .to_ratatui()
         .expect("failed to convert theme")
     };
+    pub static ref CATPPUCCIN_LATTE_THEME: FinalizedTheme = {
+        Theme {
+            scheme: CATPPUCCIN_SCHEME.clone(),
+            palettes: CATPPUCCIN_LATTE_PALLETE.clone(),
+        }
+        .to_ratatui()
+        .expect("failed to convert theme")
+    };
+    pub static ref CATPPUCCIN_FRAPPE_THEME: FinalizedTheme = {
+        Theme {
+            scheme: CATPPUCCIN_SCHEME.clone(),
+            palettes: CATPPUCCIN_FRAPPE_PALLETE.clone(),
+        }
+        .to_ratatui()
+        .expect("failed to convert theme")
+    };
+    pub static ref CATPPUCCIN_MACCHIATO_THEME: FinalizedTheme = {
+        Theme {
+            scheme: CATPPUCCIN_SCHEME.clone(),
+            palettes: CATPPUCCIN_MACCHIATO_PALLETE.clone(),
+        }
+        .to_ratatui()
+        .expect("failed to convert theme")
+    };
 }
+
+pub const BUILTIN_THEME_NAMES: &[&str] = &[
+    "catppuccin_mocha",
+    "catppuccin_latte",
+    "catppuccin_frappe",
+    "catppuccin_macchiato",
+];
 
 pub fn use_builtin_theme(name: &str) -> &'static FinalizedTheme {
     match name {
         "catppuccin_mocha" => &CATPPUCCIN_MOCHA_THEME,
+        "catppuccin_latte" => &CATPPUCCIN_LATTE_THEME,
+        "catppuccin_frappe" => &CATPPUCCIN_FRAPPE_THEME,
+        "catppuccin_macchiato" => &CATPPUCCIN_MACCHIATO_THEME,
         _ => unreachable!("unknown theme: {name}"),
     }
 }

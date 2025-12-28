@@ -8,7 +8,6 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout},
     prelude::Rect,
-    style::Stylize,
     text::{Line, Span, Text},
     widgets::Wrap,
 };
@@ -17,10 +16,12 @@ use serde::{Deserialize, Serialize};
 use super::super::fold::FoldState;
 use crate::{
     actions::Action,
-    components::{Component, Content, ContentComponent, Persistable, ShortcutHints},
+    components::{
+        CacheInvalidation, Component, Content, ContentComponent, Persistable, ShortcutHints,
+    },
     error::Result,
     events::{AnswerEvent, Event},
-    global::State,
+    global::{self, State},
     session::{self, Session},
     widgets::Paragraph,
 };
@@ -41,20 +42,25 @@ pub struct Read<'a> {
     input_widget: Paragraph<'a>,
     output_widget: Option<Paragraph<'a>>,
     output_line_cnt: usize,
+    theme_dirty: bool,
 }
 
 const OMITTED_PREVIEW_LINES: usize = 5;
 
 fn generate_input_widget<'a>(input: ReadInput) -> Paragraph<'a> {
+    let theme = global::theme();
     let mut lines = vec![];
 
     // Display path
-    lines.push(Line::from(vec![" Path: ".blue(), Span::raw(input.path)]));
+    lines.push(Line::from(vec![
+        Span::styled(" Path: ", theme.ui.tool_label),
+        Span::raw(input.path),
+    ]));
 
     // Display line_offset if not default
     if input.line_offset != DEFAULT_LINE_OFFSET {
         lines.push(Line::from(vec![
-            " Line Offset: ".blue(),
+            Span::styled(" Line Offset: ", theme.ui.tool_label),
             Span::raw(input.line_offset.to_string()),
         ]));
     }
@@ -62,7 +68,7 @@ fn generate_input_widget<'a>(input: ReadInput) -> Paragraph<'a> {
     // Display line_limit if not default
     if input.line_limit != DEFAULT_LINE_LIMIT {
         lines.push(Line::from(vec![
-            " Line Limit: ".blue(),
+            Span::styled(" Line Limit: ", theme.ui.tool_label),
             Span::raw(input.line_limit.to_string()),
         ]));
     }
@@ -89,6 +95,7 @@ impl Read<'_> {
                 output: None,
                 display_state: FoldState::Preview,
             }),
+            theme_dirty: false,
         }
     }
 
@@ -101,6 +108,7 @@ impl Read<'_> {
 
         self.output_line_cnt = text.lines().count();
         self.output_widget = Some(generate_output_widget(text));
+        self.theme_dirty = false;
     }
 
     fn toggle_display_state(&mut self) {
@@ -115,13 +123,26 @@ impl Read<'_> {
     }
 
     fn omitted_indicator(&self) -> Paragraph<'static> {
-        Paragraph::new(
+        let theme = global::theme();
+        Paragraph::new(Line::from(Span::styled(
             format!(
                 "... (omitted, showing first part of {} lines)",
                 self.output_line_cnt
-            )
-            .dark_gray(),
-        )
+            ),
+            theme.ui.folded_hint,
+        )))
+    }
+
+    fn refresh_theme(&mut self) {
+        let state = self.state.read();
+        self.input_widget = generate_input_widget(state.input.clone());
+        self.output_widget = state.output.clone().map(generate_output_widget);
+        self.output_line_cnt = state
+            .output
+            .as_ref()
+            .map(|text| text.lines().count())
+            .unwrap_or_default();
+        self.theme_dirty = false;
     }
 }
 
@@ -171,7 +192,8 @@ impl Content for Read<'_> {
 
     fn reminder_line(&self) -> Option<Line<'static>> {
         if self.state.display_state.is_collapsed() {
-            Some(Line::from(Span::raw(" (folded)").dark_gray()))
+            let theme = global::theme();
+            Some(Line::from(Span::styled(" (folded)", theme.ui.folded_hint)))
         } else {
             None
         }
@@ -194,11 +216,18 @@ impl Persistable for Read<'static> {
                 .map(|x| x.lines().count())
                 .unwrap_or_default(),
             state: State::new(state),
+            theme_dirty: false,
         })
     }
 }
 
 impl Component for Read<'static> {
+    fn on_cache_invalidation(&mut self, reason: CacheInvalidation) {
+        if matches!(reason, CacheInvalidation::Theme) {
+            self.theme_dirty = true;
+        }
+    }
+
     fn handle_event(&mut self, event: &Event) {
         match event {
             Event::Answer(AnswerEvent::ToolResult { output, .. }) => {
@@ -225,6 +254,9 @@ impl Component for Read<'static> {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        if self.theme_dirty {
+            self.refresh_theme();
+        }
         use Constraint::{Length, Min};
         let width = area.width;
         let height_input = self.input_widget.line_count(width);

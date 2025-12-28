@@ -1,5 +1,10 @@
 {
     "ui": {
+        "text": "text",
+        "chat_bg": {
+            "fg": "text",
+            "bg": "base"
+        },
         "user_role": {
             "fg": "green",
             "add_modifier": "BOLD|ITALIC"
@@ -17,6 +22,34 @@
         "auto_accept_off": "overlay0",
         "block_border_active": "text",
         "block_border_inactive": "overlay0",
+        "message_border_inactive": "overlay0",
+        "scrollbar_track": "surface1",
+        "folded_hint": {
+            "fg": "overlay1",
+            "add_modifier": "DIM"
+        },
+        "tool_label": "blue",
+        "result_success": "green",
+        "result_error": "red",
+        "status_ready": {
+            "fg": "green",
+            "add_modifier": "BOLD"
+        },
+        "status_processing": {
+            "fg": "yellow",
+            "add_modifier": "BOLD"
+        },
+        "status_warning": {
+            "fg": "yellow",
+            "add_modifier": "BOLD"
+        },
+        "input_text": {
+            "fg": "text",
+            "bg": "base"
+        },
+        "input_cursor_line": {
+            "bg": "surface0"
+        },
         "command_palette_bg": {
             "fg": "surface0",
             "bg": "mantle"
@@ -26,8 +59,9 @@
             "bg": "mantle"
         },
         "command_palette_item_bg_focus": {
-            "fg": "surface0",
-            "bg": "mantle"
+            "fg": "text",
+            "bg": "surface1",
+            "add_modifier": "BOLD"
         },
         "tool_title_name": {
             "color": "blue",

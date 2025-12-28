@@ -266,11 +266,12 @@ impl Messages {
     }
 
     fn draw_scrollbar(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        let theme = global::theme();
         let bar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
             .end_symbol(None)
             .track_symbol(Some(line::VERTICAL))
-            .track_style(Style::default().dark_gray())
+            .track_style(theme.ui.scrollbar_track)
             .thumb_symbol(line::THICK_VERTICAL);
         let mut state = self.new_scrollstate();
         frame.render_stateful_widget(bar, area, &mut state);
@@ -294,6 +295,8 @@ impl Messages {
 
         let completed_frame = vtem
             .draw(|frame| {
+                let theme = global::theme();
+                frame.render_widget(Block::new().style(theme.ui.chat_bg), v_area);
                 self.actual_draw(frame, v_area, heights, start_idx..end_idx)
                     .unwrap()
             })
@@ -336,13 +339,16 @@ impl Messages {
             .skip(range.start)
             .take(range.end - range.start)
         {
+            let theme = global::theme();
             let mut block = Block::new().borders(Borders::LEFT);
             block = if &Some(idx) == self.focus.read() {
-                block.border_set(border::THICK)
+                block
+                    .border_set(border::THICK)
+                    .border_style(theme.ui.block_border_active)
             } else {
                 block
                     .border_set(border::PLAIN)
-                    .border_style(Style::default().dark_gray())
+                    .border_style(theme.ui.message_border_inactive)
             };
             let rect = chunks[idx - range.start];
             message.draw(frame, block.inner(rect)).unwrap();
@@ -597,10 +603,14 @@ mod tests {
             "│ from system       ",
             "│                   ",
         ]);
-        let border_style = Style::new().dark_gray();
+        let border_style = theme().ui.message_border_inactive;
         expected.set_style(Rect::new(0, 1, 1, 5), border_style);
         let role_style = theme().ui.user_role;
         expected.set_style(Rect::new(1, 1, 7, 1), role_style);
+        let text_style = theme().ui.text;
+        expected.set_style(Rect::new(9, 1, 5, 1), text_style);
+        expected.set_style(Rect::new(2, 3, 15, 1), text_style);
+        expected.set_style(Rect::new(2, 4, 11, 1), text_style);
 
         assert_eq!(terminal.backend().buffer(), &expected);
     }
@@ -629,11 +639,15 @@ mod tests {
             "│        world   ",
             "│                ",
         ]);
-        let border_style = Style::new().dark_gray();
+        let border_style = theme().ui.message_border_inactive;
         expected.set_style(Rect::new(0, 1, 1, 5), border_style);
         let role_style = theme().ui.user_role;
         expected.set_style(Rect::new(1, 1, 7, 1), role_style);
         expected.set_style(Rect::new(1, 3, 7, 1), role_style);
+        let text_style = theme().ui.text;
+        expected.set_style(Rect::new(9, 1, 5, 1), text_style);
+        expected.set_style(Rect::new(9, 3, 5, 1), text_style);
+        expected.set_style(Rect::new(9, 4, 5, 1), text_style);
 
         assert_eq!(terminal.backend().buffer(), &expected);
     }
@@ -661,12 +675,18 @@ mod tests {
             "│        amet   ┃",
             "│               ┃",
         ]);
-        let border_style = Style::new().dark_gray();
+        let border_style = theme().ui.message_border_inactive;
         expected.set_style(Rect::new(0, 0, 1, 6), border_style);
-        let scrollbar_style = Style::new().dark_gray();
+        let scrollbar_style = theme().ui.scrollbar_track;
         expected.set_style(Rect::new(16, 0, 1, 2), scrollbar_style);
         let role_style = theme().ui.user_role;
         expected.set_style(Rect::new(1, 0, 7, 1), role_style);
+        let text_style = theme().ui.text;
+        expected.set_style(Rect::new(9, 0, 5, 1), text_style);
+        expected.set_style(Rect::new(9, 1, 5, 1), text_style);
+        expected.set_style(Rect::new(9, 2, 5, 1), text_style);
+        expected.set_style(Rect::new(9, 3, 3, 1), text_style);
+        expected.set_style(Rect::new(9, 4, 4, 1), text_style);
         assert_eq!(terminal.backend().buffer(), &expected);
 
         app.scroll_up(2);
@@ -682,12 +702,17 @@ mod tests {
             "│        dolor  ┃",
             "│        sit    │",
         ]);
-        let border_style = Style::new().dark_gray();
+        let border_style = theme().ui.message_border_inactive;
         expected.set_style(Rect::new(0, 0, 1, 6), border_style);
-        let scrollbar_style = Style::new().dark_gray();
+        let scrollbar_style = theme().ui.scrollbar_track;
         expected.set_style(Rect::new(16, 5, 1, 1), scrollbar_style);
         expected.set_style(Rect::new(1, 0, 7, 1), role_style);
         expected.set_style(Rect::new(1, 2, 7, 1), role_style);
+        expected.set_style(Rect::new(9, 0, 5, 1), text_style);
+        expected.set_style(Rect::new(9, 2, 5, 1), text_style);
+        expected.set_style(Rect::new(9, 3, 5, 1), text_style);
+        expected.set_style(Rect::new(9, 4, 5, 1), text_style);
+        expected.set_style(Rect::new(9, 5, 3, 1), text_style);
         assert_eq!(terminal.backend().buffer(), &expected);
 
         app.scroll_up(1);
@@ -723,12 +748,18 @@ mod tests {
             " │        amet   ┃",
             " │               ┃",
         ]);
-        let border_style = Style::new().dark_gray();
+        let border_style = theme().ui.message_border_inactive;
         expected.set_style(Rect::new(1, 1, 1, 6), border_style);
-        let scrollbar_style = Style::new().dark_gray();
+        let scrollbar_style = theme().ui.scrollbar_track;
         expected.set_style(Rect::new(17, 1, 1, 2), scrollbar_style);
         let role_style = theme().ui.user_role;
         expected.set_style(Rect::new(2, 1, 7, 1), role_style);
+        let text_style = theme().ui.text;
+        expected.set_style(Rect::new(10, 1, 5, 1), text_style);
+        expected.set_style(Rect::new(10, 2, 5, 1), text_style);
+        expected.set_style(Rect::new(10, 3, 5, 1), text_style);
+        expected.set_style(Rect::new(10, 4, 3, 1), text_style);
+        expected.set_style(Rect::new(10, 5, 4, 1), text_style);
         assert_eq!(terminal.backend().buffer(), &expected);
 
         app.scroll_up(2);
@@ -745,12 +776,17 @@ mod tests {
             " │        dolor  ┃",
             " │        sit    │",
         ]);
-        let border_style = Style::new().dark_gray();
+        let border_style = theme().ui.message_border_inactive;
         expected.set_style(Rect::new(1, 1, 1, 6), border_style);
-        let scrollbar_style = Style::new().dark_gray();
+        let scrollbar_style = theme().ui.scrollbar_track;
         expected.set_style(Rect::new(17, 6, 1, 1), scrollbar_style);
         expected.set_style(Rect::new(2, 1, 7, 1), role_style);
         expected.set_style(Rect::new(2, 3, 7, 1), role_style);
+        expected.set_style(Rect::new(10, 1, 5, 1), text_style);
+        expected.set_style(Rect::new(10, 3, 5, 1), text_style);
+        expected.set_style(Rect::new(10, 4, 5, 1), text_style);
+        expected.set_style(Rect::new(10, 5, 5, 1), text_style);
+        expected.set_style(Rect::new(10, 6, 3, 1), text_style);
         assert_eq!(terminal.backend().buffer(), &expected);
 
         app.scroll_up(1);

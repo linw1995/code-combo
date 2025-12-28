@@ -87,6 +87,10 @@ impl Component for Input<'static> {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        let theme = global::theme();
+        self.textarea.set_style(theme.ui.input_text);
+        self.textarea
+            .set_cursor_line_style(theme.ui.input_cursor_line);
         frame.render_widget(&self.textarea, area);
         Ok(())
     }

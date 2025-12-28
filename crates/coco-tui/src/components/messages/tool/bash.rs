@@ -10,7 +10,7 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout},
     prelude::Rect,
-    style::{Style, Stylize},
+    style::Style,
     text::{Line, Span},
     widgets::Wrap,
 };
@@ -22,6 +22,7 @@ use tracing::warn;
 use super::super::fold::FoldState;
 use super::super::streaming::StreamedLines;
 use super::{Component, Content, ContentComponent};
+use crate::components::CacheInvalidation;
 use crate::{
     actions::{Action, ToolAction},
     components::{CodeHighlight, Persistable, ShortcutHints},
@@ -50,6 +51,7 @@ pub struct Bash<'a> {
     preview_lines: StreamedLines,
     output_text: Paragraph<'a>,
     output_markers: Option<Paragraph<'a>>,
+    theme_dirty: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,6 +176,7 @@ impl<'a> Bash<'a> {
             preview_lines,
             output_text: Paragraph::new(Vec::new()),
             output_markers: None,
+            theme_dirty: false,
         };
         component.rebuild_output();
         Ok(component)
@@ -248,6 +251,7 @@ impl<'a> Bash<'a> {
         let (output_text, output_markers) = self.render_output();
         self.output_text = output_text;
         self.output_markers = output_markers;
+        self.theme_dirty = false;
     }
 
     fn exec_output(&self) -> Option<&BashOutput> {
@@ -423,13 +427,18 @@ impl<'a> Content for Bash<'a> {
 
     fn reminder_line(&self) -> Option<Line<'static>> {
         let mut spans = Vec::new();
+        let theme = global::theme();
         if let Some(summary) = self.empty_output_summary() {
-            spans.push(Span::raw(format!(" - {summary}")).dark_gray());
+            spans.push(Span::styled(format!(" - {summary}"), theme.ui.folded_hint));
         }
         if self.has_output_content() {
             match self.state.display_state {
-                FoldState::Collapsed => spans.push(Span::raw(" (folded)").dark_gray()),
-                FoldState::Preview => spans.push(Span::raw(" (preview)").dark_gray()),
+                FoldState::Collapsed => {
+                    spans.push(Span::styled(" (folded)", theme.ui.folded_hint));
+                }
+                FoldState::Preview => {
+                    spans.push(Span::styled(" (preview)", theme.ui.folded_hint));
+                }
                 FoldState::Expanded => {}
             }
         }
@@ -460,6 +469,7 @@ impl Persistable for Bash<'static> {
             output_text: Paragraph::new(Vec::new()),
             output_markers: None,
             state: global::State::new(state),
+            theme_dirty: false,
         };
         component.rebuild_output();
         Ok(component)
@@ -467,6 +477,13 @@ impl Persistable for Bash<'static> {
 }
 
 impl Component for Bash<'static> {
+    fn on_cache_invalidation(&mut self, reason: CacheInvalidation) {
+        if matches!(reason, CacheInvalidation::Theme) {
+            self.theme_dirty = true;
+            self.input.invalidate_cache(reason);
+        }
+    }
+
     fn handle_event(&mut self, event: &Event) {
         match event {
             Event::Ask(AskEvent::ToolUsePermission(_)) => {
@@ -593,6 +610,9 @@ impl Component for Bash<'static> {
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         if area.height == 0 {
             return Ok(());
+        }
+        if self.theme_dirty {
+            self.rebuild_output();
         }
 
         use Constraint::Length;

@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use super::{Component, Content, ContentComponent};
+use crate::components::CacheInvalidation;
 use crate::{
     actions::{Action, ToolAction},
     components::{Persistable, ShortcutHints, code_highlight::CodeHighlight},
@@ -82,6 +83,7 @@ pub struct StrReplace<'a> {
     state: State<Inner>,
     header: Paragraph<'a>,
     widget: StrReplaceWidget<'a>,
+    theme_dirty: bool,
 }
 
 enum StrReplaceWidget<'a> {
@@ -176,10 +178,11 @@ fn tab_panel_width(total_width: u16) -> u16 {
 }
 
 fn render_tabs_panel(view: ResultView) -> Paragraph<'static> {
+    let theme = global::theme();
     let highlight = Style::default().reversed();
     let items = [
-        (ResultView::Applied, " 1 ", Style::default().green()),
-        (ResultView::Unapplied, " 2 ", Style::default().red()),
+        (ResultView::Applied, " 1 ", theme.ui.result_success),
+        (ResultView::Unapplied, " 2 ", theme.ui.result_error),
     ];
     let lines = items
         .into_iter()
@@ -206,10 +209,11 @@ fn has_result_content(state: &Inner) -> bool {
 }
 
 fn build_header(state: &Inner) -> Paragraph<'static> {
+    let theme = global::theme();
     let mut lines = Vec::new();
     let path = tool_path(&state.tool_use).unwrap_or_else(|| "unknown".to_string());
     lines.push(Line::from(vec![
-        Span::styled(" File: ", Style::default().blue()),
+        Span::styled(" File: ", theme.ui.tool_label),
         Span::raw(path),
     ]));
 
@@ -223,11 +227,11 @@ fn build_header(state: &Inner) -> Paragraph<'static> {
                     state.hunk_idx.min(total - 1) + 1
                 };
                 lines.push(Line::from(vec![
-                    Span::styled(" Hunk: ", Style::default().blue()),
+                    Span::styled(" Hunk: ", theme.ui.tool_label),
                     Span::raw(format!("{current}/{total}")),
                 ]));
                 lines.push(Line::from(vec![
-                    Span::styled(" Context: ", Style::default().blue()),
+                    Span::styled(" Context: ", theme.ui.tool_label),
                     Span::raw(state.context_radius.to_string()),
                 ]));
             }
@@ -235,12 +239,12 @@ fn build_header(state: &Inner) -> Paragraph<'static> {
         DisplayState::Result => {
             if let Some(message) = &state.result_message {
                 let style = if state.result_is_error.unwrap_or(false) {
-                    Style::default().red()
+                    theme.ui.result_error
                 } else {
-                    Style::default().green()
+                    theme.ui.result_success
                 };
                 lines.push(Line::from(vec![
-                    Span::styled(" Result: ", Style::default().blue()),
+                    Span::styled(" Result: ", theme.ui.tool_label),
                     Span::styled(message.clone(), style),
                 ]));
             }
@@ -321,6 +325,7 @@ impl<'a> StrReplace<'a> {
             }),
             header: Paragraph::new(""),
             widget: StrReplaceWidget::Empty,
+            theme_dirty: false,
         };
         inst.rebuild_view();
         inst
@@ -333,6 +338,7 @@ impl<'a> StrReplace<'a> {
             DisplayState::Preview => build_preview_widget(&state),
             DisplayState::Result => build_result_widget(&state),
         };
+        self.theme_dirty = false;
     }
 
     pub fn update_text_edit(&mut self, edit: TextEdit) {
@@ -523,7 +529,8 @@ impl Content for StrReplace<'_> {
     fn reminder_line(&self) -> Option<Line<'static>> {
         let state = self.state.read();
         if state.display_state == DisplayState::Result && state.collapsed {
-            Some(Line::from(Span::raw(" (folded)").dark_gray()))
+            let theme = global::theme();
+            Some(Line::from(Span::styled(" (folded)", theme.ui.folded_hint)))
         } else {
             None
         }
@@ -541,6 +548,7 @@ impl Persistable for StrReplace<'static> {
             state: State::new(state),
             header: Paragraph::new(""),
             widget: StrReplaceWidget::Empty,
+            theme_dirty: false,
         };
         inst.rebuild_view();
         Ok(inst)
@@ -548,6 +556,12 @@ impl Persistable for StrReplace<'static> {
 }
 
 impl Component for StrReplace<'static> {
+    fn on_cache_invalidation(&mut self, reason: CacheInvalidation) {
+        if matches!(reason, CacheInvalidation::Theme) {
+            self.theme_dirty = true;
+        }
+    }
+
     fn handle_key_event(&mut self, key: &KeyEvent) {
         let (display_state, has_edit, has_tabs, has_content, pending_apply) = {
             let state = self.state.read();
@@ -691,6 +705,9 @@ impl Component for StrReplace<'static> {
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         if area.height == 0 {
             return Ok(());
+        }
+        if self.theme_dirty {
+            self.rebuild_view();
         }
 
         use Constraint::Length;
