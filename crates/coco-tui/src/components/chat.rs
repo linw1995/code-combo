@@ -888,11 +888,6 @@ impl Component for Chat<'static> {
         use KeyCode::*;
         use KeyModifiers as KM;
 
-        if self.state.focus == Focus::ShortcutHints {
-            self.close_shortcut_hints();
-            return;
-        }
-
         if matches!(key.code, BackTab) {
             if self.view == ViewMode::Chat {
                 self.toggle_auto_accept_edits();
@@ -938,8 +933,6 @@ impl Component for Chat<'static> {
             return;
         }
 
-        // TODO: Too expensive - consider caching or lazy evaluation
-        let current_hints = self.current_shortcut_hints();
         match (focus, key.modifiers, key.code) {
             // Focus switching
             (Input, KM::NONE, Esc) => self.update_focus(InputBlur),
@@ -952,7 +945,9 @@ impl Component for Chat<'static> {
                 self.messages.blur();
                 self.update_focus(Focus::InputBlur);
             }
-            (InputBlur | Messages, KM::NONE, Char('?')) if current_hints.has_hidden() => {
+            (InputBlur | Messages, KM::NONE, Char('?'))
+                if self.current_shortcut_hints().has_hidden() =>
+            {
                 self.open_shortcut_hints();
             }
             (ShortcutHints, _, _) => {
