@@ -526,10 +526,12 @@ impl Component for CommandPalette {
 
         // Clear the center area
         Clear.render(area_popup, frame.buffer_mut());
+        let theme = global::theme();
+        let popup_bg = Block::new().style(theme.ui.chat_bg);
+        frame.render_widget(&popup_bg, area_popup);
         let area_background = area_popup.inner(margin_background);
 
         // Render backgroud color
-        let theme = global::theme();
         let block = Block::new().style(theme.ui.command_palette_bg);
         frame.render_widget(&block, area_background);
 

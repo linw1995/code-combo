@@ -295,6 +295,8 @@ impl Messages {
 
         let completed_frame = vtem
             .draw(|frame| {
+                let theme = global::theme();
+                frame.render_widget(Block::new().style(theme.ui.chat_bg), v_area);
                 self.actual_draw(frame, v_area, heights, start_idx..end_idx)
                     .unwrap()
             })
