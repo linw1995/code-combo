@@ -4,7 +4,7 @@ use tree_sitter_highlight::HighlightConfiguration;
 
 use super::Result;
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Copy, Clone, Serialize, Deserialize)]
 pub enum Lang {
     Bash,
     Diff,
@@ -12,6 +12,8 @@ pub enum Lang {
     Markdown,
     MarkdownInline,
 }
+
+const MARKDOWN_INJECTIONS: &[Lang] = &[Lang::MarkdownInline, Lang::Bash, Lang::Diff, Lang::Json];
 
 impl Lang {
     pub fn as_str(&self) -> &'static str {
@@ -22,6 +24,39 @@ impl Lang {
             Json => "json",
             Markdown => "markdown",
             MarkdownInline => "markdown_inline",
+        }
+    }
+
+    pub fn from_injection_language(language: &str) -> Option<Self> {
+        let language = language.trim();
+        if language.eq_ignore_ascii_case("bash")
+            || language.eq_ignore_ascii_case("sh")
+            || language.eq_ignore_ascii_case("shell")
+        {
+            return Some(Lang::Bash);
+        }
+        if language.eq_ignore_ascii_case("diff") || language.eq_ignore_ascii_case("patch") {
+            return Some(Lang::Diff);
+        }
+        if language.eq_ignore_ascii_case("json") || language.eq_ignore_ascii_case("jsonc") {
+            return Some(Lang::Json);
+        }
+        if language.eq_ignore_ascii_case("markdown") || language.eq_ignore_ascii_case("md") {
+            return Some(Lang::Markdown);
+        }
+        if language.eq_ignore_ascii_case("markdown_inline")
+            || language.eq_ignore_ascii_case("markdown-inline")
+            || language.eq_ignore_ascii_case("md-inline")
+        {
+            return Some(Lang::MarkdownInline);
+        }
+        None
+    }
+
+    pub fn injection_candidates(&self) -> &'static [Lang] {
+        match self {
+            Lang::Markdown => MARKDOWN_INJECTIONS,
+            _ => &[],
         }
     }
 }
@@ -89,11 +124,12 @@ fn json_config(names: &[&str]) -> Result<HighlightConfiguration> {
 }
 
 fn markdown_config(names: &[&str]) -> Result<HighlightConfiguration> {
+    let injection_query = markdown_injection_query();
     let mut config = HighlightConfiguration::new(
         tree_sitter_md::LANGUAGE.into(),
         "markdown",
         tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
-        tree_sitter_md::INJECTION_QUERY_BLOCK,
+        &injection_query,
         "",
     )
     .whatever_context("failed to create markdown highlight configuration")?;
@@ -101,6 +137,20 @@ fn markdown_config(names: &[&str]) -> Result<HighlightConfiguration> {
     config.configure(names);
 
     Ok(config)
+}
+
+fn markdown_injection_query() -> String {
+    let mut lines = Vec::new();
+    for line in tree_sitter_md::INJECTION_QUERY_BLOCK.lines() {
+        if line.contains("injection.language \"markdown_inline\"")
+            && !line.contains("injection.include-children")
+        {
+            lines.push(format!("{line} (#set! injection.include-children)"));
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    lines.join("\n")
 }
 
 fn markdown_inline_config(names: &[&str]) -> Result<HighlightConfiguration> {
