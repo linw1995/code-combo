@@ -606,22 +606,29 @@ impl Chat<'static> {
         } else {
             "Press Ctrl+C again to cancel"
         };
-        Some(Line::from(format!(" {message} ")).yellow())
+        let theme = global::theme();
+        Some(Line::from(Span::styled(
+            format!(" {message} "),
+            theme.ui.status_warning,
+        )))
     }
 
     fn widget_state_indicator(&self) -> Line<'_> {
+        let theme = global::theme();
         let state = &self.state.state;
-        (match state {
-            ChatState::Ready => Line::from(format!(" {state} ").green()),
+        match state {
+            ChatState::Ready => {
+                Line::from(Span::styled(format!(" {state} "), theme.ui.status_ready))
+            }
             ChatState::Procesing => Line::from(vec![
-                " ".into(),
+                Span::raw(" "),
                 Throbber::default()
                     .throbber_set(BRAILLE_EIGHT_DOUBLE)
+                    .style(theme.ui.status_processing)
                     .to_symbol_span(&self.indicator),
-                format!(" {state} ").yellow(),
+                Span::styled(format!(" {state} "), theme.ui.status_processing),
             ]),
-        })
-        .bold()
+        }
     }
 
     fn auto_accept_indicator(&self) -> Line<'static> {
@@ -752,6 +759,7 @@ impl Chat<'static> {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(global::set_config(config.clone()));
         });
+        global::bump_theme_version();
 
         global::signal_dirty();
     }
@@ -1173,6 +1181,9 @@ impl Chat<'static> {
     fn draw_chat(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         use Constraint::{Length, Min};
 
+        let theme = global::theme();
+        frame.render_widget(Block::new().style(theme.ui.chat_bg), area);
+
         let vertical = Layout::vertical([Min(0), Length(3)]);
         let [area_messages, area_input] = vertical.areas(area);
 
@@ -1185,11 +1196,13 @@ impl Chat<'static> {
     fn draw_transcript(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         use Constraint::{Length, Min};
 
+        let theme = global::theme();
+        frame.render_widget(Block::new().style(theme.ui.chat_bg), area);
+
         let vertical = Layout::vertical([Min(0), Length(1)]);
         let [area_messages, bottom] = vertical.areas(area);
         self.transcript.draw(frame, area_messages)?;
 
-        let theme = global::theme();
         let mut bottom_block = Block::new()
             .borders(Borders::BOTTOM)
             .border_set(border::THICK)

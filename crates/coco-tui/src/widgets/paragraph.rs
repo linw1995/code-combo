@@ -12,7 +12,8 @@ use crate::global;
 /// When scrolling, the area occupied by a tab character may retain previous render content,
 /// causing visual artifacts. This wrapper ensures safe rendering by handling such edge cases.
 pub struct Paragraph<'a> {
-    inner: ratatui::widgets::Paragraph<'a>,
+    text: Text<'a>,
+    wrap: Option<Wrap>,
 }
 
 impl<'a> Paragraph<'a> {
@@ -20,12 +21,9 @@ impl<'a> Paragraph<'a> {
     where
         T: Into<Text<'a>>,
     {
-        let mut text: Text = text.into();
-        for line in &mut text.lines {
-            safe_line(line);
-        }
         Self {
-            inner: ratatui::widgets::Paragraph::new(text),
+            text: text.into(),
+            wrap: None,
         }
     }
 
@@ -33,29 +31,38 @@ impl<'a> Paragraph<'a> {
     where
         T: Into<Text<'a>>,
     {
-        let mut text: Text = text.into();
-        for line in &mut text.lines {
-            safe_line(line);
-        }
         Self {
-            inner: ratatui::widgets::Paragraph::new(text).wrap(wrap),
+            text: text.into(),
+            wrap: Some(wrap),
         }
     }
 
     pub fn line_count(&self, width: u16) -> usize {
-        self.inner.line_count(width)
+        self.build_widget().line_count(width)
+    }
+
+    fn build_widget(&self) -> ratatui::widgets::Paragraph<'a> {
+        let mut text = self.text.clone();
+        for line in &mut text.lines {
+            safe_line(line);
+        }
+        let mut widget = ratatui::widgets::Paragraph::new(text);
+        if let Some(wrap) = self.wrap {
+            widget = widget.wrap(wrap);
+        }
+        widget
     }
 }
 
 impl WidgetRef for Paragraph<'static> {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
-        self.inner.render_ref(area, buf);
+        self.build_widget().render_ref(area, buf);
     }
 }
 
 impl Widget for Paragraph<'static> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        self.inner.render(area, buf);
+        self.build_widget().render(area, buf);
     }
 }
 
@@ -84,10 +91,13 @@ const TAB_STOP: usize = 4;
 ///
 /// The visual markers ("▸" for tabs) inherit the `tab_spaces`
 /// style from the current theme, allowing consistent theming across the application.
-/// Regular text preserves its original style.
+/// Regular text is patched with the base `text` style so it follows theme changes
+/// unless an explicit style is already set.
 fn safe_line(line: &mut Line) {
     let theme = global::theme();
     let tab_spaces_style = theme.ui.tab_spaces;
+    let base_style = theme.ui.text;
+    let tab_style = base_style.patch(tab_spaces_style);
 
     let mut new_spans = Vec::with_capacity(line.spans.len());
     let mut col = 0;
@@ -106,7 +116,7 @@ fn safe_line(line: &mut Line) {
                     3 => ("▸", 1),
                     _ => unreachable!(),
                 };
-                new_spans.push(Span::styled(sep, tab_spaces_style));
+                new_spans.push(Span::styled(sep, tab_style));
                 i += 1;
                 width += sep_width;
             } else {
@@ -119,7 +129,8 @@ fn safe_line(line: &mut Line) {
 
                 let regular_content = chars[start..i].iter().collect::<String>();
                 if !regular_content.is_empty() {
-                    new_spans.push(Span::styled(regular_content, span.style));
+                    let style = base_style.patch(span.style);
+                    new_spans.push(Span::styled(regular_content, style));
                 }
             }
         }
@@ -147,6 +158,7 @@ mod tests {
 
         // Apply the tab_spaces style to the special symbols
         let tab_spaces_style = global::theme().ui.tab_spaces;
+        let text_style = global::theme().ui.text;
 
         // Style the first tab symbol on line 0 (positions 0-3)
         expected.set_style(Rect::new(0, 0, 4, 1), tab_spaces_style);
@@ -155,6 +167,8 @@ mod tests {
 
         // Style the tab symbol on line 1
         expected.set_style(Rect::new(0, 1, 4, 1), tab_spaces_style);
+        expected.set_style(Rect::new(8, 0, 5, 1), text_style);
+        expected.set_style(Rect::new(4, 1, 5, 1), text_style);
 
         assert_eq!(terminal.backend().buffer(), &expected);
     }
@@ -172,12 +186,16 @@ mod tests {
 
         // Apply the tab_spaces style to the special symbols
         let tab_spaces_style = global::theme().ui.tab_spaces;
+        let text_style = global::theme().ui.text;
 
         // Style the first tab symbol on line 0
         expected.set_style(Rect::new(2, 0, 6, 1), tab_spaces_style);
+        expected.set_style(Rect::new(0, 0, 2, 1), text_style);
+        expected.set_style(Rect::new(8, 0, 5, 1), text_style);
 
         // Style the tab symbol on line 1
         expected.set_style(Rect::new(0, 1, 4, 1), tab_spaces_style);
+        expected.set_style(Rect::new(4, 1, 5, 1), text_style);
 
         assert_eq!(terminal.backend().buffer(), &expected);
     }

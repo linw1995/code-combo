@@ -4,7 +4,7 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout},
     prelude::Rect,
-    style::{Style, Stylize},
+    style::Style,
     symbols::border,
     text::{Line, Span},
     widgets::{Block, Borders},
@@ -253,10 +253,8 @@ impl Content for Combo {
 
     fn reminder_line(&self) -> Option<Line<'static>> {
         if self.has_collapsible_body() && self.state.display_state.is_collapsed() {
-            Some(Line::from(Span::styled(
-                " (folded)",
-                Style::default().dark_gray(),
-            )))
+            let theme = global::theme();
+            Some(Line::from(Span::styled(" (folded)", theme.ui.folded_hint)))
         } else {
             None
         }

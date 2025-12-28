@@ -8,7 +8,6 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout},
     prelude::Rect,
-    style::Stylize,
     text::{Line, Span, Text},
     widgets::Wrap,
 };
@@ -20,7 +19,7 @@ use crate::{
     components::{Component, Content, ContentComponent, Persistable, ShortcutHints},
     error::Result,
     events::{AnswerEvent, Event},
-    global::State,
+    global::{self, State},
     session::{self, Session},
     widgets::Paragraph,
 };
@@ -41,18 +40,23 @@ pub struct List<'a> {
     input_widget: Paragraph<'a>,
     output_widget: Option<Paragraph<'a>>,
     output_line_cnt: usize,
+    theme_version: usize,
 }
 
 const OMITTED_PREVIEW_LINES: usize = 5;
 
 fn generate_input_widget<'a>(input: ListInput) -> Paragraph<'a> {
+    let theme = global::theme();
     let mut lines = vec![];
 
-    lines.push(Line::from(vec![" Path: ".blue(), Span::raw(input.path)]));
+    lines.push(Line::from(vec![
+        Span::styled(" Path: ", theme.ui.tool_label),
+        Span::raw(input.path),
+    ]));
 
     if input.entry_limit != DEFAULT_ENTRY_LIMIT {
         lines.push(Line::from(vec![
-            " Entry Limit: ".blue(),
+            Span::styled(" Entry Limit: ", theme.ui.tool_label),
             Span::raw(input.entry_limit.to_string()),
         ]));
     }
@@ -79,6 +83,7 @@ impl List<'_> {
                 output: None,
                 display_state: FoldState::Preview,
             }),
+            theme_version: global::theme_version(),
         }
     }
 
@@ -91,6 +96,7 @@ impl List<'_> {
 
         self.output_line_cnt = text.lines().count();
         self.output_widget = Some(generate_output_widget(text));
+        self.theme_version = global::theme_version();
     }
 
     fn toggle_display_state(&mut self) {
@@ -105,13 +111,26 @@ impl List<'_> {
     }
 
     fn omitted_indicator(&self) -> Paragraph<'static> {
-        Paragraph::new(
+        let theme = global::theme();
+        Paragraph::new(Line::from(Span::styled(
             format!(
                 "... (omitted, showing first part of {} lines)",
                 self.output_line_cnt
-            )
-            .dark_gray(),
-        )
+            ),
+            theme.ui.folded_hint,
+        )))
+    }
+
+    fn refresh_theme(&mut self) {
+        let state = self.state.read();
+        self.input_widget = generate_input_widget(state.input.clone());
+        self.output_widget = state.output.clone().map(generate_output_widget);
+        self.output_line_cnt = state
+            .output
+            .as_ref()
+            .map(|text| text.lines().count())
+            .unwrap_or_default();
+        self.theme_version = global::theme_version();
     }
 }
 
@@ -161,7 +180,8 @@ impl Content for List<'_> {
 
     fn reminder_line(&self) -> Option<Line<'static>> {
         if self.state.display_state.is_collapsed() {
-            Some(Line::from(Span::raw(" (folded)").dark_gray()))
+            let theme = global::theme();
+            Some(Line::from(Span::styled(" (folded)", theme.ui.folded_hint)))
         } else {
             None
         }
@@ -184,6 +204,7 @@ impl Persistable for List<'static> {
                 .map(|x| x.lines().count())
                 .unwrap_or_default(),
             state: State::new(state),
+            theme_version: global::theme_version(),
         })
     }
 }
@@ -215,6 +236,9 @@ impl Component for List<'static> {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        if self.theme_version != global::theme_version() {
+            self.refresh_theme();
+        }
         use Constraint::{Length, Min};
         let width = area.width;
         let height_input = self.input_widget.line_count(width);
