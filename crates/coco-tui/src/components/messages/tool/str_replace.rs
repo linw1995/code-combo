@@ -493,10 +493,10 @@ impl Content for StrReplace<'_> {
         let state = self.state.read();
         if state.edit.is_some() {
             return block
-                .title_bottom(shortcuts_desc(&[("Apply", "CR")]))
-                .title_bottom(shortcuts_desc(&[("Reject", "Esc")]))
-                .title_bottom(shortcuts_desc(&[("Hunk", "h/l")]))
-                .title_bottom(shortcuts_desc(&[("Context", "[/]")]));
+                .title_top(shortcuts_desc(&[("Apply", "CR")]))
+                .title_top(shortcuts_desc(&[("Reject", "Esc")]))
+                .title_top(shortcuts_desc(&[("Hunk", "h/l")]))
+                .title_top(shortcuts_desc(&[("Context", "[/]")]));
         }
 
         if state.display_state == DisplayState::Result && has_result_content(state) {
@@ -510,11 +510,11 @@ impl Content for StrReplace<'_> {
                     ResultView::Applied => "Applied",
                     ResultView::Unapplied => "Unapplied",
                 };
-                block.title_bottom(shortcuts_desc(&[(view, "1/2")]))
+                block.title_top(shortcuts_desc(&[(view, "1/2")]))
             } else {
                 block
             };
-            return block.title_bottom(shortcuts_desc(&[toggle_text]));
+            return block.title_top(shortcuts_desc(&[toggle_text]));
         }
 
         block
