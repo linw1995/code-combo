@@ -394,8 +394,8 @@ impl<'a> Content for Bash<'a> {
     fn block_with_shortcuts_desc<'b>(&self, mut block: Block<'b>) -> Block<'b> {
         if self.requiring_confirmation() {
             return block
-                .title_bottom(shortcuts_desc(&[("Run", "CR"), ("Allow in Session", "A")]))
-                .title_bottom(shortcuts_desc(&[("Cancel", "Esc")]));
+                .title_top(shortcuts_desc(&[("Run", "CR"), ("Allow in Session", "A")]))
+                .title_top(shortcuts_desc(&[("Cancel", "Esc")]));
         }
 
         if !self.has_output_content() {
@@ -413,10 +413,10 @@ impl<'a> Content for Bash<'a> {
                 BashOutputView::Stderr => "Stderr",
                 BashOutputView::Mixed => "Mixed",
             };
-            block = block.title_bottom(shortcuts_desc(&[(view, "1/2/3")]));
+            block = block.title_top(shortcuts_desc(&[(view, "1/2/3")]));
         }
 
-        block.title_bottom(shortcuts_desc(&[toggle_text]))
+        block.title_top(shortcuts_desc(&[toggle_text]))
     }
 
     fn reminder_line(&self) -> Option<Line<'static>> {

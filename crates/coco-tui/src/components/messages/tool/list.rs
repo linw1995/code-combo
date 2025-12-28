@@ -156,7 +156,7 @@ impl Content for List<'_> {
             FoldState::Expanded => ("Fold", "z"),
             FoldState::Preview => return block,
         };
-        block.title_bottom(crate::components::shortcuts_desc(&[toggle_text]))
+        block.title_top(crate::components::shortcuts_desc(&[toggle_text]))
     }
 
     fn reminder_line(&self) -> Option<Line<'static>> {
