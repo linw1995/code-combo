@@ -49,11 +49,7 @@ fn generate_input_widget<'a>(input: ReadInput) -> Paragraph<'a> {
     let mut lines = vec![];
 
     // Display path
-    lines.push(Line::from(vec![
-        "  ".yellow(),
-        " Path: ".blue(),
-        Span::raw(input.path),
-    ]));
+    lines.push(Line::from(vec![" Path: ".blue(), Span::raw(input.path)]));
 
     // Display line_offset if not default
     if input.line_offset != DEFAULT_LINE_OFFSET {
