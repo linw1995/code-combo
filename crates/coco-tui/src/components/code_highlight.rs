@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use tracing::trace;
 
-use super::{Component, Content, ContentComponent};
+use super::{CacheInvalidation, Component, Content, ContentComponent};
 use crate::{
     components::Persistable,
     error::Result,
@@ -31,7 +31,7 @@ struct State {
 pub struct CodeHighlight<'a> {
     state: State,
     widget: Paragraph<'a>,
-    theme_version: usize,
+    theme_dirty: bool,
 }
 
 impl<'a> CodeHighlight<'a> {
@@ -43,7 +43,7 @@ impl<'a> CodeHighlight<'a> {
                 lang,
             },
             widget,
-            theme_version: global::theme_version(),
+            theme_dirty: false,
         })
     }
 
@@ -112,10 +112,16 @@ impl Persistable for CodeHighlight<'static> {
 }
 
 impl Component for CodeHighlight<'static> {
+    fn on_cache_invalidation(&mut self, reason: CacheInvalidation) {
+        if matches!(reason, CacheInvalidation::Theme) {
+            self.theme_dirty = true;
+        }
+    }
+
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        if self.theme_version != global::theme_version() {
+        if self.theme_dirty {
             self.widget = Self::build_widget(&self.state.source, self.state.lang)?;
-            self.theme_version = global::theme_version();
+            self.theme_dirty = false;
         }
         frame.render_widget(&self.widget, area);
         Ok(())

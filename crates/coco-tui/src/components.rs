@@ -113,6 +113,11 @@ pub trait Persistable: Identity {
         Self: Sized;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheInvalidation {
+    Theme,
+}
+
 /// `Component` is a trait that represents a visual and interactive element of the user interface.
 pub trait Component: Persistable + Any + Send {
     /// Get the children components of this component.
@@ -128,6 +133,16 @@ pub trait Component: Persistable + Any + Send {
     fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
         Box::new(std::iter::empty())
     }
+
+    fn invalidate_cache(&mut self, reason: CacheInvalidation) {
+        self.on_cache_invalidation(reason);
+        for child in self.children() {
+            child.invalidate_cache(reason);
+        }
+    }
+
+    #[allow(unused_variables)]
+    fn on_cache_invalidation(&mut self, reason: CacheInvalidation) {}
 
     /// Handle incoming events and proprogate events if necessary.
     ///

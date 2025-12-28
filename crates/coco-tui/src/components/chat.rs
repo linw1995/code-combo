@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use super::{
-    Action, AnswerEvent, AskEvent, BotMessage, Combo, ComboAction, ComboEvent,
+    Action, AnswerEvent, AskEvent, BotMessage, CacheInvalidation, Combo, ComboAction, ComboEvent,
     CommandPaletteAction, Component, Event, Input, Message, Messages, Plain, SessionAction,
     ShortcutHints, ShortcutHintsPanel, Tool, ToolAction, TranscriptMessage,
 };
@@ -759,7 +759,7 @@ impl Chat<'static> {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(global::set_config(config.clone()));
         });
-        global::bump_theme_version();
+        self.invalidate_cache(CacheInvalidation::Theme);
 
         global::signal_dirty();
     }

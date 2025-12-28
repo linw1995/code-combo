@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use super::{Component, Content, ContentComponent};
+use crate::components::CacheInvalidation;
 use crate::{
     actions::{Action, ToolAction},
     components::{Persistable, ShortcutHints, code_highlight::CodeHighlight},
@@ -82,7 +83,7 @@ pub struct StrReplace<'a> {
     state: State<Inner>,
     header: Paragraph<'a>,
     widget: StrReplaceWidget<'a>,
-    theme_version: usize,
+    theme_dirty: bool,
 }
 
 enum StrReplaceWidget<'a> {
@@ -324,7 +325,7 @@ impl<'a> StrReplace<'a> {
             }),
             header: Paragraph::new(""),
             widget: StrReplaceWidget::Empty,
-            theme_version: global::theme_version(),
+            theme_dirty: false,
         };
         inst.rebuild_view();
         inst
@@ -337,7 +338,7 @@ impl<'a> StrReplace<'a> {
             DisplayState::Preview => build_preview_widget(&state),
             DisplayState::Result => build_result_widget(&state),
         };
-        self.theme_version = global::theme_version();
+        self.theme_dirty = false;
     }
 
     pub fn update_text_edit(&mut self, edit: TextEdit) {
@@ -547,7 +548,7 @@ impl Persistable for StrReplace<'static> {
             state: State::new(state),
             header: Paragraph::new(""),
             widget: StrReplaceWidget::Empty,
-            theme_version: global::theme_version(),
+            theme_dirty: false,
         };
         inst.rebuild_view();
         Ok(inst)
@@ -555,6 +556,12 @@ impl Persistable for StrReplace<'static> {
 }
 
 impl Component for StrReplace<'static> {
+    fn on_cache_invalidation(&mut self, reason: CacheInvalidation) {
+        if matches!(reason, CacheInvalidation::Theme) {
+            self.theme_dirty = true;
+        }
+    }
+
     fn handle_key_event(&mut self, key: &KeyEvent) {
         let (display_state, has_edit, has_tabs, has_content, pending_apply) = {
             let state = self.state.read();
@@ -699,7 +706,7 @@ impl Component for StrReplace<'static> {
         if area.height == 0 {
             return Ok(());
         }
-        if self.theme_version != global::theme_version() {
+        if self.theme_dirty {
             self.rebuild_view();
         }
 

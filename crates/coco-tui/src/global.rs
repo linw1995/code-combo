@@ -2,10 +2,7 @@ use std::{
     env,
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
-    sync::{
-        Arc, OnceLock,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, OnceLock},
 };
 
 use serde::{Deserialize, Serialize};
@@ -21,8 +18,6 @@ static EVENT_TX: OnceLock<UnboundedSender<Event>> = OnceLock::new();
 static ACTION_TX: OnceLock<UnboundedSender<Action>> = OnceLock::new();
 static WORKSPACE_DIR: OnceLock<PathBuf> = OnceLock::new();
 static CONFIG_PATH: OnceLock<PathBuf> = OnceLock::new();
-static THEME_VERSION: AtomicUsize = AtomicUsize::new(0);
-
 /// Initialize the global event and action senders.
 ///
 /// This function can only be called once during the application's lifetime.
@@ -86,14 +81,6 @@ pub fn config_path() -> Option<PathBuf> {
 pub fn theme() -> &'static FinalizedTheme {
     let config = config_sync();
     use_builtin_theme(&config.ui.theme)
-}
-
-pub fn theme_version() -> usize {
-    THEME_VERSION.load(Ordering::Relaxed)
-}
-
-pub fn bump_theme_version() {
-    THEME_VERSION.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Returns the workspace directory by walking up from the current directory

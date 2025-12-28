@@ -22,6 +22,7 @@ use tracing::warn;
 use super::super::fold::FoldState;
 use super::super::streaming::StreamedLines;
 use super::{Component, Content, ContentComponent};
+use crate::components::CacheInvalidation;
 use crate::{
     actions::{Action, ToolAction},
     components::{CodeHighlight, Persistable, ShortcutHints},
@@ -50,7 +51,7 @@ pub struct Bash<'a> {
     preview_lines: StreamedLines,
     output_text: Paragraph<'a>,
     output_markers: Option<Paragraph<'a>>,
-    theme_version: usize,
+    theme_dirty: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,7 +176,7 @@ impl<'a> Bash<'a> {
             preview_lines,
             output_text: Paragraph::new(Vec::new()),
             output_markers: None,
-            theme_version: global::theme_version(),
+            theme_dirty: false,
         };
         component.rebuild_output();
         Ok(component)
@@ -250,7 +251,7 @@ impl<'a> Bash<'a> {
         let (output_text, output_markers) = self.render_output();
         self.output_text = output_text;
         self.output_markers = output_markers;
-        self.theme_version = global::theme_version();
+        self.theme_dirty = false;
     }
 
     fn exec_output(&self) -> Option<&BashOutput> {
@@ -468,7 +469,7 @@ impl Persistable for Bash<'static> {
             output_text: Paragraph::new(Vec::new()),
             output_markers: None,
             state: global::State::new(state),
-            theme_version: global::theme_version(),
+            theme_dirty: false,
         };
         component.rebuild_output();
         Ok(component)
@@ -476,6 +477,13 @@ impl Persistable for Bash<'static> {
 }
 
 impl Component for Bash<'static> {
+    fn on_cache_invalidation(&mut self, reason: CacheInvalidation) {
+        if matches!(reason, CacheInvalidation::Theme) {
+            self.theme_dirty = true;
+            self.input.invalidate_cache(reason);
+        }
+    }
+
     fn handle_event(&mut self, event: &Event) {
         match event {
             Event::Ask(AskEvent::ToolUsePermission(_)) => {
@@ -603,7 +611,7 @@ impl Component for Bash<'static> {
         if area.height == 0 {
             return Ok(());
         }
-        if self.theme_version != global::theme_version() {
+        if self.theme_dirty {
             self.rebuild_output();
         }
 

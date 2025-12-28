@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use super::super::fold::FoldState;
 use crate::{
     actions::Action,
-    components::{Component, Content, ContentComponent, Persistable, ShortcutHints},
+    components::{
+        CacheInvalidation, Component, Content, ContentComponent, Persistable, ShortcutHints,
+    },
     error::Result,
     events::{AnswerEvent, Event},
     global::{self, State},
@@ -40,7 +42,7 @@ pub struct Read<'a> {
     input_widget: Paragraph<'a>,
     output_widget: Option<Paragraph<'a>>,
     output_line_cnt: usize,
-    theme_version: usize,
+    theme_dirty: bool,
 }
 
 const OMITTED_PREVIEW_LINES: usize = 5;
@@ -93,7 +95,7 @@ impl Read<'_> {
                 output: None,
                 display_state: FoldState::Preview,
             }),
-            theme_version: global::theme_version(),
+            theme_dirty: false,
         }
     }
 
@@ -106,7 +108,7 @@ impl Read<'_> {
 
         self.output_line_cnt = text.lines().count();
         self.output_widget = Some(generate_output_widget(text));
-        self.theme_version = global::theme_version();
+        self.theme_dirty = false;
     }
 
     fn toggle_display_state(&mut self) {
@@ -140,7 +142,7 @@ impl Read<'_> {
             .as_ref()
             .map(|text| text.lines().count())
             .unwrap_or_default();
-        self.theme_version = global::theme_version();
+        self.theme_dirty = false;
     }
 }
 
@@ -214,12 +216,18 @@ impl Persistable for Read<'static> {
                 .map(|x| x.lines().count())
                 .unwrap_or_default(),
             state: State::new(state),
-            theme_version: global::theme_version(),
+            theme_dirty: false,
         })
     }
 }
 
 impl Component for Read<'static> {
+    fn on_cache_invalidation(&mut self, reason: CacheInvalidation) {
+        if matches!(reason, CacheInvalidation::Theme) {
+            self.theme_dirty = true;
+        }
+    }
+
     fn handle_event(&mut self, event: &Event) {
         match event {
             Event::Answer(AnswerEvent::ToolResult { output, .. }) => {
@@ -246,7 +254,7 @@ impl Component for Read<'static> {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        if self.theme_version != global::theme_version() {
+        if self.theme_dirty {
             self.refresh_theme();
         }
         use Constraint::{Length, Min};

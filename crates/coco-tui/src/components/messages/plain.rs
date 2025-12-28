@@ -5,6 +5,7 @@ use tokio::sync::oneshot;
 use tracing::{trace, warn};
 
 use super::{Component, Content};
+use crate::components::CacheInvalidation;
 use crate::{
     components::{CodeHighlight, ContentComponent, Persistable},
     error::*,
@@ -80,6 +81,10 @@ impl Persistable for Plain {
 }
 
 impl Component for Plain {
+    fn on_cache_invalidation(&mut self, reason: CacheInvalidation) {
+        self.widget.invalidate_cache(reason);
+    }
+
     fn on_tick(&mut self) {
         if let Some(rx) = &mut self.rx {
             let Ok(widget) = rx.try_recv() else {
