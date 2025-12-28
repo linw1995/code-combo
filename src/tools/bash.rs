@@ -28,8 +28,6 @@ pub struct BashOutput {
     #[serde(default)]
     pub stderr: String,
     #[serde(default)]
-    pub chunks: Vec<OutputChunk>,
-    #[serde(default)]
     pub timed_out: bool,
 }
 
@@ -57,7 +55,6 @@ where
                 exit_code: 255,
                 stdout: String::new(),
                 stderr: format!("Invalid input format: {err}"),
-                chunks: Vec::new(),
                 timed_out: false,
             };
             let output = serde_json::to_value(&output)
@@ -72,7 +69,6 @@ where
             exit_code: 255,
             stdout: String::new(),
             stderr: err,
-            chunks: Vec::new(),
             timed_out: false,
         },
     };
@@ -109,7 +105,6 @@ where
         exit_code: 255,
         stdout: String::new(),
         stderr: String::new(),
-        chunks: Vec::new(),
         timed_out: false,
     };
 
@@ -137,10 +132,8 @@ where
                 match ev {
                     ProcessEvent::Started { .. } => (),
                     ProcessEvent::Chunk(chunk) => {
-                        output.chunks.push(chunk);
-                        let last = output.chunks.last().expect("chunk pushed");
-                        for line in &last.lines {
-                            match last.stream {
+                        for line in &chunk.lines {
+                            match chunk.stream {
                                 StreamKind::Stdout => {
                                     output.stdout.push_str(line);
                                     output.stdout.push('\n');
@@ -151,7 +144,7 @@ where
                                 }
                             }
                         }
-                        on_chunk(last);
+                        on_chunk(&chunk);
                     }
                     ProcessEvent::Exited { exit_code, .. } => {
                         output.exit_code = exit_code.unwrap_or(255) as u8;
@@ -207,18 +200,8 @@ mod tests {
 
     use super::*;
 
-    fn stream_lines(output: &BashOutput, stream: StreamKind) -> Vec<&str> {
-        output
-            .chunks
-            .iter()
-            .filter(|c| c.stream == stream)
-            .flat_map(|c| c.lines.iter())
-            .map(|s| s.as_str())
-            .collect()
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn bash_output_contains_chunks_and_split_streams() {
+    async fn bash_output_split_streams() {
         let tool = BashTool::default();
         let input = Input::Starter(json!({
             "command": "printf \"out1\\nout2\\n\"; printf \"err1\\nerr2\\n\" 1>&2",
@@ -234,15 +217,6 @@ mod tests {
         assert_eq!(output.exit_code, 0);
         assert_eq!(output.stdout, "out1\nout2\n");
         assert_eq!(output.stderr, "err1\nerr2\n");
-        assert!(!output.chunks.is_empty());
-        assert_eq!(
-            stream_lines(&output, StreamKind::Stdout),
-            vec!["out1", "out2"]
-        );
-        assert_eq!(
-            stream_lines(&output, StreamKind::Stderr),
-            vec!["err1", "err2"]
-        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

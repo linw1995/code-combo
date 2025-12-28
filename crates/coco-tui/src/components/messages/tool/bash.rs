@@ -1,7 +1,7 @@
 use bon::bon;
 use coco_macro::{ComponentExt, ContentComponentExt};
 use code_combo::{
-    ToolUse,
+    OutputChunk, ToolUse,
     tools::{BashInput, BashOutput, Final},
 };
 use code_highlight::Lang;
@@ -35,10 +35,7 @@ use crate::{
 #[derive(Serialize, Deserialize)]
 struct Inner {
     tool_use: ToolUse,
-    requiring_confirmation: bool,
-    output: Option<BashOutput>,
-    #[serde(default)]
-    view: BashOutputView,
+    exec_state: ExecState,
     #[serde(default)]
     display_state: FoldState,
 }
@@ -49,11 +46,10 @@ pub struct Bash<'a> {
     state: State<Inner>,
 
     input: CodeHighlight<'a>,
-    streamed_lines: StreamedLines,
+
+    preview_lines: StreamedLines,
     output_text: Paragraph<'a>,
     output_markers: Option<Paragraph<'a>>,
-    output_preview_text: Paragraph<'a>,
-    output_preview_markers: Option<Paragraph<'a>>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +67,30 @@ impl BashOutputView {
             Self::Stdout => 0,
             Self::Stderr => 1,
             Self::Mixed => 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ExecState {
+    Initial {
+        requiring_confirmation: bool,
+    },
+    Executing {
+        chunks: Vec<OutputChunk>,
+    },
+    Finished {
+        output: BashOutput,
+        chunks: Vec<OutputChunk>,
+        view: BashOutputView,
+    },
+}
+
+impl Default for ExecState {
+    fn default() -> Self {
+        Self::Initial {
+            requiring_confirmation: false,
         }
     }
 }
@@ -115,95 +135,7 @@ fn render_tabs_panel(view: BashOutputView) -> Paragraph<'static> {
     Paragraph::new(lines)
 }
 
-fn limit_tail_lines<T>(mut lines: Vec<T>, max_lines: Option<usize>) -> Vec<T> {
-    let Some(max_lines) = max_lines else {
-        return lines;
-    };
-    if lines.len() > max_lines {
-        let start = lines.len() - max_lines;
-        lines = lines.split_off(start);
-    }
-    lines
-}
-
 const OUTPUT_MARKER: &str = "▐";
-
-fn build_output_view<'a>(
-    output: Option<&BashOutput>,
-    streamed_lines: &StreamedLines,
-    view: BashOutputView,
-    max_lines: Option<usize>,
-) -> (Paragraph<'a>, Option<Paragraph<'a>>) {
-    let theme = global::theme();
-    let mut lines: Vec<Line<'a>> = Vec::new();
-    let Some(output) = output else {
-        return (
-            Paragraph::new_wrap(lines, Wrap { trim: false }),
-            if view == BashOutputView::Mixed {
-                Some(Paragraph::new(Vec::<Line>::new()))
-            } else {
-                None
-            },
-        );
-    };
-
-    match view {
-        BashOutputView::Stdout => {
-            for line in output.stdout.lines() {
-                lines.push(Line::from(line.to_string()));
-            }
-            let lines = limit_tail_lines(lines, max_lines);
-            (Paragraph::new_wrap(lines, Wrap { trim: false }), None)
-        }
-        BashOutputView::Stderr => {
-            for line in output.stderr.lines() {
-                lines.push(Line::from(line.to_string()));
-            }
-            let lines = limit_tail_lines(lines, max_lines);
-            (Paragraph::new_wrap(lines, Wrap { trim: false }), None)
-        }
-        BashOutputView::Mixed => {
-            let mut markers: Vec<Line<'a>> = Vec::new();
-            if !streamed_lines.is_empty() {
-                for line in streamed_lines.iter() {
-                    let marker_style = match line.stream {
-                        code_combo::StreamKind::Stdout => theme.ui.bash_stdout_marker,
-                        code_combo::StreamKind::Stderr => theme.ui.bash_stderr_marker,
-                    };
-                    lines.push(Line::from(line.text.clone()));
-                    markers.push(Line::from(Span::styled(OUTPUT_MARKER, marker_style)));
-                }
-            } else if output.chunks.is_empty() {
-                for (marker_style, text) in [
-                    (theme.ui.bash_stderr_marker, &output.stderr),
-                    (theme.ui.bash_stdout_marker, &output.stdout),
-                ] {
-                    if text.is_empty() {
-                        continue;
-                    }
-                    for line in text.lines() {
-                        lines.push(Line::from(line.to_string()));
-                        markers.push(Line::from(Span::styled(OUTPUT_MARKER, marker_style)));
-                    }
-                }
-            } else {
-                for chunk in &output.chunks {
-                    let marker_style = match chunk.stream {
-                        code_combo::StreamKind::Stdout => theme.ui.bash_stdout_marker,
-                        code_combo::StreamKind::Stderr => theme.ui.bash_stderr_marker,
-                    };
-                    for line in &chunk.lines {
-                        lines.push(Line::from(line.clone()));
-                        markers.push(Line::from(Span::styled(OUTPUT_MARKER, marker_style)));
-                    }
-                }
-            }
-            let lines = limit_tail_lines(lines, max_lines);
-            let markers = limit_tail_lines(markers, max_lines);
-            (Paragraph::new(lines), Some(Paragraph::new(markers)))
-        }
-    }
-}
 
 fn generate_input<'b>(tool_use: &ToolUse) -> CodeHighlight<'b> {
     let input: BashInput =
@@ -220,85 +152,206 @@ impl<'a> Bash<'a> {
             .map(serde_json::from_value)
             .transpose()
             .whatever_context("failed to parse BashOutput")?;
-        let streamed_lines = output
-            .as_ref()
-            .map(|output| StreamedLines::from_chunks(&output.chunks, None))
-            .unwrap_or_else(|| StreamedLines::new(None));
-        let (output_text, output_markers) = build_output_view(
-            output.as_ref(),
-            &streamed_lines,
-            BashOutputView::default(),
-            None,
-        );
-        let (output_preview_text, output_preview_markers) = build_output_view(
-            output.as_ref(),
-            &streamed_lines,
-            BashOutputView::default(),
-            Some(OUTPUT_PREVIEW_LINES),
-        );
         let display_state = display_state_for_output(output.as_ref(), FoldState::Preview);
-
-        Ok(Self {
+        let exec_state = match output {
+            Some(output) => ExecState::Finished {
+                output,
+                chunks: Vec::new(),
+                view: BashOutputView::default(),
+            },
+            None => ExecState::Initial {
+                requiring_confirmation: false,
+            },
+        };
+        let preview_lines = StreamedLines::new(Some(OUTPUT_PREVIEW_LINES));
+        let mut component = Self {
             state: State::new(Inner {
                 tool_use: tool_use.to_owned(),
-                requiring_confirmation: false,
-                output,
-                view: BashOutputView::default(),
+                exec_state,
                 display_state,
             }),
             input,
-            streamed_lines,
-            output_text,
-            output_markers,
-            output_preview_text,
-            output_preview_markers,
-        })
+            preview_lines,
+            output_text: Paragraph::new(Vec::new()),
+            output_markers: None,
+        };
+        component.rebuild_output();
+        Ok(component)
+    }
+
+    fn render_output(&self) -> (Paragraph<'a>, Option<Paragraph<'a>>) {
+        let theme = global::theme();
+        let empty = || {
+            (
+                Paragraph::new_wrap(Vec::new(), Wrap { trim: false }),
+                Some(Paragraph::new(Vec::<Line>::new())),
+            )
+        };
+
+        match &self.state.exec_state {
+            ExecState::Initial { .. } => empty(),
+            ExecState::Executing { chunks } => {
+                if self.preview_lines.is_empty() && chunks.is_empty() {
+                    return empty();
+                }
+                let mut lines: Vec<Line<'a>> = Vec::new();
+                let mut markers: Vec<Line<'a>> = Vec::new();
+                for line in self.preview_lines.iter() {
+                    let marker_style = match line.stream {
+                        code_combo::StreamKind::Stdout => theme.ui.bash_stdout_marker,
+                        code_combo::StreamKind::Stderr => theme.ui.bash_stderr_marker,
+                    };
+                    lines.push(Line::from(line.text.clone()));
+                    markers.push(Line::from(Span::styled(OUTPUT_MARKER, marker_style)));
+                }
+                (Paragraph::new(lines), Some(Paragraph::new(markers)))
+            }
+            ExecState::Finished {
+                output,
+                chunks,
+                view,
+            } => match view {
+                BashOutputView::Stdout => {
+                    let mut lines: Vec<Line<'a>> = Vec::new();
+                    for line in output.stdout.lines() {
+                        lines.push(Line::from(line.to_string()));
+                    }
+                    (Paragraph::new_wrap(lines, Wrap { trim: false }), None)
+                }
+                BashOutputView::Stderr => {
+                    let mut lines: Vec<Line<'a>> = Vec::new();
+                    for line in output.stderr.lines() {
+                        lines.push(Line::from(line.to_string()));
+                    }
+                    (Paragraph::new_wrap(lines, Wrap { trim: false }), None)
+                }
+                BashOutputView::Mixed => {
+                    let mut lines: Vec<Line<'a>> = Vec::new();
+                    let mut markers: Vec<Line<'a>> = Vec::new();
+                    for chunk in chunks {
+                        let marker_style = match chunk.stream {
+                            code_combo::StreamKind::Stdout => theme.ui.bash_stdout_marker,
+                            code_combo::StreamKind::Stderr => theme.ui.bash_stderr_marker,
+                        };
+                        for line in &chunk.lines {
+                            lines.push(Line::from(line.clone()));
+                            markers.push(Line::from(Span::styled(OUTPUT_MARKER, marker_style)));
+                        }
+                    }
+                    (Paragraph::new(lines), Some(Paragraph::new(markers)))
+                }
+            },
+        }
     }
 
     fn rebuild_output(&mut self) {
-        let (output_text, output_markers) = build_output_view(
-            self.state.output.as_ref(),
-            &self.streamed_lines,
-            self.state.view,
-            None,
-        );
-        let (output_preview_text, output_preview_markers) = build_output_view(
-            self.state.output.as_ref(),
-            &self.streamed_lines,
-            self.state.view,
-            Some(OUTPUT_PREVIEW_LINES),
-        );
+        let (output_text, output_markers) = self.render_output();
         self.output_text = output_text;
         self.output_markers = output_markers;
-        self.output_preview_text = output_preview_text;
-        self.output_preview_markers = output_preview_markers;
+    }
+
+    fn exec_output(&self) -> Option<&BashOutput> {
+        match &self.state.exec_state {
+            ExecState::Finished { output, .. } => Some(output),
+            _ => None,
+        }
+    }
+
+    fn exec_chunks(&self) -> &[OutputChunk] {
+        match &self.state.exec_state {
+            ExecState::Executing { chunks } | ExecState::Finished { chunks, .. } => chunks,
+            ExecState::Initial { .. } => &[],
+        }
+    }
+
+    fn exec_view(&self) -> BashOutputView {
+        match &self.state.exec_state {
+            ExecState::Finished { view, .. } => *view,
+            _ => BashOutputView::Mixed,
+        }
+    }
+
+    fn set_exec_view(&mut self, view: BashOutputView) -> bool {
+        let mut state = self.state.write();
+        if let ExecState::Finished { view: current, .. } = &mut state.exec_state {
+            *current = view;
+            return true;
+        }
+        false
+    }
+
+    fn requiring_confirmation(&self) -> bool {
+        matches!(
+            &self.state.exec_state,
+            ExecState::Initial {
+                requiring_confirmation: true
+            }
+        )
+    }
+
+    fn set_requiring_confirmation(&mut self, value: bool) {
+        let mut state = self.state.write();
+        if let ExecState::Initial {
+            requiring_confirmation,
+        } = &mut state.exec_state
+        {
+            *requiring_confirmation = value;
+        }
+    }
+
+    fn push_chunk(&mut self, chunk: OutputChunk) {
+        let chunk_for_state = chunk.clone();
+        let mut state = self.state.write();
+        match &mut state.exec_state {
+            ExecState::Executing { chunks } => chunks.push(chunk_for_state),
+            ExecState::Finished { chunks, .. } => chunks.push(chunk_for_state),
+            ExecState::Initial { .. } => {
+                state.exec_state = ExecState::Executing {
+                    chunks: vec![chunk_for_state],
+                };
+            }
+        }
+        self.preview_lines.push_chunk(&chunk);
     }
 
     pub fn update_output(&mut self, output: Option<Final>) -> Result<()> {
         if let Some(Final::Json(value)) = output {
             let output = serde_json::from_value::<BashOutput>(value)
                 .whatever_context("failed to parse BashOutput")?;
-            self.streamed_lines = StreamedLines::from_chunks(&output.chunks, None);
-            self.state.write().output = Some(output);
+            {
+                let mut state = self.state.write();
+                let (chunks, view) = match &mut state.exec_state {
+                    ExecState::Executing { chunks } => {
+                        (std::mem::take(chunks), BashOutputView::default())
+                    }
+                    ExecState::Finished { chunks, view, .. } => (std::mem::take(chunks), *view),
+                    ExecState::Initial { .. } => (Vec::new(), BashOutputView::default()),
+                };
+                state.exec_state = ExecState::Finished {
+                    output,
+                    chunks,
+                    view,
+                };
+            }
+            self.preview_lines =
+                StreamedLines::from_chunks(self.exec_chunks(), Some(OUTPUT_PREVIEW_LINES));
             self.rebuild_output();
         }
         Ok(())
     }
 
     fn has_output_content(&self) -> bool {
-        match self.state.output.as_ref() {
-            Some(output) => {
-                !(output.stdout.is_empty() && output.stderr.is_empty() && output.chunks.is_empty())
-            }
-            None => false,
-        }
+        let output = self.exec_output();
+        let has_text =
+            output.is_some_and(|output| !(output.stdout.is_empty() && output.stderr.is_empty()));
+        has_text || !self.exec_chunks().is_empty() || !self.preview_lines.is_empty()
     }
 
     pub fn empty_output_summary(&self) -> Option<String> {
         if self.has_output_content() {
             return None;
         }
-        let output = self.state.output.as_ref()?;
+        let output = self.exec_output()?;
         if output.timed_out {
             return Some(format!("Timed out (exit {}, no output)", output.exit_code));
         }
@@ -308,7 +361,7 @@ impl<'a> Bash<'a> {
 
 impl<'a> Content for Bash<'a> {
     fn height(&self, width: u16) -> usize {
-        if self.state.requiring_confirmation
+        if self.requiring_confirmation()
             || self.state.display_state == FoldState::Collapsed
             || !self.has_output_content()
         {
@@ -323,7 +376,7 @@ impl<'a> Content for Bash<'a> {
             tab_panel_width(width)
         };
         let width_body = width.saturating_sub(width_tab).max(1);
-        let width_marker = output_marker_width(self.state.view);
+        let width_marker = output_marker_width(self.exec_view());
         let width_text = width_body.saturating_sub(width_marker).max(1);
         let height_output = match self.state.display_state {
             FoldState::Preview => OUTPUT_PREVIEW_LINES.max(min_height),
@@ -339,7 +392,7 @@ impl<'a> Content for Bash<'a> {
     }
 
     fn block_with_shortcuts_desc<'b>(&self, mut block: Block<'b>) -> Block<'b> {
-        if self.state.requiring_confirmation {
+        if self.requiring_confirmation() {
             return block
                 .title_bottom(shortcuts_desc(&[("Run", "CR"), ("Allow in Session", "A")]))
                 .title_bottom(shortcuts_desc(&[("Cancel", "Esc")]));
@@ -355,7 +408,7 @@ impl<'a> Content for Bash<'a> {
         };
 
         if matches!(self.state.display_state, FoldState::Expanded) {
-            let view = match self.state.view {
+            let view = match self.exec_view() {
                 BashOutputView::Stdout => "Stdout",
                 BashOutputView::Stderr => "Stderr",
                 BashOutputView::Mixed => "Mixed",
@@ -393,28 +446,21 @@ impl Persistable for Bash<'static> {
 
     fn load(session: Session) -> Result<Self> {
         let state: Inner = session::load(session)?;
-        let streamed_lines = state
-            .output
-            .as_ref()
-            .map(|output| StreamedLines::from_chunks(&output.chunks, None))
-            .unwrap_or_else(|| StreamedLines::new(None));
-        let (output_text, output_markers) =
-            build_output_view(state.output.as_ref(), &streamed_lines, state.view, None);
-        let (output_preview_text, output_preview_markers) = build_output_view(
-            state.output.as_ref(),
-            &streamed_lines,
-            state.view,
-            Some(OUTPUT_PREVIEW_LINES),
-        );
-        Ok(Self {
+        let streamed_preview_lines = match &state.exec_state {
+            ExecState::Executing { chunks } | ExecState::Finished { chunks, .. } => {
+                StreamedLines::from_chunks(chunks, Some(OUTPUT_PREVIEW_LINES))
+            }
+            ExecState::Initial { .. } => StreamedLines::new(Some(OUTPUT_PREVIEW_LINES)),
+        };
+        let mut component = Self {
             input: generate_input(&state.tool_use),
-            streamed_lines,
-            output_text,
-            output_markers,
-            output_preview_text,
-            output_preview_markers,
+            preview_lines: streamed_preview_lines,
+            output_text: Paragraph::new(Vec::new()),
+            output_markers: None,
             state: global::State::new(state),
-        })
+        };
+        component.rebuild_output();
+        Ok(component)
     }
 }
 
@@ -422,47 +468,26 @@ impl Component for Bash<'static> {
     fn handle_event(&mut self, event: &Event) {
         match event {
             Event::Ask(AskEvent::ToolUsePermission(_)) => {
-                let mut state = self.state.write();
-                state.requiring_confirmation = true;
-                state.display_state.preview();
+                self.set_requiring_confirmation(true);
+                self.state.write().display_state.preview();
             }
             Event::Answer(AnswerEvent::ToolOutput { id, chunk }) => {
                 if id != &self.state.tool_use.id {
                     return;
                 }
-                let mut state = self.state.write();
-                let output = state.output.get_or_insert_with(|| BashOutput {
-                    exit_code: 255,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    chunks: Vec::new(),
-                    timed_out: false,
-                });
-                for line in &chunk.lines {
-                    match chunk.stream {
-                        code_combo::StreamKind::Stdout => {
-                            output.stdout.push_str(line);
-                            output.stdout.push('\n');
-                        }
-                        code_combo::StreamKind::Stderr => {
-                            output.stderr.push_str(line);
-                            output.stderr.push('\n');
-                        }
-                    }
-                }
-                output.chunks.push(chunk.clone());
-                self.streamed_lines.push_chunk(chunk);
-                drop(state);
+                self.push_chunk(chunk.clone());
                 self.rebuild_output();
             }
             Event::Answer(AnswerEvent::ToolResult { output, .. }) => {
                 if let Err(err) = self.update_output(Some(output.to_owned())) {
                     warn!(?err, "failed to update tool output");
                 };
+                let display_state =
+                    display_state_for_output(self.exec_output(), self.state.display_state);
                 let mut state = self.state.write();
-                state.display_state =
-                    display_state_for_output(state.output.as_ref(), state.display_state);
-                state.requiring_confirmation = false;
+                state.display_state = display_state;
+                drop(state);
+                self.set_requiring_confirmation(false);
             }
             _ => (),
         }
@@ -474,28 +499,28 @@ impl Component for Bash<'static> {
                 if !self.has_output_content() {
                     return;
                 }
-                let mut state = self.state.write();
-                state.view = BashOutputView::Stdout;
-                drop(state);
+                if !self.set_exec_view(BashOutputView::Stdout) {
+                    return;
+                }
                 self.rebuild_output();
             }
             (FoldState::Expanded, KeyModifiers::NONE, KeyCode::Char('2')) => {
                 if !self.has_output_content() {
                     return;
                 }
-                let mut state = self.state.write();
-                state.view = BashOutputView::Stderr;
-                state.display_state.expand();
-                drop(state);
+                if !self.set_exec_view(BashOutputView::Stderr) {
+                    return;
+                }
+                self.state.write().display_state.expand();
                 self.rebuild_output();
             }
             (FoldState::Expanded, KeyModifiers::NONE, KeyCode::Char('3')) => {
                 if !self.has_output_content() {
                     return;
                 }
-                let mut state = self.state.write();
-                state.view = BashOutputView::Mixed;
-                drop(state);
+                if !self.set_exec_view(BashOutputView::Mixed) {
+                    return;
+                }
                 self.rebuild_output();
             }
             (_, KeyModifiers::NONE, KeyCode::Char('z')) => {
@@ -509,33 +534,33 @@ impl Component for Bash<'static> {
                 };
             }
             (_, KeyModifiers::NONE, KeyCode::Enter) => {
-                if !self.state.requiring_confirmation {
+                if !self.requiring_confirmation() {
                     return;
                 }
                 self.state.write().display_state.preview();
                 global::action_tx()
                     .send(ToolAction::Grant(self.state.tool_use.to_owned()).into())
                     .unwrap();
-                self.state.write().requiring_confirmation = false;
+                self.set_requiring_confirmation(false);
             }
             (_, KeyModifiers::NONE, KeyCode::Char('a') | KeyCode::Char('A')) => {
-                if !self.state.requiring_confirmation {
+                if !self.requiring_confirmation() {
                     return;
                 }
                 self.state.write().display_state.preview();
                 global::action_tx()
                     .send(ToolAction::GrantSession(self.state.tool_use.to_owned()).into())
                     .unwrap();
-                self.state.write().requiring_confirmation = false;
+                self.set_requiring_confirmation(false);
             }
             (_, KeyModifiers::NONE, KeyCode::Esc) => {
-                if !self.state.requiring_confirmation {
+                if !self.requiring_confirmation() {
                     return;
                 }
                 global::action_tx()
                     .send(ToolAction::Cancel(self.state.tool_use.to_owned()).into())
                     .unwrap();
-                self.state.write().requiring_confirmation = false;
+                self.set_requiring_confirmation(false);
             }
             _ => (), // ignore
         }
@@ -545,7 +570,7 @@ impl Component for Bash<'static> {
         if !matches!(action, Action::Blur) {
             return;
         }
-        if self.state.requiring_confirmation {
+        if self.requiring_confirmation() {
             return;
         }
         if !self.has_output_content() {
@@ -554,7 +579,7 @@ impl Component for Bash<'static> {
         if self.state.display_state != FoldState::Preview {
             return;
         }
-        let Some(output) = self.state.output.as_ref() else {
+        let Some(output) = self.exec_output() else {
             return;
         };
         if output.exit_code != 0 {
@@ -574,7 +599,7 @@ impl Component for Bash<'static> {
         let height_input = self.input.height(width);
 
         if self.state.display_state == FoldState::Collapsed
-            || self.state.requiring_confirmation
+            || self.requiring_confirmation()
             || !self.has_output_content()
         {
             let [area_input] = Layout::vertical([Length(height_input as u16)]).areas(area);
@@ -587,7 +612,7 @@ impl Component for Bash<'static> {
         } else {
             tab_panel_width(width)
         };
-        let width_marker = output_marker_width(self.state.view);
+        let width_marker = output_marker_width(self.exec_view());
         let width_body = width.saturating_sub(width_tabs).max(1);
         let width_text = width_body.saturating_sub(width_marker).max(1);
         let min_height = TAB_PANEL_HEIGHT;
@@ -611,26 +636,20 @@ impl Component for Bash<'static> {
             (view, Some(tabs))
         };
 
-        let (output_text, output_markers) = match self.state.display_state {
-            FoldState::Preview => (&self.output_preview_text, &self.output_preview_markers),
-            FoldState::Expanded => (&self.output_text, &self.output_markers),
-            FoldState::Collapsed => (&self.output_text, &self.output_markers),
-        };
-
         if width_marker == 0 {
-            frame.render_widget(output_text, area_output_view);
+            frame.render_widget(&self.output_text, area_output_view);
         } else {
             let [area_text, area_markers] =
                 Layout::horizontal([Constraint::Min(1), Constraint::Length(width_marker)])
                     .areas(area_output_view);
-            frame.render_widget(output_text, area_text);
-            if let Some(markers) = output_markers {
+            frame.render_widget(&self.output_text, area_text);
+            if let Some(markers) = &self.output_markers {
                 frame.render_widget(markers, area_markers);
             }
         }
 
         if let Some(area_tabs) = area_output_tabs {
-            let tabs_panel = render_tabs_panel(self.state.view);
+            let tabs_panel = render_tabs_panel(self.exec_view());
             frame.render_widget(tabs_panel, area_tabs);
         }
         Ok(())
@@ -677,18 +696,6 @@ mod tests {
             exit_code,
             stdout: "out\n".to_string(),
             stderr: "err\n".to_string(),
-            chunks: vec![
-                code_combo::OutputChunk {
-                    timestamp: 0,
-                    stream: code_combo::StreamKind::Stdout,
-                    lines: vec!["out".to_string()],
-                },
-                code_combo::OutputChunk {
-                    timestamp: 0,
-                    stream: code_combo::StreamKind::Stderr,
-                    lines: vec!["err".to_string()],
-                },
-            ],
             timed_out: false,
         }
     }
@@ -702,7 +709,6 @@ mod tests {
             exit_code: 0,
             stdout: String::new(),
             stderr: String::new(),
-            chunks: Vec::new(),
             timed_out: false,
         }
     }
@@ -724,6 +730,7 @@ mod tests {
             is_user_cancelled: false,
             output: Final::Json(value),
         }));
+        assert!(matches!(&bash.state.exec_state, ExecState::Finished { .. }));
         assert_eq!(bash.state.display_state, FoldState::Preview);
         bash.update(&Action::Blur);
         assert_eq!(bash.state.display_state, FoldState::Collapsed);
@@ -757,15 +764,15 @@ mod tests {
         bash.state.write().display_state = FoldState::Expanded;
         bash.handle_key_event(&key(KeyCode::Char('1')));
         assert_eq!(bash.state.display_state, FoldState::Expanded);
-        assert_eq!(bash.state.view.index(), 0);
+        assert_eq!(bash.exec_view().index(), 0);
 
         bash.handle_key_event(&key(KeyCode::Char('2')));
         assert_eq!(bash.state.display_state, FoldState::Expanded);
-        assert_eq!(bash.state.view.index(), 1);
+        assert_eq!(bash.exec_view().index(), 1);
 
         bash.handle_key_event(&key(KeyCode::Char('3')));
         assert_eq!(bash.state.display_state, FoldState::Expanded);
-        assert_eq!(bash.state.view.index(), 2);
+        assert_eq!(bash.exec_view().index(), 2);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -797,12 +804,17 @@ mod tests {
             },
         }));
 
-        let output = bash.state.output.clone().unwrap();
-        assert_eq!(output.stdout, "out1\nout2\n");
-        assert_eq!(output.stderr, "");
-        assert_eq!(output.chunks.len(), 1);
+        assert!(matches!(
+            &bash.state.exec_state,
+            ExecState::Executing { .. }
+        ));
+        let chunks = match &bash.state.exec_state {
+            ExecState::Executing { chunks } => chunks,
+            _ => panic!("expected executing state"),
+        };
+        assert_eq!(chunks.len(), 1);
         assert_eq!(
-            output.chunks[0].lines,
+            chunks[0].lines,
             vec!["out1".to_string(), "out2".to_string()]
         );
     }
@@ -810,20 +822,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bash_hides_tabs_while_requiring_confirmation() {
         let tool_use = tool_use();
-        let value = serde_json::to_value(bash_output()).unwrap();
-        let mut bash = Bash::try_new()
-            .tool_use(&tool_use)
-            .output(value)
-            .call()
-            .unwrap();
-
-        let height_with_output = bash.height(80);
+        let mut bash = Bash::try_new().tool_use(&tool_use).call().unwrap();
+        assert!(!bash.requiring_confirmation());
         bash.handle_event(&Event::Ask(AskEvent::ToolUsePermission(
             "tool_1".to_string(),
         )));
-        let height_confirm = bash.height(80);
-
-        assert!(height_with_output > height_confirm);
+        assert!(bash.requiring_confirmation());
+        assert_eq!(bash.height(80), bash.input.height(80));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
