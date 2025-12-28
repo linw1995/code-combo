@@ -20,7 +20,7 @@ use tracing::{debug, warn};
 
 use crate::{
     actions::{Action, ToolAction},
-    components::{Component, Content, ContentComponent, Persistable},
+    components::{Component, Content, ContentComponent, Persistable, ShortcutHints},
     error::*,
     events::{AnswerEvent, AskEvent, Event},
     global::{self, State},
@@ -313,8 +313,8 @@ impl Content for Tool {
         self.widget.is_actionable()
     }
 
-    fn block_with_shortcuts_desc<'a>(&self, block: Block<'a>) -> Block<'a> {
-        self.widget.block_with_shortcuts_desc(block)
+    fn shortcut_hints(&self) -> ShortcutHints {
+        self.widget.shortcut_hints()
     }
 }
 

@@ -2,14 +2,10 @@ use std::any::Any;
 
 use coco_macro::ComponentExt;
 use crossterm::event::KeyEvent;
-use ratatui::{
-    Frame,
-    prelude::*,
-    widgets::{Block, Paragraph},
-};
+use ratatui::{Frame, prelude::*, widgets::Paragraph};
 use serde::{Deserialize, Serialize};
 
-use super::Component;
+use super::{Component, ShortcutHints};
 use crate::{
     components::{Persistable, Tool},
     error::*,
@@ -34,9 +30,9 @@ pub trait Content {
         false
     }
 
-    /// Display shortcuts description on the block bottom of the chat window.
-    fn block_with_shortcuts_desc<'a>(&self, block: Block<'a>) -> Block<'a> {
-        block
+    /// Provide shortcuts hints for the current content.
+    fn shortcut_hints(&self) -> ShortcutHints {
+        ShortcutHints::default()
     }
 
     /// Provide a reminder line to append to the message title.
@@ -136,8 +132,8 @@ impl Content for Message {
         self.content.is_actionable()
     }
 
-    fn block_with_shortcuts_desc<'a>(&self, block: Block<'a>) -> Block<'a> {
-        self.content.block_with_shortcuts_desc(block)
+    fn shortcut_hints(&self) -> ShortcutHints {
+        self.content.shortcut_hints()
     }
 }
 

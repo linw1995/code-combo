@@ -23,11 +23,11 @@ use tracing::{debug, warn};
 
 use super::{
     Action, AnswerEvent, AskEvent, BotMessage, Combo, ComboAction, ComboEvent,
-    CommandPaletteAction, Component, Content, Event, Input, Message, Messages, Plain,
-    SessionAction, Tool, ToolAction, TranscriptMessage, shortcuts_desc,
+    CommandPaletteAction, Component, Event, Input, Message, Messages, Plain, SessionAction,
+    ShortcutHints, ShortcutHintsPanel, Tool, ToolAction, TranscriptMessage,
 };
 use crate::{
-    components::{CommandPalette, Persistable},
+    components::{CommandPalette, Content, Persistable},
     error::*,
     global::{self, State},
     session::{self, Session},
@@ -47,6 +47,8 @@ pub struct Chat<'a> {
     transcript: Messages,
     view: ViewMode,
     indicator: ThrobberState,
+    shortcut_hints: ShortcutHintsPanel,
+    prev_focus: Option<Focus>,
 
     token_schedule_session_save: Option<CancellationToken>,
     cancellation_guard: CancellationGuard,
@@ -114,6 +116,7 @@ enum Focus {
     InputBlur,
     Messages,
     CommandPalette,
+    ShortcutHints,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -201,6 +204,8 @@ impl Chat<'static> {
             transcript: Messages::default(),
             view: ViewMode::Chat,
             indicator: ThrobberState::default(),
+            shortcut_hints: ShortcutHintsPanel::default(),
+            prev_focus: None,
             token_schedule_session_save: None,
             cancellation_guard: CancellationGuard::default(),
         }
@@ -251,6 +256,9 @@ impl Chat<'static> {
         self.token_schedule_session_save = Some(token.clone());
 
         let mut state = self.state.get();
+        if state.focus == Focus::ShortcutHints {
+            state.focus = self.prev_focus.clone().unwrap_or_default();
+        }
         let messages = self.messages.save();
         let agent = self.agent.clone();
 
@@ -350,18 +358,21 @@ impl Chat<'static> {
     }
 
     fn update_focus(&mut self, new_focus: Focus) {
-        let focus = &self.state.focus;
-        if focus == &new_focus {
+        let focus = self.state.focus.clone();
+        if focus == new_focus {
             return;
         }
         debug!(?focus, ?new_focus, "update focus");
-        if focus == &Focus::Input {
+        if focus == Focus::Input {
             self.input.update(&Action::Blur);
         }
         if new_focus == Focus::Input {
             self.input.update(&Action::Focus);
         }
-        self.state.write().focus = new_focus
+        if focus == Focus::ShortcutHints && new_focus != Focus::ShortcutHints {
+            self.prev_focus = None;
+        }
+        self.state.write().focus = new_focus;
     }
 
     /// Combines pending ToolResults (e.g., User Cancelled) with user instructions.
@@ -470,27 +481,91 @@ impl Chat<'static> {
         global::trigger_schedule_session_save();
     }
 
+    fn focus_for_shortcut_hints(&self) -> Focus {
+        if self.state.focus == Focus::ShortcutHints {
+            self.prev_focus.clone().unwrap_or(Focus::InputBlur)
+        } else {
+            self.state.focus.clone()
+        }
+    }
+
+    fn open_shortcut_hints(&mut self) {
+        if self.state.focus == Focus::ShortcutHints {
+            return;
+        }
+        let prev_focus = self.state.focus.clone();
+        self.prev_focus = Some(prev_focus);
+        self.update_focus(Focus::ShortcutHints);
+        global::signal_dirty();
+    }
+
+    fn close_shortcut_hints(&mut self) {
+        if self.state.focus != Focus::ShortcutHints {
+            self.prev_focus = None;
+            return;
+        }
+        let prev_focus = self.prev_focus.take().unwrap_or(Focus::InputBlur);
+        self.update_focus(prev_focus);
+        global::signal_dirty();
+    }
+
+    fn input_shortcut_hints(&self) -> ShortcutHints {
+        self.input.shortcut_hints()
+    }
+
+    fn input_blur_shortcut_hints(&self) -> ShortcutHints {
+        let mut hints = ShortcutHints::default();
+        hints.push_visible(&[("Focus", "CR")]);
+        hints.push_visible(&[("Commands", "C-p")]);
+        hints.push_visible(&[("Up", "k"), ("Down", "j")]);
+        hints
+    }
+
+    fn chat_messages_shortcut_hints(&self) -> ShortcutHints {
+        let mut hints = self.messages.shortcut_hints();
+        if !self.messages.is_actionable() {
+            hints.push_visible(&[("Back", "Esc")]);
+        }
+        hints.push_visible(&[("Up", "k"), ("Down", "j")]);
+        hints.push_hidden(&[("Scroll Up", "C-y"), ("Down", "C-e")]);
+        hints.push_hidden(&[("Scroll+ Up", "C-u"), ("Down", "C-d")]);
+        hints
+    }
+
+    fn transcript_shortcut_hints(&self) -> ShortcutHints {
+        let mut hints = self.transcript.shortcut_hints();
+        hints.push_visible(&[("Back", "Esc")]);
+        hints.push_visible(&[("Up", "k"), ("Down", "j")]);
+        hints.push_hidden(&[("Scroll Up", "C-y"), ("Down", "C-e")]);
+        hints.push_hidden(&[("Scroll+ Up", "C-u"), ("Down", "C-d")]);
+        hints
+    }
+
+    fn current_shortcut_hints(&self) -> ShortcutHints {
+        let focus = self.focus_for_shortcut_hints();
+        match self.view {
+            ViewMode::Transcript => self.transcript_shortcut_hints(),
+            ViewMode::Chat => match focus {
+                Focus::Input => self.input_shortcut_hints(),
+                Focus::InputBlur => self.input_blur_shortcut_hints(),
+                Focus::Messages => self.chat_messages_shortcut_hints(),
+                Focus::CommandPalette | Focus::ShortcutHints => ShortcutHints::default(),
+            },
+        }
+    }
+
     fn input_block_with_dynamic_titles<'a>(&'a self, mut block: Block<'a>) -> Block<'a> {
         block = block.title_top(Line::from(""));
-        block = match self.state.focus {
-            Focus::Input => block
-                .title_top(shortcuts_desc(&[("Blur", "Esc")]))
-                .title_top(shortcuts_desc(&[("Submit", "CR")])),
-            Focus::InputBlur => block
-                .title_top(shortcuts_desc(&[("Focus", "CR")]))
-                .title_top(shortcuts_desc(&[("Commands", "C-p")]))
-                .title_top(shortcuts_desc(&[("Up", "k"), ("Down", "j")])),
-            Focus::Messages => {
-                block = self.messages.block_with_shortcuts_desc(block);
-                if !self.messages.is_actionable() {
-                    block = block.title_top(shortcuts_desc(&[("Back", "Esc")]));
-                }
-                block
-                    .title_top(shortcuts_desc(&[("Up", "k"), ("Down", "j")]))
-                    .title_top(shortcuts_desc(&[("Scroll Up", "C-y"), ("Down", "C-e")]))
-                    .title_top(shortcuts_desc(&[("Scroll+ Up", "C-u"), ("Down", "C-d")]))
-            }
-            Focus::CommandPalette => block,
+        let focus = self.focus_for_shortcut_hints();
+        let hints = match focus {
+            Focus::Input => self.input_shortcut_hints(),
+            Focus::InputBlur => self.input_blur_shortcut_hints(),
+            Focus::Messages => self.chat_messages_shortcut_hints(),
+            Focus::CommandPalette | Focus::ShortcutHints => ShortcutHints::default(),
+        };
+        block = match focus {
+            Focus::CommandPalette | Focus::ShortcutHints => block,
+            _ => self.shortcut_hints.decorate_block_top(block, &hints),
         };
         block = block
             .title_bottom(Line::from(""))
@@ -680,6 +755,10 @@ impl Persistable for Chat<'static> {
         let mut inst = Self::new(global::config_sync());
         let auto_accept_edits = state.auto_accept_edits;
 
+        if state.focus == Focus::ShortcutHints {
+            state.focus = Focus::InputBlur;
+        }
+
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current()
                 .block_on(inst.agent.restore_messages(&state.messages));
@@ -696,8 +775,12 @@ impl Persistable for Chat<'static> {
 
 impl Component for Chat<'static> {
     fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
-        let children: Vec<&mut dyn Component> =
-            vec![&mut self.input, &mut self.messages, &mut self.transcript];
+        let children: Vec<&mut dyn Component> = vec![
+            &mut self.input,
+            &mut self.messages,
+            &mut self.transcript,
+            &mut self.shortcut_hints,
+        ];
         Box::new(children.into_iter())
     }
 
@@ -805,6 +888,11 @@ impl Component for Chat<'static> {
         use KeyCode::*;
         use KeyModifiers as KM;
 
+        if self.state.focus == Focus::ShortcutHints {
+            self.close_shortcut_hints();
+            return;
+        }
+
         if matches!(key.code, BackTab) {
             if self.view == ViewMode::Chat {
                 self.toggle_auto_accept_edits();
@@ -849,6 +937,9 @@ impl Component for Chat<'static> {
             }
             return;
         }
+
+        // TODO: Too expensive - consider caching or lazy evaluation
+        let current_hints = self.current_shortcut_hints();
         match (focus, key.modifiers, key.code) {
             // Focus switching
             (Input, KM::NONE, Esc) => self.update_focus(InputBlur),
@@ -860,6 +951,12 @@ impl Component for Chat<'static> {
             (Messages, KM::NONE, Esc) if !self.messages.is_actionable() => {
                 self.messages.blur();
                 self.update_focus(Focus::InputBlur);
+            }
+            (InputBlur | Messages, KM::NONE, Char('?')) if current_hints.has_hidden() => {
+                self.open_shortcut_hints();
+            }
+            (ShortcutHints, _, _) => {
+                self.close_shortcut_hints();
             }
 
             // Inputing
@@ -1050,6 +1147,12 @@ impl Component for Chat<'static> {
             self.command_palette.draw(frame, area)?;
         }
 
+        if self.state.focus == Focus::ShortcutHints {
+            let hints = self.current_shortcut_hints();
+            self.shortcut_hints.set_hints(hints);
+            self.shortcut_hints.draw(frame, area)?;
+        }
+
         Ok(())
     }
 }
@@ -1082,11 +1185,10 @@ impl Chat<'static> {
         bottom_block = bottom_block
             .title_bottom(Line::from(""))
             .title_bottom(Line::from(" Transcript ").bold());
-        bottom_block = bottom_block
-            .title_bottom(shortcuts_desc(&[("Back", "Esc")]))
-            .title_bottom(shortcuts_desc(&[("Up", "k"), ("Down", "j")]))
-            .title_bottom(shortcuts_desc(&[("Scroll Up", "C-y"), ("Down", "C-e")]))
-            .title_bottom(shortcuts_desc(&[("Scroll+ Up", "C-u"), ("Down", "C-d")]));
+        let hints = self.transcript_shortcut_hints();
+        bottom_block = self
+            .shortcut_hints
+            .decorate_block_bottom(bottom_block, &hints);
         if let Some(line) = self.ctrl_c_reminder_line() {
             bottom_block = bottom_block.title_bottom(line);
         }

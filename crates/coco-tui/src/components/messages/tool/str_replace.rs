@@ -10,7 +10,7 @@ use ratatui::{
     prelude::Rect,
     style::{Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Wrap},
+    widgets::Wrap,
 };
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -18,7 +18,7 @@ use tracing::warn;
 use super::{Component, Content, ContentComponent};
 use crate::{
     actions::{Action, ToolAction},
-    components::{Persistable, code_highlight::CodeHighlight, shortcuts_desc},
+    components::{Persistable, ShortcutHints, code_highlight::CodeHighlight},
     error::Result,
     events::{AnswerEvent, AskEvent, Event},
     global::{self, State},
@@ -489,14 +489,15 @@ impl Content for StrReplace<'_> {
         state.display_state == DisplayState::Result && has_result_content(state)
     }
 
-    fn block_with_shortcuts_desc<'b>(&self, block: Block<'b>) -> Block<'b> {
+    fn shortcut_hints(&self) -> ShortcutHints {
         let state = self.state.read();
         if state.edit.is_some() {
-            return block
-                .title_top(shortcuts_desc(&[("Apply", "CR")]))
-                .title_top(shortcuts_desc(&[("Reject", "Esc")]))
-                .title_top(shortcuts_desc(&[("Hunk", "h/l")]))
-                .title_top(shortcuts_desc(&[("Context", "[/]")]));
+            let mut hints = ShortcutHints::default();
+            hints.push_visible(&[("Apply", "CR")]);
+            hints.push_visible(&[("Reject", "Esc")]);
+            hints.push_hidden(&[("Hunk", "h/l")]);
+            hints.push_hidden(&[("Context", "[/]")]);
+            return hints;
         }
 
         if state.display_state == DisplayState::Result && has_result_content(state) {
@@ -505,19 +506,18 @@ impl Content for StrReplace<'_> {
             } else {
                 ("Fold", "z")
             };
-            let block = if has_result_tabs(state) {
+            let mut hints = ShortcutHints::from_visible(&[toggle_text]);
+            if has_result_tabs(state) {
                 let view = match state.result_view {
                     ResultView::Applied => "Applied",
                     ResultView::Unapplied => "Unapplied",
                 };
-                block.title_top(shortcuts_desc(&[(view, "1/2")]))
-            } else {
-                block
-            };
-            return block.title_top(shortcuts_desc(&[toggle_text]));
+                hints.push_hidden(&[(view, "1/2")]);
+            }
+            return hints;
         }
 
-        block
+        ShortcutHints::default()
     }
 
     fn reminder_line(&self) -> Option<Line<'static>> {
