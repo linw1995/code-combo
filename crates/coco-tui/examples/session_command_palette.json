@@ -7,8 +7,16 @@
                 "shortcut": "<C-n>"
             },
             {
+                "name": "Transcript",
+                "shortcut": "<C-t>"
+            },
+            {
                 "name": "Switch Session",
                 "shortcut": "<C-s>"
+            },
+            {
+                "name": "Switch Theme",
+                "shortcut": "<C-l>"
             }
         ],
         "focus": 0

@@ -258,6 +258,8 @@ lazy_static! {
     };
 }
 
+pub const BUILTIN_THEME_NAMES: &[&str] = &["catppuccin_mocha", "catppuccin_latte"];
+
 pub fn use_builtin_theme(name: &str) -> &'static FinalizedTheme {
     match name {
         "catppuccin_mocha" => &CATPPUCCIN_MOCHA_THEME,

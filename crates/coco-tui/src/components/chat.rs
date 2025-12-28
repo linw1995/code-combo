@@ -742,6 +742,19 @@ impl Chat<'static> {
         debug!("New session started");
         global::signal_dirty();
     }
+
+    fn switch_theme(&mut self, theme: String) {
+        let mut config = global::config_sync();
+        if config.ui.theme == theme {
+            return;
+        }
+        config.ui.theme = theme.clone();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(global::set_config(config.clone()));
+        });
+
+        global::signal_dirty();
+    }
 }
 
 impl Persistable for Chat<'static> {
@@ -1114,6 +1127,10 @@ impl Component for Chat<'static> {
                         self.save_now();
                     }
                     self.restore_session_by_metadata(metadata.to_owned());
+                }
+                CommandPaletteAction::SwitchTheme(theme) => {
+                    self.update_focus(Focus::InputBlur);
+                    self.switch_theme(theme.to_owned());
                 }
             },
             Action::SubmitPrompt(prompt) => {

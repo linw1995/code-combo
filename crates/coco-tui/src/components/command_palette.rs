@@ -20,15 +20,18 @@ use crate::{
     error::Result,
     global::{self, State},
     session::{self, Session},
+    theme,
     widgets::Paragraph,
 };
 
 const COMMAND_NEW_SESSION: &str = "New Session";
 const COMMAND_TRANSCRIPT: &str = "Transcript";
 const COMMAND_SWITCH_SESSION: &str = "Switch Session";
+const COMMAND_SWITCH_THEME: &str = "Switch Theme";
 
 const BREADCRUMB_ROOT: &str = "Command Palette";
 const BREADCRUMB_SESSIONS: &str = "Sessions";
+const BREADCRUMB_THEMES: &str = "Themes";
 
 const SESSION_SWITCH_LIMIT: usize = 20;
 
@@ -42,6 +45,7 @@ pub struct Command {
 enum CommandPaletteMode {
     Main,
     SwitchSession,
+    SwitchTheme,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -248,6 +252,10 @@ impl CommandPalette {
                 self.open_main();
                 true
             }
+            CommandPaletteMode::SwitchTheme => {
+                self.open_main();
+                true
+            }
             CommandPaletteMode::Main => false,
         }
     }
@@ -265,6 +273,10 @@ impl CommandPalette {
             Command {
                 name: COMMAND_SWITCH_SESSION.to_string(),
                 shortcut: Some("<C-s>".to_string()),
+            },
+            Command {
+                name: COMMAND_SWITCH_THEME.to_string(),
+                shortcut: Some("<C-l>".to_string()),
             },
         ]
     }
@@ -302,6 +314,30 @@ impl CommandPalette {
             .collect();
 
         self.session_switch_entries = entries;
+        self.command_list.set_commands(commands);
+    }
+
+    fn open_theme_switcher(&mut self) {
+        self.mode = CommandPaletteMode::SwitchTheme;
+        self.breadcrumb.set_items(vec![
+            BREADCRUMB_ROOT.to_string(),
+            BREADCRUMB_THEMES.to_string(),
+        ]);
+
+        let mut themes: Vec<String> = theme::BUILTIN_THEME_NAMES
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
+        let current_theme = global::config_sync().ui.theme;
+        themes.sort_by_key(|name| name != &current_theme);
+        let commands = themes
+            .into_iter()
+            .map(|name| Command {
+                name,
+                shortcut: None,
+            })
+            .collect();
+
         self.command_list.set_commands(commands);
     }
 
@@ -360,6 +396,10 @@ impl CommandPalette {
                         self.open_session_switcher();
                         None
                     }
+                    Some(COMMAND_SWITCH_THEME) => {
+                        self.open_theme_switcher();
+                        None
+                    }
                     Some(COMMAND_NEW_SESSION) => Some(CommandPaletteAction::NewSession),
                     Some(COMMAND_TRANSCRIPT) => Some(CommandPaletteAction::Transcript),
                     Some(unknown) => {
@@ -379,6 +419,21 @@ impl CommandPalette {
                 if let Some(metadata) = metadata {
                     self.open_main();
                     Some(CommandPaletteAction::RestoreSession(metadata))
+                } else {
+                    None
+                }
+            }
+            CommandPaletteMode::SwitchTheme => {
+                let name = self
+                    .command_list
+                    .selected_command()
+                    .map(|command| command.name.clone());
+
+                if let Some(name) = name
+                    && theme::BUILTIN_THEME_NAMES.contains(&name.as_str())
+                {
+                    self.open_main();
+                    Some(CommandPaletteAction::SwitchTheme(name))
                 } else {
                     None
                 }
@@ -417,6 +472,12 @@ impl Component for CommandPalette {
             (KM::CONTROL, Char('s' | 'S')) => {
                 if self.mode == CommandPaletteMode::Main {
                     self.open_session_switcher();
+                }
+                None
+            }
+            (KM::CONTROL, Char('l' | 'L')) => {
+                if self.mode == CommandPaletteMode::Main {
+                    self.open_theme_switcher();
                 }
                 None
             }

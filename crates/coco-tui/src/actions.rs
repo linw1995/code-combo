@@ -78,6 +78,7 @@ pub enum CommandPaletteAction {
     NewSession,
     Transcript,
     RestoreSession(PersistentSessionMetadata),
+    SwitchTheme(String),
 }
 
 impl From<CommandPaletteAction> for Action {

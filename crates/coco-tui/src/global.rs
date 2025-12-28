@@ -17,6 +17,7 @@ use crate::{
 static EVENT_TX: OnceLock<UnboundedSender<Event>> = OnceLock::new();
 static ACTION_TX: OnceLock<UnboundedSender<Action>> = OnceLock::new();
 static WORKSPACE_DIR: OnceLock<PathBuf> = OnceLock::new();
+static CONFIG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 /// Initialize the global event and action senders.
 ///
@@ -68,6 +69,14 @@ pub async fn set_config(config: code_combo::Config) {
     let cell = CONFIG.get_or_init(Default::default);
     let mut cell = cell.lock().await;
     *cell = config;
+}
+
+pub fn set_config_path(path: PathBuf) {
+    let _ = CONFIG_PATH.set(path);
+}
+
+pub fn config_path() -> Option<PathBuf> {
+    CONFIG_PATH.get().cloned()
 }
 
 pub fn theme() -> &'static FinalizedTheme {
