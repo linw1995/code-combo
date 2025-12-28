@@ -1,15 +1,17 @@
+use std::iter;
+
 use coco_macro::ComponentExt;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     prelude::*,
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear},
 };
 use serde::{Deserialize, Serialize};
 
 use super::messages::shortcuts_desc;
 use crate::{
-    components::{Component, Persistable, ShortcutHints},
+    components::{Component, Persistable, ShortcutHints, shortcuts_desc_parts},
     error::Result,
     global::{self, State},
     session::{self, Session},
@@ -53,15 +55,8 @@ impl ShortcutHintsPanel {
             horizontal: 3,
             vertical: 1,
         };
-        let lines: Vec<Line> = self
-            .hints
-            .hidden
-            .iter()
-            .map(|group| shortcuts_desc(group))
-            .collect();
-
         let width = 120 + (margin_background.horizontal + margin_content.horizontal) * 2;
-        let height = (lines.len() as u16)
+        let height = (self.hints.hidden.len() as u16)
             .saturating_add(4 + margin_background.vertical * 2 + margin_content.vertical * 2)
             .min(area.height.saturating_sub(2))
             .max(1);
@@ -80,9 +75,32 @@ impl ShortcutHintsPanel {
         let block = Block::new().borders(Borders::BOTTOM);
         let block = block.title_bottom(Line::from(" Shortcuts ").bold());
         frame.render_widget(&block, area_content);
+
         let area_content = block.inner(area_content);
-        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: true });
-        frame.render_widget(paragraph, area_content);
+
+        let height = self.hints.hidden.len();
+        let constraints = iter::repeat_n(Constraint::Length(1), height);
+        let chunks = Layout::vertical(constraints).split(area_content);
+
+        let theme = global::theme();
+        for (shortcuts_hint, area) in self.hints.hidden.iter().zip(chunks.iter()) {
+            let (hint_spans, shortcuts_spans) = shortcuts_desc_parts(shortcuts_hint);
+            let [left, right] =
+                Layout::horizontal([Percentage(50), Percentage(50)]).areas(area.to_owned());
+
+            frame.render_widget(
+                Line::from(hint_spans)
+                    .style(theme.ui.shortcut_desc)
+                    .left_aligned(),
+                left,
+            );
+            frame.render_widget(
+                Line::from(shortcuts_spans)
+                    .style(theme.ui.shortcut)
+                    .right_aligned(),
+                right,
+            );
+        }
 
         Ok(())
     }

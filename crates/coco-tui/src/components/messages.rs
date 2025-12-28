@@ -491,22 +491,34 @@ impl ShortcutHints {
     }
 }
 
-pub(super) fn shortcuts_desc<'a>(pairs: &[ShortcutPair]) -> Line<'a> {
+pub(super) fn shortcuts_desc_parts<'a>(pairs: &[ShortcutPair]) -> (Vec<Span<'a>>, Vec<Span<'a>>) {
     let theme = global::theme();
     let descs: Vec<&str> = pairs.iter().map(|(desc, _)| *desc).collect();
-    let mut spans = vec![Span::styled(
+    let hint_spans = vec![Span::styled(
         format!(" {} ", descs.join("/")),
         theme.ui.shortcut_desc,
     )];
+
+    let mut shortcuts_spans = vec![];
     let last_idx = pairs.len() - 1;
     for (idx, (_, key)) in pairs.iter().enumerate() {
-        spans.push(Span::styled(format!("<{key}>"), theme.ui.shortcut));
+        shortcuts_spans.push(Span::styled(format!("<{key}>"), theme.ui.shortcut));
         if idx != last_idx {
-            spans.push(Span::raw("/"));
+            shortcuts_spans.push(Span::raw("/"));
         }
     }
-    spans.push(" ".into());
-    Line::from(spans)
+    shortcuts_spans.push(Span::raw(" "));
+    (hint_spans, shortcuts_spans)
+}
+
+pub(super) fn shortcuts_desc<'a>(pairs: &[ShortcutPair]) -> Line<'a> {
+    let (hint_spans, shortcut_spans) = shortcuts_desc_parts(pairs);
+    Line::from(
+        hint_spans
+            .into_iter()
+            .chain(shortcut_spans)
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// Find visible message index range using binary search
