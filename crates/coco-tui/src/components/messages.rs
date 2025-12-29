@@ -675,13 +675,17 @@ mod tests {
             "│        amet   ┃",
             "│               ┃",
         ]);
-        let border_style = theme().ui.message_border_inactive;
+        let theme = theme();
+        let base_style = theme.ui.chat_bg;
+        let area_list = Rect::new(0, 0, 15, 6);
+        expected.set_style(area_list, base_style);
+        let border_style = base_style.patch(theme.ui.message_border_inactive);
         expected.set_style(Rect::new(0, 0, 1, 6), border_style);
-        let scrollbar_style = theme().ui.scrollbar_track;
+        let scrollbar_style = theme.ui.scrollbar_track;
         expected.set_style(Rect::new(16, 0, 1, 2), scrollbar_style);
-        let role_style = theme().ui.user_role;
+        let role_style = base_style.patch(theme.ui.user_role);
         expected.set_style(Rect::new(1, 0, 7, 1), role_style);
-        let text_style = theme().ui.text;
+        let text_style = base_style.patch(theme.ui.text);
         expected.set_style(Rect::new(9, 0, 5, 1), text_style);
         expected.set_style(Rect::new(9, 1, 5, 1), text_style);
         expected.set_style(Rect::new(9, 2, 5, 1), text_style);
@@ -702,9 +706,10 @@ mod tests {
             "│        dolor  ┃",
             "│        sit    │",
         ]);
-        let border_style = theme().ui.message_border_inactive;
+        expected.set_style(area_list, base_style);
+        let border_style = base_style.patch(theme.ui.message_border_inactive);
         expected.set_style(Rect::new(0, 0, 1, 6), border_style);
-        let scrollbar_style = theme().ui.scrollbar_track;
+        let scrollbar_style = theme.ui.scrollbar_track;
         expected.set_style(Rect::new(16, 5, 1, 1), scrollbar_style);
         expected.set_style(Rect::new(1, 0, 7, 1), role_style);
         expected.set_style(Rect::new(1, 2, 7, 1), role_style);
@@ -748,13 +753,17 @@ mod tests {
             " │        amet   ┃",
             " │               ┃",
         ]);
-        let border_style = theme().ui.message_border_inactive;
+        let theme = theme();
+        let base_style = theme.ui.chat_bg;
+        let area_list = Rect::new(1, 1, 15, 6);
+        expected.set_style(area_list, base_style);
+        let border_style = base_style.patch(theme.ui.message_border_inactive);
         expected.set_style(Rect::new(1, 1, 1, 6), border_style);
-        let scrollbar_style = theme().ui.scrollbar_track;
+        let scrollbar_style = theme.ui.scrollbar_track;
         expected.set_style(Rect::new(17, 1, 1, 2), scrollbar_style);
-        let role_style = theme().ui.user_role;
+        let role_style = base_style.patch(theme.ui.user_role);
         expected.set_style(Rect::new(2, 1, 7, 1), role_style);
-        let text_style = theme().ui.text;
+        let text_style = base_style.patch(theme.ui.text);
         expected.set_style(Rect::new(10, 1, 5, 1), text_style);
         expected.set_style(Rect::new(10, 2, 5, 1), text_style);
         expected.set_style(Rect::new(10, 3, 5, 1), text_style);
@@ -776,9 +785,10 @@ mod tests {
             " │        dolor  ┃",
             " │        sit    │",
         ]);
-        let border_style = theme().ui.message_border_inactive;
+        expected.set_style(area_list, base_style);
+        let border_style = base_style.patch(theme.ui.message_border_inactive);
         expected.set_style(Rect::new(1, 1, 1, 6), border_style);
-        let scrollbar_style = theme().ui.scrollbar_track;
+        let scrollbar_style = theme.ui.scrollbar_track;
         expected.set_style(Rect::new(17, 6, 1, 1), scrollbar_style);
         expected.set_style(Rect::new(2, 1, 7, 1), role_style);
         expected.set_style(Rect::new(2, 3, 7, 1), role_style);
