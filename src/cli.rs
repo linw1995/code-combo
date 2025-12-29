@@ -14,6 +14,9 @@ pub enum ClientCommand {
         wrap_result: bool,
         command: Vec<String>,
     },
+    Mcp {
+        args: Vec<String>,
+    },
 }
 
 pub fn init_client_logging(program: &str, command: &ClientCommand) {
@@ -21,12 +24,17 @@ pub fn init_client_logging(program: &str, command: &ClientCommand) {
         ClientCommand::Metadata { .. } => "metadata",
         ClientCommand::Ask { .. } => "ask",
         ClientCommand::Record { .. } => "record",
+        ClientCommand::Mcp { .. } => "mcp",
     };
     let log_name = format!("{program}-{sub}");
     let _ = crate::logging::init_file_logging_best_effort(&log_name);
 }
 
-pub async fn handle_client_command(command: ClientCommand) -> Result<()> {
+pub async fn handle_client_command(
+    parent_command: &str,
+    command_name: &str,
+    command: ClientCommand,
+) -> Result<()> {
     match command {
         ClientCommand::Metadata { fields } => crate::cmd::handle_metadata(fields)
             .await
@@ -40,5 +48,8 @@ pub async fn handle_client_command(command: ClientCommand) -> Result<()> {
         } => crate::cmd::handle_record(wrap_result, command)
             .await
             .whatever_context("failed to handle record"),
+        ClientCommand::Mcp { args } => crate::cmd::handle_mcp(parent_command, command_name, args)
+            .await
+            .whatever_context("failed to handle mcp"),
     }
 }

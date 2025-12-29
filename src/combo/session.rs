@@ -9,9 +9,9 @@ use tokio::{
 };
 use tracing::{debug, warn};
 
-use crate::exec::StreamKind;
+use crate::{MCP_SOCKET_ENV, McpRequest, McpResponse, exec::StreamKind};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ClientMessage {
     Metadata(MetadataPayload),
@@ -19,14 +19,16 @@ pub enum ClientMessage {
     RecordChunk(RecordChunkPayload),
     RecordEnd(RecordEndPayload),
     Prompt(PromptPayload),
+    Mcp(McpRequest),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ServerMessage {
     RecordControl(RecordControl),
     PromptResponse(String),
     Metadata(MetadataResponse),
+    Mcp(McpResponse),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -145,7 +147,15 @@ impl SessionSocketClient {
     }
 
     pub async fn from_env() -> ClientResult<Option<Self>> {
-        match std::env::var_os("COCO_SESSION_SOCK") {
+        Self::from_env_key("COCO_SESSION_SOCK").await
+    }
+
+    pub async fn from_mcp_env() -> ClientResult<Option<Self>> {
+        Self::from_env_key(MCP_SOCKET_ENV).await
+    }
+
+    async fn from_env_key(key: &str) -> ClientResult<Option<Self>> {
+        match std::env::var_os(key) {
             Some(path) => Ok(Some(Self::connect(path).await?)),
             None => Ok(None),
         }
@@ -168,6 +178,14 @@ impl SessionSocketClient {
 
     pub async fn send_prompt(&self, payload: PromptPayload) -> ClientResult<()> {
         self.send_message(&ClientMessage::Prompt(payload)).await
+    }
+
+    pub async fn send_mcp_request(&self, payload: McpRequest) -> ClientResult<McpResponse> {
+        self.send_message(&ClientMessage::Mcp(payload)).await?;
+        match self.read_server_message().await? {
+            ServerMessage::Mcp(response) => Ok(response),
+            other => Err(SessionClientError::UnexpectedServerMessage { message: other }),
+        }
     }
 
     pub async fn begin_record(&self, payload: RecordStartPayload) -> ClientResult<RecordSession> {

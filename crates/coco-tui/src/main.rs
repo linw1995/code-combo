@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use code_combo::{
     Config,
     cli::{ClientCommand, handle_client_command, init_client_logging},
@@ -62,6 +62,11 @@ enum Commands {
         #[arg(required = true, trailing_var_arg = true)]
         command: Vec<String>,
     },
+    #[command(disable_help_flag = true)]
+    Mcp {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     #[command(subcommand)]
     Combo(ComboCommands),
 }
@@ -85,6 +90,7 @@ impl TryFrom<Commands> for ClientCommand {
                 wrap_result,
                 command,
             }),
+            Commands::Mcp { args } => Ok(ClientCommand::Mcp { args }),
             _ => Err(value),
         }
     }
@@ -93,7 +99,11 @@ impl TryFrom<Commands> for ClientCommand {
 #[snafu::report]
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut args = Args::parse();
+    let cmd = Args::command();
+    let program = cmd.get_name().to_string();
+    let matches = cmd.get_matches();
+    let command_name = matches.subcommand_name().unwrap_or("coco").to_string();
+    let mut args = Args::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
     if !args.prompt.is_empty() {
         ensure_whatever!(
             args.command.is_none(),
@@ -111,8 +121,8 @@ async fn main() -> Result<()> {
     if let Some(command) = args.command.take() {
         match ClientCommand::try_from(command) {
             Ok(command) => {
-                init_client_logging("coco", &command);
-                return handle_client_command(command)
+                init_client_logging(&program, &command);
+                return handle_client_command(&program, &command_name, command)
                     .await
                     .whatever_context("failed to handle client command");
             }
@@ -130,11 +140,10 @@ async fn main() -> Result<()> {
         args.config_path
             .replace(config_dir.join("config.toml").to_string_lossy().to_string());
     }
-    let config_path = args.config_path.take().unwrap();
-    let mut config =
-        Config::parse_file(&config_path).whatever_context("failed to parse config file")?;
+    let mut config = Config::parse_file(&args.config_path.unwrap())
+        .whatever_context("failed to parse config file")?;
+
     config.config_dir = config_dir;
-    global::set_config_path(PathBuf::from(&config_path));
     global::set_config(config.clone()).await;
 
     let mut root_view = Chat::new(config);
@@ -149,7 +158,12 @@ async fn main() -> Result<()> {
                 app.send_action(ComboAction::Execute { name }.into());
             }
         },
-        Some(Commands::Metadata { .. } | Commands::Ask { .. } | Commands::Record { .. }) => {
+        Some(
+            Commands::Metadata { .. }
+            | Commands::Ask { .. }
+            | Commands::Record { .. }
+            | Commands::Mcp { .. },
+        ) => {
             panic!("combo command should have been handled earlier");
         }
         None => {

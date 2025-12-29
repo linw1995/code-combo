@@ -15,7 +15,7 @@ code-combo = { path = "../.." }
 coco-macro = { path = "../coco-macro/" }
 
 # CLI
-clap = "4.5.49"
+clap.workspace = true
 
 # Error handling
 snafu = { workspace = true, features = ["backtrace"] }

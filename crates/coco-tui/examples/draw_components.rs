@@ -47,11 +47,10 @@ async fn main() -> Result<()> {
         args.config_path
             .replace(config_dir.join("config.toml").to_string_lossy().to_string());
     }
-    let config_path = args.config_path.take().unwrap();
-    let mut config =
-        Config::parse_file(&config_path).whatever_context("failed to parse config file")?;
+    let mut config = Config::parse_file(&args.config_path.take().unwrap())
+        .whatever_context("failed to parse config file")?;
+
     config.config_dir = config_dir;
-    global::set_config_path(PathBuf::from(&config_path));
     global::set_config(config.clone()).await;
 
     let component: Box<dyn Component> = match args.command {

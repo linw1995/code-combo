@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use code_combo::{
     cli::{ClientCommand, handle_client_command, init_client_logging},
     version,
@@ -33,12 +33,21 @@ enum Commands {
         #[arg(required = true, trailing_var_arg = true)]
         command: Vec<String>,
     },
+    #[command(disable_help_flag = true)]
+    Mcp {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[snafu::report]
 #[tokio::main]
 async fn main() -> code_combo::Result<()> {
-    let args = Args::parse();
+    let cmd = Args::command();
+    let program = cmd.get_name().to_string();
+    let matches = cmd.get_matches();
+    let command_name = matches.subcommand_name().unwrap_or("coco").to_string();
+    let args = Args::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
     let command = match args.command {
         Commands::Metadata { fields } => ClientCommand::Metadata { fields },
         Commands::Ask { prompt } => ClientCommand::Ask { prompt },
@@ -49,8 +58,9 @@ async fn main() -> code_combo::Result<()> {
             wrap_result,
             command,
         },
+        Commands::Mcp { args } => ClientCommand::Mcp { args },
     };
 
-    init_client_logging("coco", &command);
-    handle_client_command(command).await
+    init_client_logging(&program, &command);
+    handle_client_command(&program, &command_name, command).await
 }

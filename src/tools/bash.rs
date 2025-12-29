@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -6,9 +6,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 use super::{ExecuteResult, Final, Input, Tool};
-use crate::exec::{ChunkConfig, ExecCommand, OutputChunk, ProcessEvent, StreamKind};
+use crate::{
+    Config, MCP_SOCKET_ENV, McpSocketServer, SessionEnv, default_config_dir,
+    exec::{ChunkConfig, ExecCommand, OutputChunk, ProcessEvent, StreamKind},
+};
 
 #[derive(Default)]
 pub struct BashTool {}
@@ -95,7 +99,15 @@ where
     let BashInput { command, timeout } = input;
 
     let argv = vec!["bash".to_string(), "-c".to_string(), command];
+    let (envs, mcp_guard) = match prepare_mcp_env().await {
+        Ok(value) => value,
+        Err(err) => {
+            warn!(?err, "Failed to prepare MCP env for bash tool");
+            (Vec::new(), None)
+        }
+    };
     let mut proc = ExecCommand::from_argv(argv)
+        .envs(envs)
         .spawn_chunked(ChunkConfig {
             interval: Duration::ZERO,
         })
@@ -163,6 +175,10 @@ where
         output.exit_code = status.code().unwrap_or(255) as u8;
     }
 
+    if let Some(mcp_guard) = mcp_guard {
+        mcp_guard.shutdown().await;
+    }
+
     Ok(output)
 }
 
@@ -190,6 +206,64 @@ impl Tool for BashTool {
     async fn execute<'a>(&self, input: Input<'a>) -> ExecuteResult {
         run_bash_chunked(input, CancellationToken::new(), |_| {}).await
     }
+}
+
+struct McpEnvGuard {
+    _env: SessionEnv,
+    server: McpSocketServer,
+}
+
+impl McpEnvGuard {
+    async fn shutdown(self) {
+        self.server.shutdown().await;
+    }
+}
+
+async fn prepare_mcp_env() -> Result<(Vec<(String, String)>, Option<McpEnvGuard>), String> {
+    let (config_dir, config_path) = resolve_config_path();
+    if !config_path.exists() {
+        return Ok((Vec::new(), None));
+    }
+    let mut config = Config::parse_file(config_path.to_string_lossy().to_string().as_ref())
+        .map_err(|err| format!("Failed to parse config file: {err}"))?;
+    config.config_dir = config_dir;
+    let Some(mut mcp) = config.mcp else {
+        return Ok((Vec::new(), None));
+    };
+
+    let env = SessionEnv::builder()
+        .socket_env_name(MCP_SOCKET_ENV)
+        .socket_name("coco-mcp.sock")
+        .build()
+        .map_err(|err| format!("Failed to build mcp env: {err}"))?;
+    mcp.socket_path = env.socket_path().to_path_buf();
+    let server = McpSocketServer::start(mcp, &config.config_dir)
+        .await
+        .map_err(|err| format!("Failed to start mcp server: {err}"))?;
+    let envs = env
+        .envs()
+        .into_iter()
+        .map(|(key, value)| {
+            (
+                key.to_string_lossy().to_string(),
+                value.to_string_lossy().to_string(),
+            )
+        })
+        .collect();
+    Ok((envs, Some(McpEnvGuard { _env: env, server })))
+}
+
+fn resolve_config_path() -> (PathBuf, PathBuf) {
+    if let Some(path) = std::env::var_os("COCO_CONFIG_PATH") {
+        let path = PathBuf::from(path);
+        let config_dir = path
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(default_config_dir);
+        return (config_dir, path);
+    }
+    let config_dir = default_config_dir();
+    (config_dir.clone(), config_dir.join("config.toml"))
 }
 
 #[cfg(test)]

@@ -1,10 +1,12 @@
 mod env;
+mod mcp;
 mod provider;
 mod ui;
 
 use std::path::PathBuf;
 
 pub use env::EnvString;
+pub use mcp::{McpConfig, McpServerConfig};
 pub use provider::{ProviderConfig, ProviderKind};
 pub use ui::{MarkdownRenderEngine, UI};
 
@@ -16,6 +18,8 @@ pub struct Config {
     pub allow_tools: Option<Vec<String>>,
     #[serde(default)]
     pub deny_tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub mcp: Option<McpConfig>,
 
     #[serde(skip)]
     pub config_dir: PathBuf,
@@ -69,6 +73,7 @@ mod tests {
         let config: Config = toml::from_str(&base_config()).expect("parse config");
         assert!(config.allow_tools.is_none());
         assert!(config.deny_tools.is_none());
+        assert!(config.mcp.is_none());
     }
 
     #[test]
@@ -83,5 +88,21 @@ mod tests {
         let config_str = format!("deny_tools = []\n{}", base_config());
         let config: Config = toml::from_str(&config_str).expect("parse config");
         assert_eq!(config.deny_tools, Some(Vec::new()));
+    }
+
+    #[test]
+    fn parse_config_with_mcp_defaults() {
+        let config_str = format!(
+            "[mcp]\n\n[[mcp.servers]]\nname = \"demo\"\ncommand = \"echo\"\n{}\n",
+            base_config()
+        );
+        let config: Config = toml::from_str(&config_str).expect("parse config");
+        let mcp = config.mcp.expect("mcp is present");
+        assert_eq!(mcp.socket_path.to_string_lossy(), "coco-mcp.sock");
+        assert_eq!(mcp.request_timeout_ms, 10_000);
+        assert_eq!(mcp.idle_ttl_ms, 60_000);
+        assert_eq!(mcp.servers.len(), 1);
+        assert_eq!(mcp.servers[0].name, "demo");
+        assert_eq!(mcp.servers[0].command, "echo");
     }
 }
