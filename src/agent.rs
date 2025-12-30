@@ -53,6 +53,10 @@ impl Agent {
         self.messages.lock().await.clone()
     }
 
+    pub async fn append_message(&self, message: Message) {
+        self.messages.lock().await.push(message);
+    }
+
     pub async fn restore_messages(&mut self, messages: &[Message]) {
         *self.messages.lock().await = messages.to_vec();
     }

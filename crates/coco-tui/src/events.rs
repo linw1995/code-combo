@@ -66,6 +66,9 @@ pub enum ComboEvent {
     Output { name: String, chunk: OutputChunk },
     Executed { name: String, starter: Starter },
 
+    ReplyToolUse { tool_use: ToolUse },
+    ReplyToolError { message: String },
+
     NotFound { name: String },
     Cancelled { name: Option<String> },
 }

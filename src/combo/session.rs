@@ -82,6 +82,16 @@ pub struct RecordEndPayload {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PromptPayload {
     pub prompt: String,
+    #[serde(default)]
+    pub reply: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schemas: Vec<PromptSchema>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PromptSchema {
+    pub name: String,
+    pub description: String,
 }
 
 #[derive(Debug, Snafu)]
@@ -168,6 +178,14 @@ impl SessionSocketClient {
 
     pub async fn send_prompt(&self, payload: PromptPayload) -> ClientResult<()> {
         self.send_message(&ClientMessage::Prompt(payload)).await
+    }
+
+    pub async fn send_prompt_with_response(&self, payload: PromptPayload) -> ClientResult<String> {
+        self.send_message(&ClientMessage::Prompt(payload)).await?;
+        match self.read_server_message().await? {
+            ServerMessage::PromptResponse(response) => Ok(response),
+            other => Err(SessionClientError::UnexpectedServerMessage { message: other }),
+        }
     }
 
     pub async fn begin_record(&self, payload: RecordStartPayload) -> ClientResult<RecordSession> {
@@ -498,6 +516,52 @@ mod tests {
 
         let response = send_task.await.whatever_context("failed to join")?;
         assert!(!response.discovery);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[snafu::report]
+    async fn send_prompt_with_response_over_socket() -> Result<()> {
+        let (_dir, socket_path) = unique_socket_path()?;
+        let server = SessionSocketServer::bind(&socket_path)
+            .await
+            .whatever_context("failed to bind socket")?;
+
+        let payload = PromptPayload {
+            prompt: "Hello".to_string(),
+            reply: true,
+            schemas: vec![PromptSchema {
+                name: "message".to_string(),
+                description: "reply message".to_string(),
+            }],
+        };
+        let client = SessionSocketClient::connect(&socket_path)
+            .await
+            .whatever_context("failed to connect socket path")?;
+
+        let send_payload = payload.clone();
+        let send_task = tokio::spawn(async move {
+            client
+                .send_prompt_with_response(send_payload)
+                .await
+                .expect("send prompt with response")
+        });
+
+        let mut conn = server.accept().await.whatever_context("failed to accept")?;
+        let event = conn
+            .read_client_message()
+            .await
+            .whatever_context("failed to read client message")?;
+        assert_eq!(event, ClientMessage::Prompt(payload));
+
+        let response = r#"{"message":"ok"}"#.to_string();
+        conn.send_server_message(&ServerMessage::PromptResponse(response.clone()))
+            .await
+            .whatever_context("failed to send prompt response")?;
+
+        let received = send_task.await.whatever_context("failed to join")?;
+        assert_eq!(received, response);
 
         Ok(())
     }

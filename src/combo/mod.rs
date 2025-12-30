@@ -76,10 +76,11 @@ mod starter;
 
 pub use discovery::*;
 pub use session::{
-    ClientMessage, ControlAction, MetadataPayload, MetadataResponse, PromptPayload,
+    ClientMessage, ControlAction, MetadataPayload, MetadataResponse, PromptPayload, PromptSchema,
     RecordChunkPayload, RecordControl, RecordEndPayload, RecordSession, RecordStartPayload,
     ServerMessage, SessionClientError, SessionServerError, SessionSocketClient,
     SessionSocketServer,
 };
 pub use session_env::{SessionEnv, SessionEnvBuilder, SessionEnvError};
+pub use starter::{PromptRequest, PromptResponder};
 pub use starter::{Starter, StarterCommand, StarterError, StarterEvent, StarterExecution};

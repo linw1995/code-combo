@@ -59,6 +59,18 @@ impl<'a> Raw<'a> {
             widget,
         }
     }
+
+    pub fn new_readonly(tool_use: ToolUse) -> Self {
+        let widget = generate_widget(&tool_use, &None);
+        Self {
+            state: State::new(Inner {
+                tool_use,
+                is_actionable: false,
+                output: None,
+            }),
+            widget,
+        }
+    }
 }
 
 impl Persistable for Raw<'static> {

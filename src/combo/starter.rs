@@ -18,7 +18,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     ClientMessage, Combo, ComboMetadata, ComboMode, ControlAction, Instruction, MetadataPayload,
-    MetadataResponse, RecordControl, RecordEndPayload, ServerMessage, SessionEnv,
+    MetadataResponse, PromptSchema, RecordControl, RecordEndPayload, ServerMessage, SessionEnv,
     SessionSocketServer, StreamKind,
     exec::{ChunkConfig, ExecCommand, OutputChunk, ProcessEvent},
 };
@@ -49,6 +49,16 @@ pub enum StarterEvent {
     Cancelled,
     Failed { reason: String },
 }
+
+#[derive(Debug)]
+pub struct PromptRequest {
+    pub prompt: String,
+    pub schemas: Vec<PromptSchema>,
+    pub instructions: Vec<Instruction>,
+    pub response_tx: oneshot::Sender<Result<String, String>>,
+}
+
+pub type PromptResponder = mpsc::UnboundedSender<PromptRequest>;
 
 #[derive(Default, Debug)]
 struct SessionState {
@@ -131,6 +141,7 @@ pub struct StarterCommand {
     envs: Vec<(String, String)>,
     discovery: bool,
     session_env: Option<SessionEnv>,
+    prompt_responder: Option<PromptResponder>,
 }
 
 impl StarterCommand {
@@ -141,6 +152,7 @@ impl StarterCommand {
             envs: Vec::new(),
             discovery: false,
             session_env: None,
+            prompt_responder: None,
         }
     }
 
@@ -181,6 +193,11 @@ impl StarterCommand {
         self
     }
 
+    pub fn prompt_responder(mut self, prompt_responder: PromptResponder) -> Self {
+        self.prompt_responder = Some(prompt_responder);
+        self
+    }
+
     pub fn execute(self) -> StarterExecution {
         execute_command(
             self.command,
@@ -188,6 +205,7 @@ impl StarterCommand {
             self.envs,
             self.discovery,
             self.session_env,
+            self.prompt_responder,
         )
     }
 }
@@ -222,6 +240,10 @@ fn parse_combo(command: &str, text: &str) -> Combo {
 }
 
 fn record_to_instruction(record: RecordedCommand) -> Instruction {
+    record_to_instruction_ref(&record)
+}
+
+fn record_to_instruction_ref(record: &RecordedCommand) -> Instruction {
     let mut sections = vec![];
     if !record.stdout.is_empty() {
         sections.push(record.stdout.join("\n"));
@@ -284,6 +306,7 @@ fn execute_command(
     envs: Vec<(String, String)>,
     discovery: bool,
     session_env: Option<SessionEnv>,
+    prompt_responder: Option<PromptResponder>,
 ) -> StarterExecution {
     let session_env_envs = session_env
         .as_ref()
@@ -303,8 +326,9 @@ fn execute_command(
 
     let join_handle = task::spawn(async move {
         let _session_env_guard = session_env;
+        let prompt_responder = prompt_responder;
         let mut session_server = match _session_env_guard.as_ref() {
-            Some(env) => match spawn_session_server(env, discovery).await {
+            Some(env) => match spawn_session_server(env, discovery, prompt_responder).await {
                 Ok(task) => Some(task),
                 Err(error) => {
                     event_tx
@@ -571,6 +595,7 @@ impl SessionServerTask {
 async fn spawn_session_server(
     env: &SessionEnv,
     discovery: bool,
+    prompt_responder: Option<PromptResponder>,
 ) -> Result<SessionServerTask, StarterError> {
     let path = env.socket_path().to_path_buf();
     if path.exists() {
@@ -583,7 +608,7 @@ async fn spawn_session_server(
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     Ok(SessionServerTask {
         handle: tokio::spawn(async move {
-            let rv = run_session_server(server, discovery, shutdown_rx).await;
+            let rv = run_session_server(server, discovery, prompt_responder, shutdown_rx).await;
             match &rv {
                 Ok(state) => info!(?state, "succeed to run session server"),
                 Err(err) => warn!(?err, "failed to run session server"),
@@ -597,6 +622,7 @@ async fn spawn_session_server(
 async fn run_session_server(
     server: SessionSocketServer,
     discovery: bool,
+    prompt_responder: Option<PromptResponder>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<SessionState, StarterError> {
     let mut state = SessionState::default();
@@ -745,7 +771,68 @@ async fn run_session_server(
                         }
                         .build());
                     }
-                    if !discovery {
+                    if payload.reply {
+                        if discovery {
+                            return Err(InvalidSnafu {
+                                reason: "prompt reply is not allowed during discovery".to_string(),
+                            }
+                            .build());
+                        }
+                        if payload.schemas.is_empty() {
+                            return Err(InvalidSnafu {
+                                reason: "prompt reply requires schemas".to_string(),
+                            }
+                            .build());
+                        }
+                        let responder = prompt_responder.as_ref().ok_or_else(|| {
+                            InvalidSnafu {
+                                reason: "prompt responder is not configured".to_string(),
+                            }
+                            .build()
+                        })?;
+                        let (response_tx, response_rx) = oneshot::channel();
+                        let instructions = state
+                            .items
+                            .iter()
+                            .map(|item| match item {
+                                SessionItem::Record(record) => record_to_instruction_ref(record),
+                                SessionItem::Prompt(prompt) => Instruction::Text(prompt.clone()),
+                            })
+                            .collect::<Vec<_>>();
+                        responder
+                            .send(PromptRequest {
+                                prompt: payload.prompt,
+                                schemas: payload.schemas,
+                                instructions,
+                                response_tx,
+                            })
+                            .map_err(|_| {
+                                InvalidSnafu {
+                                    reason: "prompt responder is not available".to_string(),
+                                }
+                                .build()
+                            })?;
+                        let response = response_rx.await.map_err(|_| {
+                            InvalidSnafu {
+                                reason: "prompt responder dropped response".to_string(),
+                            }
+                            .build()
+                        })?;
+                        let response = response.map_err(|err| {
+                            InvalidSnafu {
+                                reason: format!("prompt responder failed: {err}"),
+                            }
+                            .build()
+                        })?;
+                        conn.send_server_message(&ServerMessage::PromptResponse(response))
+                            .await
+                            .map_err(|err| {
+                                InvalidSnafu {
+                                    reason: format!("failed to send prompt response: {err}"),
+                                }
+                                .build()
+                            })?;
+                    } else if !discovery {
                         state.items.push(SessionItem::Prompt(payload.prompt));
                     }
                     first_message = false;
@@ -1039,7 +1126,7 @@ mod tests {
     #[tokio::test]
     async fn discovery_server_interrupts_record() -> Result<(), Box<dyn std::error::Error>> {
         let session_env = session_env_with_coco();
-        let server = spawn_session_server(&session_env, true).await?;
+        let server = spawn_session_server(&session_env, true, None).await?;
         let client = SessionSocketClient::connect(session_env.socket_path()).await?;
 
         let _ = client
@@ -1071,7 +1158,7 @@ mod tests {
     #[tokio::test]
     async fn discovery_server_accepts_metadata_once() -> Result<(), Box<dyn std::error::Error>> {
         let session_env = session_env_with_coco();
-        let server = spawn_session_server(&session_env, true).await?;
+        let server = spawn_session_server(&session_env, true, None).await?;
         let client = SessionSocketClient::connect(session_env.socket_path()).await?;
 
         let response = client
