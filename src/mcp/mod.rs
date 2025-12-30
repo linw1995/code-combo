@@ -548,8 +548,11 @@ async fn handle_request(manager: std::sync::Arc<McpManager>, request: McpRequest
 }
 
 #[cfg(test)]
-mod tests {
-    use std::{path::PathBuf, sync::Arc};
+pub(crate) mod tests {
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
 
     use hyper::server::conn::http1;
     use hyper_util::{rt::TokioIo, service::TowerToHyperService};
@@ -567,8 +570,10 @@ mod tests {
         },
     };
     use serde::Deserialize;
-    use snafu::ResultExt;
+    use snafu::prelude::*;
     use tokio::net::TcpListener;
+    use tokio_util::sync::CancellationToken;
+    use tracing::{debug, warn};
 
     use crate::{McpServerConfig, error::Result};
 
@@ -598,6 +603,11 @@ mod tests {
         fn echo(&self, Parameters(EchoRequest { message }): Parameters<EchoRequest>) -> String {
             format!("echo: {message}")
         }
+
+        #[tool(description = "Ping the server")]
+        fn ping(&self) -> String {
+            "pong".to_string()
+        }
     }
 
     #[tool_handler]
@@ -611,14 +621,14 @@ mod tests {
         }
     }
 
-    struct TestHttpServer {
+    pub(crate) struct TestHttpServer {
         base_url: String,
         shutdown: CancellationToken,
         join_handle: Option<tokio::task::JoinHandle<()>>,
     }
 
     impl TestHttpServer {
-        async fn start() -> Result<Self> {
+        pub(crate) async fn start() -> Result<Self> {
             let session_manager = Arc::new(LocalSessionManager::default());
             let service: StreamableHttpService<TestMcpServer, LocalSessionManager> =
                 StreamableHttpService::new(
@@ -664,11 +674,15 @@ mod tests {
             })
         }
 
-        async fn shutdown(mut self) {
+        pub(crate) async fn shutdown(mut self) {
             self.shutdown.cancel();
             if let Some(handle) = self.join_handle.take() {
                 let _ = handle.await;
             }
+        }
+
+        pub(crate) fn base_url(&self) -> &str {
+            &self.base_url
         }
     }
 
@@ -681,7 +695,7 @@ mod tests {
         }
     }
 
-    fn test_config(server_name: &str, description: Option<&str>) -> McpConfig {
+    pub(crate) fn test_config(server_name: &str, description: Option<&str>) -> McpConfig {
         McpConfig {
             socket_path: PathBuf::from("mcp.sock"),
             request_timeout_ms: 5_000,
@@ -697,7 +711,7 @@ mod tests {
         }
     }
 
-    async fn install_peer(
+    pub(crate) async fn install_peer(
         manager: &McpManager,
         server_name: &str,
         service: RunningService<RoleClient, ()>,
@@ -714,11 +728,161 @@ mod tests {
         );
     }
 
-    async fn remove_peer(manager: &McpManager, server_name: &str) {
+    pub(crate) async fn remove_peer(manager: &McpManager, server_name: &str) {
         let entry = manager.clients.lock().await.remove(server_name);
         if let Some(entry) = entry {
             let _ = entry.service.cancel().await;
         }
+    }
+
+    pub(crate) struct TestMcpSocketServer {
+        socket_path: PathBuf,
+        shutdown: CancellationToken,
+        join_handle: Option<tokio::task::JoinHandle<()>>,
+        _temp_dir: tempfile::TempDir,
+    }
+
+    impl TestMcpSocketServer {
+        pub(crate) async fn start(manager: Arc<McpManager>) -> Result<Self> {
+            let (_temp_dir, socket_path) = unique_socket_path()?;
+            if socket_path.exists() {
+                let _ = std::fs::remove_file(&socket_path);
+            }
+            let server = SessionSocketServer::bind(&socket_path)
+                .await
+                .whatever_context("failed to bind mcp socket")?;
+            let shutdown = CancellationToken::new();
+            let join_handle = tokio::spawn({
+                let shutdown = shutdown.clone();
+                async move {
+                    loop {
+                        let accept = tokio::select! {
+                            _ = shutdown.cancelled() => break,
+                            accept = server.accept() => accept,
+                        };
+                        let mut conn = match accept {
+                            Ok(conn) => conn,
+                            Err(err) => {
+                                warn!(?err, "failed to accept mcp connection");
+                                continue;
+                            }
+                        };
+                        let manager = manager.clone();
+                        tokio::spawn(async move {
+                            if let Err(err) = handle_connection(&mut conn, manager).await {
+                                debug!(?err, "mcp connection closed");
+                            }
+                        });
+                    }
+                }
+            });
+
+            Ok(Self {
+                socket_path,
+                shutdown,
+                join_handle: Some(join_handle),
+                _temp_dir,
+            })
+        }
+
+        pub(crate) fn socket_path(&self) -> &Path {
+            &self.socket_path
+        }
+
+        pub(crate) async fn shutdown(mut self) {
+            self.shutdown.cancel();
+            if let Some(handle) = self.join_handle.take() {
+                let _ = handle.await;
+            }
+            let _ = std::fs::remove_file(&self.socket_path);
+        }
+    }
+
+    impl Drop for TestMcpSocketServer {
+        fn drop(&mut self) {
+            self.shutdown.cancel();
+            if let Some(handle) = self.join_handle.take() {
+                handle.abort();
+            }
+            let _ = std::fs::remove_file(&self.socket_path);
+        }
+    }
+
+    pub(crate) struct TestDropGuard {
+        actions: Vec<TestDropAction>,
+    }
+
+    enum TestDropAction {
+        Peer {
+            manager: Arc<McpManager>,
+            server_name: String,
+        },
+        HttpServer(TestHttpServer),
+        SocketServer(TestMcpSocketServer),
+    }
+
+    impl TestDropGuard {
+        pub(crate) fn new() -> Self {
+            Self {
+                actions: Vec::new(),
+            }
+        }
+
+        pub(crate) fn add_peer(
+            &mut self,
+            manager: Arc<McpManager>,
+            server_name: impl Into<String>,
+        ) {
+            self.actions.push(TestDropAction::Peer {
+                manager,
+                server_name: server_name.into(),
+            });
+        }
+
+        pub(crate) fn add_http_server(&mut self, server: TestHttpServer) {
+            self.actions.push(TestDropAction::HttpServer(server));
+        }
+
+        pub(crate) fn add_socket_server(&mut self, server: TestMcpSocketServer) {
+            self.actions.push(TestDropAction::SocketServer(server));
+        }
+
+        pub(crate) async fn shutdown(mut self) {
+            // Unwind in reverse registration order to avoid dependency issues.
+            while let Some(action) = self.actions.pop() {
+                action.shutdown().await;
+            }
+        }
+    }
+
+    impl TestDropAction {
+        async fn shutdown(self) {
+            match self {
+                TestDropAction::Peer {
+                    manager,
+                    server_name,
+                } => {
+                    remove_peer(&manager, &server_name).await;
+                }
+                TestDropAction::HttpServer(server) => server.shutdown().await,
+                TestDropAction::SocketServer(server) => server.shutdown().await,
+            }
+        }
+    }
+
+    fn unique_socket_path() -> Result<(tempfile::TempDir, PathBuf)> {
+        let dir = tempfile::Builder::new()
+            .prefix("coco-mcp-")
+            .tempdir_in(std::env::temp_dir())
+            .whatever_context("failed to create tempdir")?;
+        let path = dir
+            .path()
+            .join(format!("{}.sock", uuid::Uuid::new_v4().as_simple()));
+        ensure_whatever!(
+            path.to_string_lossy().len() < 100,
+            "socket path length must be less than SUN_LEN"
+        );
+        Ok((dir, path))
     }
 
     #[tokio::test]
@@ -769,21 +933,36 @@ mod tests {
     #[snafu::report]
     async fn list_tools_and_call_tool_over_http() -> Result<()> {
         let server = TestHttpServer::start().await?;
+        let server_url = server.base_url().to_string();
         let config = test_config("test", Some("Test server"));
-        let manager = McpManager::new(config);
+        let manager = Arc::new(McpManager::new(config));
+        let mut guard = TestDropGuard::new();
+        guard.add_http_server(server);
 
-        let transport = StreamableHttpClientTransport::from_uri(server.base_url.clone());
+        let transport = StreamableHttpClientTransport::from_uri(server_url);
         let service = ().serve(transport).await.whatever_context("failed to connect to server")?;
         install_peer(&manager, "test", service).await;
+        guard.add_peer(manager.clone(), "test");
 
         let tools = manager
             .list_tools("test", None)
             .await
             .whatever_context("failed to list tools")?;
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "echo");
+        assert_eq!(tools.len(), 2);
         assert!(
-            tools[0].input_schema.get("properties").is_some(),
+            tools.iter().any(|tool| tool.name == "echo"),
+            "echo tool should be listed"
+        );
+        assert!(
+            tools.iter().any(|tool| tool.name == "ping"),
+            "ping tool should be listed"
+        );
+        let echo_tool = tools
+            .iter()
+            .find(|tool| tool.name == "echo")
+            .expect("echo tool should exist");
+        assert!(
+            echo_tool.input_schema.get("properties").is_some(),
             "echo tool schema should include properties"
         );
 
@@ -807,8 +986,7 @@ mod tests {
             .expect("call_tool result should include text content");
         assert_eq!(text, "echo: hello");
 
-        remove_peer(&manager, "test").await;
-        server.shutdown().await;
+        guard.shutdown().await;
         Ok(())
     }
 

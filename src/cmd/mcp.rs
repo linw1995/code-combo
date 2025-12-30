@@ -259,7 +259,118 @@ async fn connect_from_default_config() -> Result<Option<SessionSocketClient>> {
 
 #[cfg(test)]
 mod tests {
+    use std::{env, path::PathBuf, sync::Arc};
+
+    use indoc::indoc;
+    use rmcp::{service::ServiceExt, transport::StreamableHttpClientTransport};
+    use snafu::prelude::*;
+    use tokio::process::Command;
+
+    use crate::mcp::tests::{TestDropGuard, TestHttpServer, TestMcpSocketServer, install_peer};
+    use crate::{McpConfig, McpManager, McpServerConfig, SessionSocketClient};
+
     use super::*;
+
+    fn resolve_coco_bin() -> Result<PathBuf> {
+        let target_dir = env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
+        let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+        let mut path = target_dir.join(profile).join("coco");
+        if cfg!(windows) {
+            path.set_extension("exe");
+        }
+        ensure_whatever!(path.exists(), "coco binary not found at {path:?}");
+        Ok(path)
+    }
+
+    async fn run_coco_mcp(
+        socket_path: &std::path::Path,
+        server: &str,
+        tool: &str,
+    ) -> Result<String> {
+        let coco_bin = resolve_coco_bin()?;
+        let output = Command::new(coco_bin)
+            .arg("mcp")
+            .arg(server)
+            .arg(tool)
+            .env(MCP_SOCKET_ENV, socket_path)
+            .output()
+            .await
+            .whatever_context("failed to execute coco mcp")?;
+        ensure_whatever!(
+            output.status.success(),
+            "coco mcp failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).whatever_context("invalid stdout from coco mcp")
+    }
+
+    struct ExpectedOutput {
+        stdout: &'static str,
+        stderr: &'static str,
+        success: bool,
+    }
+
+    async fn run_coco_mcp_command(
+        socket_path: &std::path::Path,
+        args: &[&str],
+    ) -> Result<std::process::Output> {
+        let coco_bin = resolve_coco_bin()?;
+        Command::new(coco_bin)
+            .arg("mcp")
+            .args(args)
+            .env(MCP_SOCKET_ENV, socket_path)
+            .output()
+            .await
+            .whatever_context("failed to execute coco mcp")
+    }
+
+    async fn setup_mcp_test_env() -> Result<(TestDropGuard, PathBuf)> {
+        let server_alpha = TestHttpServer::start().await?;
+        let alpha_url = server_alpha.base_url().to_string();
+        let mut guard = TestDropGuard::new();
+        guard.add_http_server(server_alpha);
+
+        let config = McpConfig {
+            socket_path: PathBuf::from("mcp.sock"),
+            request_timeout_ms: 5_000,
+            idle_ttl_ms: 0,
+            servers: vec![
+                McpServerConfig {
+                    name: "alpha".to_string(),
+                    description: Some("Alpha server".to_string()),
+                    command: "unused".to_string(),
+                    args: Vec::new(),
+                    cwd: None,
+                    env: None,
+                },
+                McpServerConfig {
+                    name: "beta".to_string(),
+                    description: Some("Beta server".to_string()),
+                    command: "unused".to_string(),
+                    args: Vec::new(),
+                    cwd: None,
+                    env: None,
+                },
+            ],
+        };
+        let manager = Arc::new(McpManager::new(config));
+
+        let transport_alpha = StreamableHttpClientTransport::from_uri(alpha_url);
+        let service_alpha =
+            ().serve(transport_alpha)
+                .await
+                .whatever_context("failed to connect to alpha server")?;
+        install_peer(&manager, "alpha", service_alpha).await;
+        guard.add_peer(manager.clone(), "alpha");
+
+        let socket_server = TestMcpSocketServer::start(manager.clone()).await?;
+        let socket_path = socket_server.socket_path().to_path_buf();
+        guard.add_socket_server(socket_server);
+
+        Ok((guard, socket_path))
+    }
 
     #[test]
     fn test_mcp_help_includes_server_list() {
@@ -317,5 +428,252 @@ mod tests {
             .try_get_matches_from(vec![command_name, "alpha"])
             .expect_err("expected tool to be required");
         assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[snafu::report]
+    async fn mcp_cmd_supports_multiple_servers_and_tools_list() -> Result<()> {
+        let server_alpha = TestHttpServer::start().await?;
+        let server_beta = TestHttpServer::start().await?;
+        let alpha_url = server_alpha.base_url().to_string();
+        let beta_url = server_beta.base_url().to_string();
+        let mut guard = TestDropGuard::new();
+        guard.add_http_server(server_alpha);
+        guard.add_http_server(server_beta);
+        let config = McpConfig {
+            socket_path: PathBuf::from("mcp.sock"),
+            request_timeout_ms: 5_000,
+            idle_ttl_ms: 0,
+            servers: vec![
+                McpServerConfig {
+                    name: "alpha".to_string(),
+                    description: Some("Alpha server".to_string()),
+                    command: "unused".to_string(),
+                    args: Vec::new(),
+                    cwd: None,
+                    env: None,
+                },
+                McpServerConfig {
+                    name: "beta".to_string(),
+                    description: Some("Beta server".to_string()),
+                    command: "unused".to_string(),
+                    args: Vec::new(),
+                    cwd: None,
+                    env: None,
+                },
+            ],
+        };
+        let manager = Arc::new(McpManager::new(config));
+
+        let transport_alpha = StreamableHttpClientTransport::from_uri(alpha_url);
+        let service_alpha =
+            ().serve(transport_alpha)
+                .await
+                .whatever_context("failed to connect to alpha server")?;
+        install_peer(&manager, "alpha", service_alpha).await;
+        guard.add_peer(manager.clone(), "alpha");
+
+        let transport_beta = StreamableHttpClientTransport::from_uri(beta_url);
+        let service_beta =
+            ().serve(transport_beta)
+                .await
+                .whatever_context("failed to connect to beta server")?;
+        install_peer(&manager, "beta", service_beta).await;
+        guard.add_peer(manager.clone(), "beta");
+
+        let socket_server = TestMcpSocketServer::start(manager.clone()).await?;
+        let socket_path = socket_server.socket_path().to_path_buf();
+        guard.add_socket_server(socket_server);
+
+        let client = SessionSocketClient::connect(socket_path.as_path())
+            .await
+            .whatever_context("failed to connect mcp socket")?;
+        let servers = fetch_server_list(&client).await?;
+        assert!(
+            servers.iter().any(|server| server.name == "alpha"),
+            "server list should include alpha"
+        );
+        assert!(
+            servers.iter().any(|server| server.name == "beta"),
+            "server list should include beta"
+        );
+
+        let tools = fetch_tool_list(&client, "alpha").await?;
+        assert!(
+            tools.iter().any(|tool| tool.name == "echo"),
+            "tool list should include echo"
+        );
+        assert!(
+            tools.iter().any(|tool| tool.name == "ping"),
+            "tool list should include ping"
+        );
+
+        let output = run_coco_mcp(socket_path.as_path(), "alpha", "ping").await?;
+        let value: serde_json::Value =
+            serde_json::from_str(&output).whatever_context("failed to parse JSON output")?;
+
+        let expected = serde_json::json!({
+            "content": [
+                {
+                    "text": "pong",
+                    "type": "text"
+                }
+            ],
+            "isError": false
+        });
+        assert_eq!(value, expected);
+
+        guard.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[snafu::report]
+    async fn mcp_cmd_help_and_errors_for_cli() -> Result<()> {
+        let (guard, socket_path) = setup_mcp_test_env().await?;
+        let missing_required_both = indoc! {"
+            error: the following required arguments were not provided:
+            \x20\x20<server>
+            \x20\x20<tool>
+
+            Usage: coco mcp <server> <tool>
+
+            For more information, try '--help'.
+        "};
+        let missing_required_tool = indoc! {"
+            error: the following required arguments were not provided:
+            \x20\x20<tool>
+
+            Usage: coco mcp <server> <tool>
+
+            For more information, try '--help'.
+        "};
+        let help_without_tools = indoc! {"
+            Usage: coco mcp <server> <tool>
+
+            Arguments:
+            \x20\x20<server>  Target MCP server name in [alpha, beta]
+            \x20\x20<tool>    Target MCP tool name
+
+            Options:
+            \x20\x20-h, --help  Print help
+        "};
+        let help_with_tools = indoc! {"
+            Usage: coco mcp <server> <tool>
+
+            Arguments:
+            \x20\x20<server>  Target MCP server name in [alpha, beta]
+            \x20\x20<tool>    Target MCP tool name in [echo, ping]
+
+            Options:
+            \x20\x20-h, --help  Print help
+        "};
+        let invalid_server = indoc! {"
+            Error: failed to handle client command
+
+            Caused by these errors (recent errors listed first):
+            \x20\x201: failed to handle mcp
+            \x20\x202: error: invalid value 'aplpha' for '<server>': target MCP server not configured
+
+            For more information, try '--help'.
+
+
+        "};
+        let cases = vec![
+            (
+                "coco mcp",
+                vec![],
+                ExpectedOutput {
+                    stdout: "",
+                    stderr: missing_required_both,
+                    success: false,
+                },
+            ),
+            (
+                "coco mcp -h",
+                vec!["-h"],
+                ExpectedOutput {
+                    stdout: help_without_tools,
+                    stderr: "",
+                    success: true,
+                },
+            ),
+            (
+                "coco mcp --help",
+                vec!["--help"],
+                ExpectedOutput {
+                    stdout: help_without_tools,
+                    stderr: "",
+                    success: true,
+                },
+            ),
+            (
+                "coco mcp alpha",
+                vec!["alpha"],
+                ExpectedOutput {
+                    stdout: "",
+                    stderr: missing_required_tool,
+                    success: false,
+                },
+            ),
+            (
+                "coco mcp alpha -h",
+                vec!["alpha", "-h"],
+                ExpectedOutput {
+                    stdout: help_with_tools,
+                    stderr: "",
+                    success: true,
+                },
+            ),
+            (
+                "coco mcp alpha --help",
+                vec!["alpha", "--help"],
+                ExpectedOutput {
+                    stdout: help_with_tools,
+                    stderr: "",
+                    success: true,
+                },
+            ),
+            (
+                "coco mcp alpha ping -h",
+                vec!["alpha", "ping", "-h"],
+                ExpectedOutput {
+                    stdout: help_with_tools,
+                    stderr: "",
+                    success: true,
+                },
+            ),
+            (
+                "coco mcp aplpha ping --help",
+                vec!["aplpha", "ping", "--help"],
+                ExpectedOutput {
+                    stdout: "",
+                    stderr: invalid_server,
+                    success: false,
+                },
+            ),
+        ];
+
+        for (name, args, expected) in cases {
+            let output = run_coco_mcp_command(socket_path.as_path(), &args).await?;
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            assert_eq!(
+                stdout, expected.stdout,
+                "{name}: stdout mismatch. stdout={stdout:?} stderr={stderr:?}"
+            );
+            assert_eq!(
+                stderr, expected.stderr,
+                "{name}: stderr mismatch. stdout={stdout:?} stderr={stderr:?}"
+            );
+            assert_eq!(
+                output.status.success(),
+                expected.success,
+                "{name}: unexpected exit status {output:?}"
+            );
+        }
+
+        guard.shutdown().await;
+        Ok(())
     }
 }
