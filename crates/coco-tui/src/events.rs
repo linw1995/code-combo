@@ -1,4 +1,4 @@
-use code_combo::{OutputChunk, Starter, TextEdit, ToolUse, tools::Final};
+use code_combo::{Instruction, OutputChunk, Starter, TextEdit, ToolUse, tools::Final};
 use crossterm::event::{KeyEvent, MouseEvent};
 
 #[derive(Debug, Clone)]
@@ -60,17 +60,39 @@ impl From<AnswerEvent> for Event {
 #[derive(Debug, Clone)]
 pub enum ComboEvent {
     Discovering,
-    Discovered { starters: Vec<Starter> },
+    Discovered {
+        starters: Vec<Starter>,
+    },
 
-    Executing { name: String },
-    Output { name: String, chunk: OutputChunk },
-    Executed { name: String, starter: Starter },
+    Executing {
+        name: String,
+    },
+    Output {
+        name: String,
+        chunk: OutputChunk,
+    },
+    Preview {
+        name: String,
+        instructions: Vec<Instruction>,
+    },
+    Executed {
+        name: String,
+        starter: Starter,
+    },
 
-    ReplyToolUse { tool_use: ToolUse },
-    ReplyToolError { message: String },
+    ReplyToolUse {
+        tool_use: ToolUse,
+    },
+    ReplyToolError {
+        message: String,
+    },
 
-    NotFound { name: String },
-    Cancelled { name: Option<String> },
+    NotFound {
+        name: String,
+    },
+    Cancelled {
+        name: Option<String>,
+    },
 }
 
 impl From<ComboEvent> for Event {

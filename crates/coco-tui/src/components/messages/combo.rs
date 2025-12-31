@@ -10,14 +10,23 @@ use ratatui::{
     widgets::{Block, Borders},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+use code_combo::{
+    Instruction, OutputChunk, StreamKind, ToolUse,
+    tools::{BASH_TOOL_NAME, BashOutput, Final},
+};
 
 use super::fold::FoldState;
 use super::streaming::StreamedLines;
 use crate::{
     actions::Action,
-    components::{Component, Content, ContentComponent, Persistable, Plain, ShortcutHints},
+    components::{
+        Component, Content, ContentComponent, Message, Messages, Persistable, Plain, ShortcutHints,
+        Tool,
+    },
     error::*,
-    events::{ComboEvent, Event},
+    events::{AnswerEvent, ComboEvent, Event},
     global::{self, State},
     session::{self, Session},
     theme::FinalizedTheme,
@@ -30,12 +39,16 @@ enum StarterState {
     Discovering,
     NotFound,
     Cancelled,
-    Executing {
-        output: StreamedLines,
-    },
-    Finalized {
-        output: String,
-    },
+    Executing,
+    Finalized,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum ComboView {
+    #[default]
+    Messages,
+    Stream,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -45,6 +58,16 @@ struct Inner {
     starter_state: StarterState,
     #[serde(default = "default_display_state")]
     display_state: FoldState,
+    #[serde(default)]
+    view: ComboView,
+    #[serde(default)]
+    instructions: Vec<Instruction>,
+    #[serde(default)]
+    output_chunks: Vec<OutputChunk>,
+    #[serde(default = "default_preview_lines")]
+    preview_lines: StreamedLines,
+    #[serde(default)]
+    error_message: Option<String>,
 }
 
 impl Default for Inner {
@@ -54,6 +77,11 @@ impl Default for Inner {
             is_error: false,
             starter_state: StarterState::default(),
             display_state: default_display_state(),
+            view: ComboView::default(),
+            instructions: Vec::new(),
+            output_chunks: Vec::new(),
+            preview_lines: default_preview_lines(),
+            error_message: None,
         }
     }
 }
@@ -62,15 +90,19 @@ impl Default for Inner {
 #[component(type_id = "combo")]
 pub struct Combo {
     state: State<Inner>,
-
-    widget: Option<Plain>,
+    messages: Messages,
     is_focused: bool,
 }
 
 const LIMIT: usize = 10;
+const STREAM_MARKER: &str = "|";
 
 fn default_display_state() -> FoldState {
     FoldState::Collapsed
+}
+
+fn default_preview_lines() -> StreamedLines {
+    StreamedLines::new(Some(LIMIT))
 }
 
 impl Combo {
@@ -80,13 +112,13 @@ impl Combo {
                 name: name.to_string(),
                 ..Default::default()
             }),
-            widget: None,
+            messages: Messages::default(),
             is_focused: false,
         }
     }
 
     fn has_collapsible_body(&self) -> bool {
-        self.widget.is_some()
+        matches!(self.state.starter_state, StarterState::Finalized) && self.has_body_content()
     }
 
     fn on_combo_event(&mut self, event: &ComboEvent) {
@@ -97,30 +129,48 @@ impl Combo {
                 }
             }
             ComboEvent::Output { name, chunk } => self.on_ouput_event(name, chunk),
+            ComboEvent::Preview { name, instructions } => {
+                if &self.state.name == name {
+                    self.replace_instructions(instructions);
+                }
+            }
             ComboEvent::Executing { name } => {
                 if &self.state.name == name {
                     let mut state = self.state.write();
-                    state.starter_state = StarterState::Executing {
-                        output: StreamedLines::new(Some(LIMIT)),
-                    };
+                    state.starter_state = StarterState::Executing;
+                    state.is_error = false;
+                    state.error_message = None;
+                    state.view = ComboView::Messages;
+                    state.instructions.clear();
+                    state.output_chunks.clear();
+                    state.preview_lines = StreamedLines::new(Some(LIMIT));
                     state.display_state.expand();
+                    drop(state);
+                    self.messages.clear();
                 }
             }
             ComboEvent::Executed { name, starter, .. } => {
                 if &self.state.name == name {
                     {
                         let mut state = self.state.write();
-                        let output = match &starter.combo {
-                            Ok(combo) => combo.to_markdown(),
+                        let instructions = match &starter.combo {
+                            Ok(combo) => {
+                                state.is_error = false;
+                                state.error_message = None;
+                                combo.instructions.clone()
+                            }
                             Err(err) => {
                                 state.is_error = true;
-                                format!("Failed to execute starter: {err}")
+                                state.error_message =
+                                    Some(format!("Failed to execute starter: {err}"));
+                                Vec::new()
                             }
                         };
-                        self.widget = Some(Plain::new(output.clone()));
-                        state.starter_state = StarterState::Finalized { output };
+                        state.instructions = instructions;
+                        state.starter_state = StarterState::Finalized;
                         state.display_state.expand();
                     }
+                    self.rebuild_messages();
                 }
             }
             ComboEvent::Cancelled { name } => {
@@ -140,15 +190,37 @@ impl Combo {
         }
     }
 
-    fn on_ouput_event(&mut self, name: &str, chunk: &code_combo::OutputChunk) {
+    fn on_ouput_event(&mut self, name: &str, chunk: &OutputChunk) {
         if self.state.name != name {
             return;
         }
-        let StarterState::Executing { output: lines } = &mut self.state.write().starter_state
-        else {
-            return;
+        let mut state = self.state.write();
+        state.output_chunks.push(chunk.clone());
+        state.preview_lines.push_chunk(chunk);
+    }
+
+    fn has_message_content(&self) -> bool {
+        !self.state.instructions.is_empty() || self.state.error_message.is_some()
+    }
+
+    fn has_body_content(&self) -> bool {
+        self.has_message_content() || self.has_stream_content()
+    }
+
+    fn has_stream_content(&self) -> bool {
+        !self.state.output_chunks.is_empty() || !self.state.preview_lines.is_empty()
+    }
+
+    fn can_toggle_view(&self) -> bool {
+        self.has_stream_content()
+    }
+
+    fn toggle_view(&mut self) {
+        let mut state = self.state.write();
+        state.view = match state.view {
+            ComboView::Messages => ComboView::Stream,
+            ComboView::Stream => ComboView::Messages,
         };
-        lines.push_chunk(chunk);
     }
 
     fn toggle_display_state(&mut self) {
@@ -160,6 +232,184 @@ impl Combo {
         if self.has_collapsible_body() {
             self.state.write().display_state.collapse();
         }
+    }
+
+    fn replace_instructions(&mut self, instructions: &[Instruction]) {
+        {
+            let mut state = self.state.write();
+            state.instructions = instructions.to_vec();
+        }
+        self.rebuild_messages();
+    }
+
+    fn rebuild_messages(&mut self) {
+        let (name, instructions, error_message) = {
+            let state = self.state.read();
+            (
+                state.name.clone(),
+                state.instructions.clone(),
+                state.error_message.clone(),
+            )
+        };
+        let mut messages = build_instruction_messages(&name, &instructions);
+        if let Some(message) = error_message {
+            messages.push(Message::system(Plain::new(message).into()));
+        }
+        self.messages.clear();
+        self.messages.extend(messages.into_iter());
+    }
+
+    fn messages_body_height(&self, width: u16) -> u16 {
+        let messages_height =
+            u16::try_from(self.messages.height_for_width(width)).unwrap_or(u16::MAX);
+        let preview_height = if matches!(self.state.starter_state, StarterState::Executing) {
+            self.state.preview_lines.len() as u16
+        } else {
+            0
+        };
+        let spacing = if messages_height > 0 && preview_height > 0 {
+            1
+        } else {
+            0
+        };
+        messages_height
+            .saturating_add(spacing)
+            .saturating_add(preview_height)
+    }
+
+    fn stream_line_count(&self) -> u16 {
+        let total = self
+            .state
+            .output_chunks
+            .iter()
+            .map(|chunk| chunk.lines.len())
+            .sum::<usize>();
+        u16::try_from(total).unwrap_or(u16::MAX)
+    }
+
+    fn draw_messages_view(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        if area.height == 0 {
+            return Ok(());
+        }
+        let messages_height =
+            u16::try_from(self.messages.height_for_width(area.width)).unwrap_or(u16::MAX);
+        let preview_height = if matches!(self.state.starter_state, StarterState::Executing) {
+            self.state.preview_lines.len() as u16
+        } else {
+            0
+        };
+        let spacing = if messages_height > 0 && preview_height > 0 {
+            1
+        } else {
+            0
+        };
+
+        let mut rows = Vec::new();
+        if messages_height > 0 {
+            rows.push(Constraint::Length(messages_height));
+        }
+        if spacing > 0 {
+            rows.push(Constraint::Length(spacing));
+        }
+        if preview_height > 0 {
+            rows.push(Constraint::Length(preview_height));
+        }
+
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let chunks = Layout::vertical(rows).split(area);
+        let mut idx = 0;
+        if messages_height > 0 {
+            self.messages.draw_inline(frame, chunks[idx])?;
+            idx += 1;
+        }
+        if spacing > 0 {
+            idx += 1;
+        }
+        if preview_height > 0 {
+            let (output, markers) = self.render_preview_lines();
+            self.draw_stream_section(frame, chunks[idx], &output, markers.as_ref());
+        }
+        Ok(())
+    }
+
+    fn draw_stream_view(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        if area.height == 0 {
+            return Ok(());
+        }
+        let (output, markers) = self.render_stream_lines();
+        self.draw_stream_section(frame, area, &output, markers.as_ref());
+        Ok(())
+    }
+
+    fn draw_stream_section(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        output: &Paragraph<'static>,
+        markers: Option<&Paragraph<'static>>,
+    ) {
+        let marker_width = if markers.is_some() && area.width > 1 {
+            1
+        } else {
+            0
+        };
+        if marker_width == 0 {
+            frame.render_widget(output, area);
+            return;
+        }
+        let [area_text, area_markers] =
+            Layout::horizontal([Constraint::Min(1), Constraint::Length(marker_width)]).areas(area);
+        frame.render_widget(output, area_text);
+        if let Some(markers) = markers {
+            frame.render_widget(markers, area_markers);
+        }
+    }
+
+    fn render_preview_lines(&self) -> (Paragraph<'static>, Option<Paragraph<'static>>) {
+        let theme = global::theme();
+        let mut lines = Vec::new();
+        let mut markers = Vec::new();
+        for line in self.state.preview_lines.iter() {
+            let marker_style = match line.stream {
+                StreamKind::Stdout => theme.ui.bash_stdout_marker,
+                StreamKind::Stderr => theme.ui.bash_stderr_marker,
+            };
+            lines.push(Line::from(line.text.clone()));
+            markers.push(Line::from(Span::styled(STREAM_MARKER, marker_style)));
+        }
+        let output = Paragraph::new(lines);
+        let markers = if markers.is_empty() {
+            None
+        } else {
+            Some(Paragraph::new(markers))
+        };
+        (output, markers)
+    }
+
+    fn render_stream_lines(&self) -> (Paragraph<'static>, Option<Paragraph<'static>>) {
+        let theme = global::theme();
+        let mut lines = Vec::new();
+        let mut markers = Vec::new();
+        for chunk in &self.state.output_chunks {
+            let marker_style = match chunk.stream {
+                StreamKind::Stdout => theme.ui.bash_stdout_marker,
+                StreamKind::Stderr => theme.ui.bash_stderr_marker,
+            };
+            for line in &chunk.lines {
+                lines.push(Line::from(line.clone()));
+                markers.push(Line::from(Span::styled(STREAM_MARKER, marker_style)));
+            }
+        }
+        let output = Paragraph::new(lines);
+        let markers = if markers.is_empty() {
+            None
+        } else {
+            Some(Paragraph::new(markers))
+        };
+        (output, markers)
     }
 
     fn get_title_spans(&self, theme: &FinalizedTheme) -> Vec<Span<'_>> {
@@ -178,10 +428,8 @@ impl Combo {
             ),
             StarterState::NotFound => (" Not found", theme.ui.combo_title_state_not_found),
             StarterState::Cancelled => (" Cancelled", theme.ui.combo_title_state_cancelled),
-            StarterState::Executing { .. } => {
-                (" Executing...", theme.ui.combo_title_state_executing)
-            }
-            StarterState::Finalized { .. } => {
+            StarterState::Executing => (" Executing...", theme.ui.combo_title_state_executing),
+            StarterState::Finalized => {
                 if self.state.is_error {
                     (" Failed", theme.ui.combo_title_state_failed)
                 } else {
@@ -225,30 +473,34 @@ impl Content for Combo {
         if self.has_collapsible_body() && self.state.display_state.is_collapsed() {
             return border_height;
         }
-        if let Some(plain) = &self.widget {
-            plain.height(width) + border_height
-        } else {
-            (match &self.state.starter_state {
-                StarterState::Executing { output } => output.len(),
-                _ => 0,
-            }) + border_height
-        }
+        let body_height = match self.state.view {
+            ComboView::Messages => self.messages_body_height(width),
+            ComboView::Stream => self.stream_line_count(),
+        };
+        body_height as usize + border_height
     }
 
     fn is_actionable(&self) -> bool {
-        self.has_collapsible_body()
+        self.has_collapsible_body() || self.can_toggle_view()
     }
 
     fn shortcut_hints(&self) -> ShortcutHints {
-        if !self.has_collapsible_body() {
+        if !self.has_collapsible_body() && !self.can_toggle_view() {
             return ShortcutHints::default();
         }
-        let toggle_text = if self.state.display_state.is_collapsed() {
-            ("Unfold", "z")
-        } else {
-            ("Fold", "z")
-        };
-        ShortcutHints::from_visible(&[toggle_text])
+        let mut hints = ShortcutHints::default();
+        if self.has_collapsible_body() {
+            let toggle_text = if self.state.display_state.is_collapsed() {
+                ("Unfold", "z")
+            } else {
+                ("Fold", "z")
+            };
+            hints.push_visible(&[toggle_text]);
+        }
+        if self.can_toggle_view() {
+            hints.push_visible(&[("View", "v")]);
+        }
+        hints
     }
 
     fn reminder_line(&self) -> Option<Line<'static>> {
@@ -268,43 +520,37 @@ impl Persistable for Combo {
 
     fn load(session: Session) -> Result<Self> {
         let state: Inner = session::load(session)?;
-        let widget = if let StarterState::Finalized { output } = &state.starter_state {
-            Some(Plain::new(output.clone()))
-        } else {
-            None
-        };
-        Ok(Self {
+        let mut combo = Self {
             state: State::new(state),
-            widget,
+            messages: Messages::default(),
             is_focused: false,
-        })
+        };
+        combo.rebuild_messages();
+        Ok(combo)
     }
 }
 
 impl Component for Combo {
     fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
-        Box::new(
-            self.widget
-                .as_mut()
-                .map(|m| m as &mut dyn Component)
-                .into_iter(),
-        )
+        Box::new(vec![&mut self.messages as &mut dyn Component].into_iter())
     }
 
     fn handle_key_event(&mut self, key: &KeyEvent) {
-        if !self.has_collapsible_body() {
+        if !self.has_collapsible_body() && !self.can_toggle_view() {
             return;
         }
 
-        if let (KeyModifiers::NONE, KeyCode::Char('z')) = (key.modifiers, key.code) {
-            self.toggle_display_state();
+        if let (KeyModifiers::NONE, KeyCode::Char('v')) = (key.modifiers, key.code) {
+            if self.can_toggle_view() {
+                self.toggle_view();
+            }
             return;
         }
 
-        if !self.state.display_state.is_collapsed()
-            && let Some(widget) = &mut self.widget
+        if let (KeyModifiers::NONE, KeyCode::Char('z')) = (key.modifiers, key.code)
+            && self.has_collapsible_body()
         {
-            widget.handle_key_event(key);
+            self.toggle_display_state();
         }
     }
 
@@ -330,8 +576,6 @@ impl Component for Combo {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        use Constraint::Length;
-
         let theme = global::theme();
         let title_spans = self.get_title_spans(theme);
         let mut block = Block::new()
@@ -356,21 +600,88 @@ impl Component for Combo {
 
         let output_area = block.inner(area);
 
-        if let Some(plain) = &mut self.widget {
-            plain.draw(frame, output_area)?;
-        } else if let StarterState::Executing { output } = &self.state.starter_state {
-            let chunks = Layout::vertical(output.iter().map(|_| Length(1))).split(output_area);
-            output.iter().zip(chunks.iter()).for_each(|(line, chunk)| {
-                let p = Paragraph::new(line.text.clone());
-                frame.render_widget(&p, *chunk);
-            });
+        match self.state.view {
+            ComboView::Messages => self.draw_messages_view(frame, output_area)?,
+            ComboView::Stream => self.draw_stream_view(frame, output_area)?,
         }
-
         Ok(())
     }
 }
 
 impl ContentComponent for Combo {}
+
+fn build_instruction_messages(name: &str, instructions: &[Instruction]) -> Vec<Message> {
+    instructions
+        .iter()
+        .enumerate()
+        .map(|(idx, instruction)| match instruction {
+            Instruction::Text(text) => Message::user(Plain::new(text.clone()).into()),
+            Instruction::Command { command, output } => {
+                build_command_message(name, idx, command, output)
+            }
+        })
+        .collect()
+}
+
+fn build_command_message(name: &str, idx: usize, command: &str, output: &str) -> Message {
+    let tool_use = ToolUse {
+        id: format!("combo_preview_{name}_{idx}"),
+        name: BASH_TOOL_NAME.to_string(),
+        input: json!({ "command": command }),
+    };
+    let parsed = parse_command_output(output);
+    let is_error = parsed.exit_code != 0;
+    let output_value = serde_json::to_value(&parsed).unwrap_or_else(|_| {
+        json!({
+            "exit_code": parsed.exit_code,
+            "stdout": parsed.stdout,
+            "stderr": parsed.stderr,
+            "timed_out": parsed.timed_out,
+        })
+    });
+    let mut tool = Tool::new(tool_use.clone());
+    tool.handle_event(&Event::Answer(AnswerEvent::ToolResult {
+        id: tool_use.id.clone(),
+        is_error,
+        is_user_cancelled: false,
+        output: Final::Json(output_value),
+    }));
+    Message::bot(tool.into())
+}
+
+fn parse_command_output(output: &str) -> BashOutput {
+    let mut body = output.trim_end().to_string();
+    let mut exit_code = 0u8;
+    let exit_marker = "Exit code: ";
+
+    if let Some(idx) = body.rfind(exit_marker) {
+        let (prefix, suffix) = body.split_at(idx);
+        if let Some(code_str) = suffix.strip_prefix(exit_marker)
+            && let Ok(code) = code_str.trim().parse::<u16>()
+        {
+            exit_code = code.min(u8::MAX as u16) as u8;
+            body = prefix.trim_end().to_string();
+        }
+    }
+
+    let stderr_marker = "\n\nSTDERR:\n";
+    let (stdout, stderr) = if let Some(idx) = body.find(stderr_marker) {
+        let (out, err) = body.split_at(idx);
+        let err = err.strip_prefix(stderr_marker).unwrap_or_default();
+        (out.to_string(), err.to_string())
+    } else if let Some(rest) = body.strip_prefix("STDERR:\n") {
+        (String::new(), rest.to_string())
+    } else {
+        (body, String::new())
+    };
+
+    BashOutput {
+        exit_code,
+        stdout,
+        stderr,
+        timed_out: false,
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -450,5 +761,15 @@ mod tests {
         let session = combo.save();
         let loaded = Combo::load(session).unwrap();
         assert!(loaded.height(80) > 1);
+    }
+
+    #[test]
+    fn parse_command_output_splits_sections() {
+        let output = "out1\nout2\n\nSTDERR:\nerr1\nerr2\n\nExit code: 42";
+        let parsed = parse_command_output(output);
+        assert_eq!(parsed.exit_code, 42);
+        assert_eq!(parsed.stdout, "out1\nout2");
+        assert_eq!(parsed.stderr, "err1\nerr2");
+        assert!(!parsed.timed_out);
     }
 }

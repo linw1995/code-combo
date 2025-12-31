@@ -347,7 +347,10 @@ impl Chat<'static> {
     fn handle_combo_event(&mut self, event: &ComboEvent) {
         debug!(?event, "receive combo event");
         match event {
-            ComboEvent::Discovering | ComboEvent::Executing { .. } | ComboEvent::Output { .. } => {
+            ComboEvent::Discovering
+            | ComboEvent::Executing { .. }
+            | ComboEvent::Output { .. }
+            | ComboEvent::Preview { .. } => {
                 self.set_processing();
             }
             ComboEvent::Executed { starter, .. } => {
@@ -1320,6 +1323,7 @@ async fn task_combo_execute(name: String, system_prompt: String, cancel_token: C
 
     let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<PromptRequest>();
     let responder_tx = tx.clone();
+    let responder_name = name.clone();
     let responder_config = config.clone();
     let responder_prompt = system_prompt.clone();
     let responder_cancel = cancel_token.clone();
@@ -1331,6 +1335,15 @@ async fn task_combo_execute(name: String, system_prompt: String, cancel_token: C
                 instructions,
                 response_tx,
             } = request;
+            responder_tx
+                .send(
+                    ComboEvent::Preview {
+                        name: responder_name.clone(),
+                        instructions: instructions.clone(),
+                    }
+                    .into(),
+                )
+                .ok();
             let response = respond_prompt_request(
                 &responder_config,
                 &responder_prompt,

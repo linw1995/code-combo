@@ -90,6 +90,19 @@ impl Messages {
         (position, position_range)
     }
 
+    pub fn height_for_width(&self, width: u16) -> usize {
+        let heights = self.message_heights(width, 0);
+        heights.iter().sum()
+    }
+
+    pub fn draw_inline(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        let heights = self.message_heights(area.width, 0);
+        if heights.is_empty() {
+            return Ok(());
+        }
+        self.actual_draw(frame, area, &heights, 0..heights.len())
+    }
+
     fn new_scrollstate(&self) -> ScrollbarState {
         let (position, position_range) = self.scroll_position();
         ScrollbarState::new(position_range as usize).position(position as usize)
@@ -357,6 +370,15 @@ impl Messages {
 
         Ok(())
     }
+
+    fn message_heights(&self, width: u16, scrollbar_width: u16) -> Vec<usize> {
+        let border_width = 1;
+        let inner_width = width.saturating_sub(border_width + scrollbar_width).max(1);
+        self.messages
+            .iter()
+            .map(|m| m.height(inner_width))
+            .collect()
+    }
 }
 
 impl Content for Messages {
@@ -427,13 +449,8 @@ impl Component for Messages {
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         use Constraint::{Length, Min};
 
-        let border_width = 1;
         let scrollbar_width = 2;
-        let heights: Vec<_> = self
-            .messages
-            .iter()
-            .map(|m| m.height(area.width - border_width - scrollbar_width))
-            .collect();
+        let heights = self.message_heights(area.width, scrollbar_width);
         self.total_height = heights.iter().sum::<usize>() as u16;
         self.viewport_height = area.height;
         let focus = self.focus.get();
