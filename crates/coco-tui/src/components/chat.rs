@@ -3,8 +3,8 @@ use coco_macro::ComponentExt;
 use code_combo::tools::BASH_TOOL_NAME;
 use code_combo::{
     Agent, Block as ChatBlock, Config, Content as ChatContent, Instruction, Message as ChatMessage,
-    Output, PromptRequest, PromptSchema, Role, SessionEnv, StarterCommand, StarterError,
-    StarterEvent, StopReason, TextEdit, ToolUse, discover_starters,
+    Output, PromptRequest, Role, SessionEnv, StarterCommand, StarterError, StarterEvent,
+    StopReason, TextEdit, ToolUse, discover_starters,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -1311,52 +1311,13 @@ async fn task_combo_execute(name: String, system_prompt: String, cancel_token: C
     tx.send(ComboEvent::Executing { name: name.clone() }.into())
         .unwrap();
 
-    let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<PromptRequest>();
-    let responder_tx = tx.clone();
-    let responder_name = name.clone();
-    let responder_config = config.clone();
-    let responder_prompt = system_prompt.clone();
-    let responder_cancel = cancel_token.clone();
-    tokio::task::spawn(async move {
-        let mut reply_agent = Agent::new(responder_config);
-        while let Some(request) = prompt_rx.recv().await {
-            let PromptRequest {
-                prompt,
-                schemas,
-                instructions,
-                response_tx,
-            } = request;
-            responder_tx
-                .send(
-                    ComboEvent::Preview {
-                        name: responder_name.clone(),
-                        instructions: instructions.clone(),
-                    }
-                    .into(),
-                )
-                .ok();
-            let response = respond_prompt_request(
-                &mut reply_agent,
-                &responder_prompt,
-                prompt,
-                schemas,
-                instructions,
-                responder_cancel.clone(),
-            )
-            .await;
-            if let Err(err) = &response {
-                responder_tx
-                    .send(
-                        ComboEvent::ReplyToolError {
-                            message: err.clone(),
-                        }
-                        .into(),
-                    )
-                    .ok();
-            }
-            let _ = response_tx.send(response);
-        }
-    });
+    let prompt_tx = spawn_prompt_responder(
+        config.clone(),
+        name.clone(),
+        system_prompt.clone(),
+        cancel_token.clone(),
+        tx.clone(),
+    );
 
     let session_env = SessionEnv::builder()
         .build()
@@ -1423,22 +1384,53 @@ async fn task_combo_execute(name: String, system_prompt: String, cancel_token: C
     .unwrap();
 }
 
-async fn respond_prompt_request(
-    agent: &mut Agent,
-    system_prompt: &str,
-    prompt: String,
-    schemas: Vec<PromptSchema>,
-    instructions: Vec<Instruction>,
+fn spawn_prompt_responder(
+    config: Config,
+    name: String,
+    system_prompt: String,
     cancel_token: CancellationToken,
-) -> std::result::Result<String, String> {
-    if cancel_token.is_cancelled() {
-        return Err("prompt reply cancelled".to_string());
-    }
-    let reply = agent
-        .reply_prompt(system_prompt, prompt, schemas, instructions)
-        .await
-        .map_err(|err| err.to_string())?;
-    Ok(reply.response)
+    tx: mpsc::UnboundedSender<Event>,
+) -> mpsc::UnboundedSender<PromptRequest> {
+    let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<PromptRequest>();
+    tokio::task::spawn(async move {
+        let mut reply_agent = Agent::new(config);
+        while let Some(request) = prompt_rx.recv().await {
+            let PromptRequest {
+                prompt,
+                schemas,
+                instructions,
+                response_tx,
+            } = request;
+            tx.send(
+                ComboEvent::Preview {
+                    name: name.clone(),
+                    instructions: instructions.clone(),
+                }
+                .into(),
+            )
+            .ok();
+            let response = if cancel_token.is_cancelled() {
+                Err("prompt reply cancelled".to_string())
+            } else {
+                reply_agent
+                    .reply_prompt(&system_prompt, prompt, schemas, instructions)
+                    .await
+                    .map(|reply| reply.response)
+                    .map_err(|err| err.to_string())
+            };
+            if let Err(err) = &response {
+                tx.send(
+                    ComboEvent::ReplyToolError {
+                        message: err.clone(),
+                    }
+                    .into(),
+                )
+                .ok();
+            }
+            let _ = response_tx.send(response);
+        }
+    });
+    prompt_tx
 }
 
 fn build_instruction_messages(instructions: &[Instruction]) -> Vec<code_combo::Message> {
