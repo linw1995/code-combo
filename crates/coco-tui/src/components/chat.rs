@@ -364,12 +364,6 @@ impl Chat<'static> {
             | ComboEvent::Cancelled { .. } => {
                 self.set_ready();
             }
-            ComboEvent::ReplyToolUse { tool_use } => {
-                let mut tool = Tool::new_readonly(tool_use.to_owned());
-                tool.mark_completed();
-                self.messages.push(Message::bot(tool.into()));
-                global::trigger_schedule_session_save();
-            }
             ComboEvent::ReplyToolError { message } => {
                 self.messages
                     .push(Message::system(Plain::new(message.to_string()).into()));
@@ -1348,7 +1342,6 @@ async fn task_combo_execute(name: String, system_prompt: String, cancel_token: C
                 schemas,
                 instructions,
                 responder_cancel.clone(),
-                responder_tx.clone(),
             )
             .await;
             if let Err(err) = &response {
@@ -1437,7 +1430,6 @@ async fn respond_prompt_request(
     schemas: Vec<PromptSchema>,
     instructions: Vec<Instruction>,
     cancel_token: CancellationToken,
-    tx: mpsc::UnboundedSender<Event>,
 ) -> std::result::Result<String, String> {
     if cancel_token.is_cancelled() {
         return Err("prompt reply cancelled".to_string());
@@ -1446,13 +1438,6 @@ async fn respond_prompt_request(
         .reply_prompt(system_prompt, prompt, schemas, instructions)
         .await
         .map_err(|err| err.to_string())?;
-    tx.send(
-        ComboEvent::ReplyToolUse {
-            tool_use: reply.tool_use.clone(),
-        }
-        .into(),
-    )
-    .ok();
     Ok(reply.response)
 }
 

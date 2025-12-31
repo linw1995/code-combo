@@ -80,9 +80,6 @@ pub enum ComboEvent {
         starter: Starter,
     },
 
-    ReplyToolUse {
-        tool_use: ToolUse,
-    },
     ReplyToolError {
         message: String,
     },

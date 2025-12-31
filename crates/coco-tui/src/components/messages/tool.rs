@@ -97,18 +97,6 @@ impl Tool {
         }
     }
 
-    pub fn new_readonly(tool_use: ToolUse) -> Self {
-        let widget = Raw::new_readonly(tool_use.clone()).into();
-        Self {
-            inner: State::new(Inner {
-                tool_use,
-                state: ToolState::default(),
-            }),
-            widget,
-            is_focused: false,
-        }
-    }
-
     pub fn mark_completed(&mut self) {
         self.update_state(ToolState::Completed);
     }
