@@ -2,6 +2,8 @@ use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
 
+use crate::tools::{BashInput, BashOutput};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ComboMetadata {
@@ -37,36 +39,16 @@ impl Display for ComboMode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Instruction {
     Text(String),
-    Command { command: String, output: String },
+    Command {
+        input: BashInput,
+        output: BashOutput,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Combo {
     pub metadata: ComboMetadata,
     pub instructions: Vec<Instruction>,
-}
-
-impl Combo {
-    pub fn to_markdown(&self) -> String {
-        self.instructions
-            .iter()
-            .map(|instruction| match instruction {
-                Instruction::Text(text) => text.clone(),
-                Instruction::Command { command, output } => [
-                    "I executed this command:\n",
-                    "```",
-                    command.as_str(),
-                    "```\n",
-                    "And it outputs:\n",
-                    "```",
-                    output.as_str(),
-                    "```\n",
-                ]
-                .join("\n"),
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n")
-    }
 }
 
 mod discovery;

@@ -13,14 +13,23 @@ use crate::exec::{ChunkConfig, ExecCommand, OutputChunk, ProcessEvent, StreamKin
 #[derive(Default)]
 pub struct BashTool {}
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BashInput {
     pub command: String,
     #[serde(default = "default_timeout_ms")]
     pub timeout: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl BashInput {
+    pub fn new(command: String) -> Self {
+        Self {
+            command,
+            timeout: default_timeout_ms(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BashOutput {
     pub exit_code: u8,
     #[serde(default)]

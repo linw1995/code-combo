@@ -46,9 +46,9 @@ pub async fn handle_ask(prompt: String, reply: bool, schemas: Vec<String>) -> Re
     };
     if reply {
         let response = client
-            .send_prompt_with_response(payload)
+            .send_prompt_wait_response(payload)
             .await
-            .whatever_context("failed to send prompt with response to session socket")?;
+            .whatever_context("failed to send prompt and wait response to session socket")?;
         println!("{response}");
     } else {
         client

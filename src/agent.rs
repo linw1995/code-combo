@@ -1,18 +1,23 @@
 use std::sync::Arc;
 
-use anthropic::Client;
+use anthropic::{Block as AnthropicBlock, Client, Tool as AnthropicTool, ToolChoice};
+use serde_json::{Map as JsonMap, json};
+use snafu::prelude::*;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::Config;
-use crate::Result;
+use crate::tools::BASH_TOOL_NAME;
+use crate::{Instruction, PromptSchema, ProviderKind, Result};
 use executor::PermissionControl;
 
 mod bash_executor;
 mod executor;
 pub use anthropic::{Block, Content, Message, Role, StopReason, ToolUse};
 pub use executor::{ExecuteStatus, Executor, Input, Output};
+
+const PROMPT_REPLY_TOOL_NAME: &str = "combo_reply";
 
 #[derive(Clone)]
 pub struct Agent {
@@ -27,6 +32,11 @@ pub struct Agent {
 pub struct ChatResponse {
     pub message: Message,
     pub stop_reason: Option<StopReason>,
+}
+
+pub struct PromptReply {
+    pub tool_use: ToolUse,
+    pub response: String,
 }
 
 impl Agent {
@@ -92,6 +102,48 @@ impl Agent {
         })
     }
 
+    pub async fn reply_prompt(
+        &mut self,
+        system_prompt: &str,
+        prompt: String,
+        schemas: Vec<PromptSchema>,
+        instructions: Vec<Instruction>,
+    ) -> Result<PromptReply> {
+        ensure_whatever!(!schemas.is_empty(), "schemas cannot be empty");
+        let reply_tool = build_reply_tool(&schemas)?;
+        let client = self.build_reply_client()?;
+        let messages = build_prompt_messages(&prompt, &instructions);
+        let tool_choice = ToolChoice::tool()
+            .name(PROMPT_REPLY_TOOL_NAME)
+            .disable_parallel_tool_use(true)
+            .call();
+        let system_prompt = system_prompt.trim();
+        let system_prompt = if system_prompt.is_empty() {
+            None
+        } else {
+            Some(system_prompt)
+        };
+        let response = client
+            .messages_with_tool_choice(system_prompt, messages, vec![reply_tool], tool_choice)
+            .await
+            .map_err(|err| {
+                <crate::Error as snafu::FromString>::without_source(format!(
+                    "failed to request prompt reply: {err}"
+                ))
+            })?;
+        let Some(tool_use) = response.content.into_iter().find_map(|block| match block {
+            AnthropicBlock::ToolUse(tool_use) if tool_use.name == PROMPT_REPLY_TOOL_NAME => {
+                Some(tool_use)
+            }
+            _ => None,
+        }) else {
+            whatever!("reply tool use not found in response");
+        };
+        let response = serde_json::to_string(&tool_use.input)
+            .whatever_context("failed to serialize reply tool input")?;
+        Ok(PromptReply { tool_use, response })
+    }
+
     pub fn grant_once(&mut self, id: &str, name: &str) {
         self.executor
             .update_pcl(name, PermissionControl::Once(id.to_string()))
@@ -149,4 +201,121 @@ impl Agent {
         let client = builder.build().expect("Failed to initialize client");
         Ok((&provider.name, client))
     }
+
+    fn build_reply_client(&mut self) -> Result<Client> {
+        let Some(provider) = self.config.providers.first_mut() else {
+            whatever!("no provider configured");
+        };
+        ensure_whatever!(
+            matches!(provider.kind, ProviderKind::Anthropic),
+            "only anthropic providers are supported for reply"
+        );
+        let token = provider.api_key.get()?;
+        Client::builder()
+            .base_url(&provider.base_url)
+            .token(token)
+            .model(&provider.name)
+            .user_agent(crate::version::user_agent().to_string())
+            .build()
+            .map_err(|err| {
+                <crate::Error as snafu::FromString>::without_source(format!(
+                    "failed to build reply client: {err}"
+                ))
+            })
+    }
+}
+
+fn build_prompt_messages(prompt: &str, instructions: &[Instruction]) -> Vec<Message> {
+    if instructions.is_empty() {
+        return vec![Message::user(prompt.into())];
+    }
+    let mut messages = build_instruction_messages(instructions);
+    append_prompt_to_messages(&mut messages, prompt);
+    messages
+}
+
+fn build_instruction_messages(instructions: &[Instruction]) -> Vec<Message> {
+    let mut messages = Vec::new();
+    for (idx, instruction) in instructions.iter().enumerate() {
+        match instruction {
+            Instruction::Command { input, output } => {
+                let tool_use_id = format!("combo_instruction_{idx}");
+                let input_value = serde_json::to_value(input).unwrap_or_else(|_| {
+                    json!({
+                        "command": input.command,
+                        "timeout": input.timeout,
+                    })
+                });
+                let output_value = serde_json::to_string(output).unwrap_or_else(|_| {
+                    json!({
+                        "exit_code": output.exit_code,
+                        "stdout": output.stdout,
+                        "stderr": output.stderr,
+                        "timed_out": output.timed_out,
+                    })
+                    .to_string()
+                });
+                messages.push(Message::assistant(Content::Multiple(vec![
+                    AnthropicBlock::tool_use(&tool_use_id, BASH_TOOL_NAME, input_value),
+                ])));
+                messages.push(Message::user(Content::Multiple(vec![
+                    AnthropicBlock::tool_result(&tool_use_id, None, output_value.as_str().into()),
+                ])));
+            }
+            Instruction::Text(text) => {
+                messages.push(Message::user(Content::Text(text.clone())));
+            }
+        }
+    }
+    messages
+}
+
+fn append_prompt_to_messages(messages: &mut Vec<Message>, prompt: &str) {
+    if let Some(last) = messages.last_mut()
+        && matches!(last.role, Role::User)
+    {
+        match &mut last.content {
+            Content::Text(text) => {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(prompt);
+            }
+            Content::Multiple(blocks) => {
+                blocks.push(AnthropicBlock::Text {
+                    text: prompt.to_string(),
+                });
+            }
+        }
+        return;
+    }
+
+    messages.push(Message::user(prompt.into()));
+}
+
+fn build_reply_tool(schemas: &[PromptSchema]) -> Result<AnthropicTool> {
+    let mut properties = JsonMap::new();
+    let mut required = Vec::new();
+    for schema in schemas {
+        properties.insert(
+            schema.name.clone(),
+            json!({
+                "type": "string",
+                "description": schema.description.as_str(),
+            }),
+        );
+        required.push(schema.name.clone());
+    }
+    ensure_whatever!(!properties.is_empty(), "schemas cannot be empty");
+    let input_schema = json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false,
+    });
+    Ok(AnthropicTool {
+        name: PROMPT_REPLY_TOOL_NAME.to_string(),
+        description: "Return the response using the provided schema.".to_string(),
+        input_schema,
+    })
 }

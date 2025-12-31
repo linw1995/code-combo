@@ -14,7 +14,7 @@ use serde_json::json;
 
 use code_combo::{
     Instruction, OutputChunk, StreamKind, ToolUse,
-    tools::{BASH_TOOL_NAME, BashOutput, Final},
+    tools::{BASH_TOOL_NAME, BashInput, BashOutput, Final},
 };
 
 use super::fold::FoldState;
@@ -616,27 +616,36 @@ fn build_instruction_messages(name: &str, instructions: &[Instruction]) -> Vec<M
         .enumerate()
         .map(|(idx, instruction)| match instruction {
             Instruction::Text(text) => Message::user(Plain::new(text.clone()).into()),
-            Instruction::Command { command, output } => {
-                build_command_message(name, idx, command, output)
+            Instruction::Command { input, output } => {
+                build_command_message(name, idx, input, output)
             }
         })
         .collect()
 }
 
-fn build_command_message(name: &str, idx: usize, command: &str, output: &str) -> Message {
+fn build_command_message(
+    name: &str,
+    idx: usize,
+    input: &BashInput,
+    output: &BashOutput,
+) -> Message {
     let tool_use = ToolUse {
         id: format!("combo_preview_{name}_{idx}"),
         name: BASH_TOOL_NAME.to_string(),
-        input: json!({ "command": command }),
+        input: serde_json::to_value(input).unwrap_or_else(|_| {
+            json!({
+                "command": input.command,
+                "timeout": input.timeout,
+            })
+        }),
     };
-    let parsed = parse_command_output(output);
-    let is_error = parsed.exit_code != 0;
-    let output_value = serde_json::to_value(&parsed).unwrap_or_else(|_| {
+    let is_error = output.exit_code != 0;
+    let output_value = serde_json::to_value(output).unwrap_or_else(|_| {
         json!({
-            "exit_code": parsed.exit_code,
-            "stdout": parsed.stdout,
-            "stderr": parsed.stderr,
-            "timed_out": parsed.timed_out,
+            "exit_code": output.exit_code,
+            "stdout": output.stdout,
+            "stderr": output.stderr,
+            "timed_out": output.timed_out,
         })
     });
     let mut tool = Tool::new(tool_use.clone());
@@ -647,40 +656,6 @@ fn build_command_message(name: &str, idx: usize, command: &str, output: &str) ->
         output: Final::Json(output_value),
     }));
     Message::bot(tool.into())
-}
-
-fn parse_command_output(output: &str) -> BashOutput {
-    let mut body = output.trim_end().to_string();
-    let mut exit_code = 0u8;
-    let exit_marker = "Exit code: ";
-
-    if let Some(idx) = body.rfind(exit_marker) {
-        let (prefix, suffix) = body.split_at(idx);
-        if let Some(code_str) = suffix.strip_prefix(exit_marker)
-            && let Ok(code) = code_str.trim().parse::<u16>()
-        {
-            exit_code = code.min(u8::MAX as u16) as u8;
-            body = prefix.trim_end().to_string();
-        }
-    }
-
-    let stderr_marker = "\n\nSTDERR:\n";
-    let (stdout, stderr) = if let Some(idx) = body.find(stderr_marker) {
-        let (out, err) = body.split_at(idx);
-        let err = err.strip_prefix(stderr_marker).unwrap_or_default();
-        (out.to_string(), err.to_string())
-    } else if let Some(rest) = body.strip_prefix("STDERR:\n") {
-        (String::new(), rest.to_string())
-    } else {
-        (body, String::new())
-    };
-
-    BashOutput {
-        exit_code,
-        stdout,
-        stderr,
-        timed_out: false,
-    }
 }
 
 #[cfg(test)]
@@ -761,15 +736,5 @@ mod tests {
         let session = combo.save();
         let loaded = Combo::load(session).unwrap();
         assert!(loaded.height(80) > 1);
-    }
-
-    #[test]
-    fn parse_command_output_splits_sections() {
-        let output = "out1\nout2\n\nSTDERR:\nerr1\nerr2\n\nExit code: 42";
-        let parsed = parse_command_output(output);
-        assert_eq!(parsed.exit_code, 42);
-        assert_eq!(parsed.stdout, "out1\nout2");
-        assert_eq!(parsed.stderr, "err1\nerr2");
-        assert!(!parsed.timed_out);
     }
 }

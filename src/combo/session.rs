@@ -165,7 +165,7 @@ impl SessionSocketClient {
         self.send_message(&ClientMessage::Metadata(payload)).await
     }
 
-    pub async fn send_metadata_with_response(
+    pub async fn send_metadata_wait_response(
         &self,
         payload: MetadataPayload,
     ) -> ClientResult<MetadataResponse> {
@@ -180,7 +180,7 @@ impl SessionSocketClient {
         self.send_message(&ClientMessage::Prompt(payload)).await
     }
 
-    pub async fn send_prompt_with_response(&self, payload: PromptPayload) -> ClientResult<String> {
+    pub async fn send_prompt_wait_response(&self, payload: PromptPayload) -> ClientResult<String> {
         self.send_message(&ClientMessage::Prompt(payload)).await?;
         match self.read_server_message().await? {
             ServerMessage::PromptResponse(response) => Ok(response),
@@ -496,7 +496,7 @@ mod tests {
         let send_payload = payload.clone();
         let send_task = tokio::spawn(async move {
             client
-                .send_metadata_with_response(send_payload)
+                .send_metadata_wait_response(send_payload)
                 .await
                 .expect("send metadata with response")
         });
@@ -522,7 +522,7 @@ mod tests {
 
     #[tokio::test]
     #[snafu::report]
-    async fn send_prompt_with_response_over_socket() -> Result<()> {
+    async fn send_prompt_wait_response_over_socket() -> Result<()> {
         let (_dir, socket_path) = unique_socket_path()?;
         let server = SessionSocketServer::bind(&socket_path)
             .await
@@ -543,7 +543,7 @@ mod tests {
         let send_payload = payload.clone();
         let send_task = tokio::spawn(async move {
             client
-                .send_prompt_with_response(send_payload)
+                .send_prompt_wait_response(send_payload)
                 .await
                 .expect("send prompt with response")
         });

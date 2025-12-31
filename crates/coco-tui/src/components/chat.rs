@@ -1,12 +1,10 @@
-use anthropic::{
-    Block as AnthropicBlock, Client as AnthropicClient, Tool as AnthropicTool, ToolChoice,
-};
+use anthropic::Block as AnthropicBlock;
 use coco_macro::ComponentExt;
-use code_combo::tools::{BASH_TOOL_NAME, BashTool, Tool as ComboTool};
+use code_combo::tools::BASH_TOOL_NAME;
 use code_combo::{
     Agent, Block as ChatBlock, Config, Content as ChatContent, Instruction, Message as ChatMessage,
-    Output, PromptRequest, PromptSchema, ProviderKind, Role, SessionEnv, StarterCommand,
-    StarterError, StarterEvent, StopReason, TextEdit, ToolUse, discover_starters,
+    Output, PromptRequest, PromptSchema, Role, SessionEnv, StarterCommand, StarterError,
+    StarterEvent, StopReason, TextEdit, ToolUse, discover_starters,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -19,7 +17,7 @@ use ratatui::{
 };
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map as JsonMap, json};
+use serde_json::json;
 use std::time::Duration;
 use time::OffsetDateTime;
 use tokio::{sync::mpsc, time::Instant};
@@ -131,8 +129,6 @@ enum ViewMode {
 }
 
 const CTRL_C_WINDOW: Duration = Duration::from_secs(2);
-const COMBO_REPLY_TOOL_NAME: &str = "combo_reply";
-
 #[derive(Debug, Default)]
 struct CancellationGuard {
     last_hit: State<Option<Instant>>,
@@ -1328,6 +1324,7 @@ async fn task_combo_execute(name: String, system_prompt: String, cancel_token: C
     let responder_prompt = system_prompt.clone();
     let responder_cancel = cancel_token.clone();
     tokio::task::spawn(async move {
+        let mut reply_agent = Agent::new(responder_config);
         while let Some(request) = prompt_rx.recv().await {
             let PromptRequest {
                 prompt,
@@ -1345,7 +1342,7 @@ async fn task_combo_execute(name: String, system_prompt: String, cancel_token: C
                 )
                 .ok();
             let response = respond_prompt_request(
-                &responder_config,
+                &mut reply_agent,
                 &responder_prompt,
                 prompt,
                 schemas,
@@ -1434,7 +1431,7 @@ async fn task_combo_execute(name: String, system_prompt: String, cancel_token: C
 }
 
 async fn respond_prompt_request(
-    config: &Config,
+    agent: &mut Agent,
     system_prompt: &str,
     prompt: String,
     schemas: Vec<PromptSchema>,
@@ -1445,62 +1442,53 @@ async fn respond_prompt_request(
     if cancel_token.is_cancelled() {
         return Err("prompt reply cancelled".to_string());
     }
-    let reply_tool = build_reply_tool(&schemas)?;
-    let client = build_reply_client(config)?;
-    let messages = build_prompt_messages(&prompt, &instructions);
-    let tool_choice = ToolChoice::tool()
-        .name(COMBO_REPLY_TOOL_NAME)
-        .disable_parallel_tool_use(true)
-        .call();
-    let system_prompt = system_prompt.trim();
-    let system_prompt = if system_prompt.is_empty() {
-        None
-    } else {
-        Some(system_prompt)
-    };
-    let tools = build_prompt_tools(reply_tool, &instructions);
-    let response = client
-        .messages_with_tool_choice(system_prompt, messages, tools, tool_choice)
+    let reply = agent
+        .reply_prompt(system_prompt, prompt, schemas, instructions)
         .await
         .map_err(|err| err.to_string())?;
-    let tool_use = response
-        .content
-        .into_iter()
-        .find_map(|block| match block {
-            AnthropicBlock::ToolUse(tool_use) if tool_use.name == COMBO_REPLY_TOOL_NAME => {
-                Some(tool_use)
-            }
-            _ => None,
-        })
-        .ok_or_else(|| "reply tool use not found in response".to_string())?;
     tx.send(
         ComboEvent::ReplyToolUse {
-            tool_use: tool_use.clone(),
+            tool_use: reply.tool_use.clone(),
         }
         .into(),
     )
     .ok();
-    serde_json::to_string(&tool_use.input).map_err(|err| err.to_string())
+    Ok(reply.response)
 }
 
 fn build_instruction_messages(instructions: &[Instruction]) -> Vec<code_combo::Message> {
     let mut messages = Vec::new();
     for (idx, instruction) in instructions.iter().enumerate() {
         match instruction {
-            Instruction::Command { command, output } => {
+            Instruction::Command { input, output } => {
                 let tool_use_id = format!("combo_instruction_{idx}");
+                let input_value = serde_json::to_value(input).unwrap_or_else(|_| {
+                    json!({
+                        "command": input.command,
+                        "timeout": input.timeout,
+                    })
+                });
+                let output_value = serde_json::to_string(output).unwrap_or_else(|_| {
+                    json!({
+                        "exit_code": output.exit_code,
+                        "stdout": output.stdout,
+                        "stderr": output.stderr,
+                        "timed_out": output.timed_out,
+                    })
+                    .to_string()
+                });
                 messages.push(code_combo::Message::assistant(
                     code_combo::Content::Multiple(vec![AnthropicBlock::tool_use(
                         &tool_use_id,
                         BASH_TOOL_NAME,
-                        json!({ "command": command }),
+                        input_value,
                     )]),
                 ));
                 messages.push(code_combo::Message::user(code_combo::Content::Multiple(
                     vec![AnthropicBlock::tool_result(
                         &tool_use_id,
                         None,
-                        output.as_str().into(),
+                        output_value.as_str().into(),
                     )],
                 )));
             }
@@ -1512,29 +1500,6 @@ fn build_instruction_messages(instructions: &[Instruction]) -> Vec<code_combo::M
     messages
 }
 
-fn append_prompt_to_messages(messages: &mut Vec<code_combo::Message>, prompt: &str) {
-    if let Some(last) = messages.last_mut()
-        && matches!(last.role, Role::User)
-    {
-        match &mut last.content {
-            ChatContent::Text(text) => {
-                if !text.is_empty() {
-                    text.push('\n');
-                }
-                text.push_str(prompt);
-            }
-            ChatContent::Multiple(blocks) => {
-                blocks.push(AnthropicBlock::Text {
-                    text: prompt.to_string(),
-                });
-            }
-        }
-        return;
-    }
-
-    messages.push(code_combo::Message::user(prompt.into()));
-}
-
 fn build_combo_messages(instructions: &[Instruction]) -> (Vec<code_combo::Message>, ChatContent) {
     let mut messages = build_instruction_messages(instructions);
     if let Some(message) = messages.pop() {
@@ -1544,82 +1509,6 @@ fn build_combo_messages(instructions: &[Instruction]) -> (Vec<code_combo::Messag
         messages.push(message);
     }
     (messages, ChatContent::Text(String::new()))
-}
-
-fn build_prompt_messages(prompt: &str, instructions: &[Instruction]) -> Vec<code_combo::Message> {
-    if instructions.is_empty() {
-        return vec![code_combo::Message::user(prompt.into())];
-    }
-
-    let mut messages = build_instruction_messages(instructions);
-    append_prompt_to_messages(&mut messages, prompt);
-    messages
-}
-
-fn build_prompt_tools(
-    reply_tool: AnthropicTool,
-    instructions: &[Instruction],
-) -> Vec<AnthropicTool> {
-    let has_command = instructions
-        .iter()
-        .any(|instruction| matches!(instruction, Instruction::Command { .. }));
-    if !has_command {
-        return vec![reply_tool];
-    }
-    let bash = BashTool::default();
-    let bash_tool = AnthropicTool {
-        name: bash.name().to_string(),
-        description: bash.description().to_string(),
-        input_schema: bash.input_schema(),
-    };
-    vec![reply_tool, bash_tool]
-}
-
-fn build_reply_tool(schemas: &[PromptSchema]) -> std::result::Result<AnthropicTool, String> {
-    let mut properties = JsonMap::new();
-    let mut required = Vec::new();
-    for schema in schemas {
-        properties.insert(
-            schema.name.clone(),
-            json!({
-                "type": "string",
-                "description": schema.description.as_str(),
-            }),
-        );
-        required.push(schema.name.clone());
-    }
-    if properties.is_empty() {
-        return Err("schemas cannot be empty".to_string());
-    }
-    let input_schema = json!({
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": false,
-    });
-    Ok(AnthropicTool {
-        name: COMBO_REPLY_TOOL_NAME.to_string(),
-        description: "Return the response using the provided schema.".to_string(),
-        input_schema,
-    })
-}
-
-fn build_reply_client(config: &Config) -> std::result::Result<AnthropicClient, String> {
-    let mut config = config.clone();
-    let Some(provider) = config.providers.first_mut() else {
-        return Err("no provider configured".to_string());
-    };
-    if !matches!(provider.kind, ProviderKind::Anthropic) {
-        return Err("only anthropic providers are supported for reply".to_string());
-    }
-    let token = provider.api_key.get().map_err(|err| err.to_string())?;
-    AnthropicClient::builder()
-        .base_url(&provider.base_url)
-        .token(token)
-        .model(&provider.name)
-        .user_agent(code_combo::version::user_agent().to_string())
-        .build()
-        .map_err(|err| err.to_string())
 }
 
 async fn task_chat(mut agent: Agent, content: ChatContent, cancel_token: CancellationToken) {

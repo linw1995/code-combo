@@ -16,6 +16,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::tools::{BashInput, BashOutput};
 use crate::{
     ClientMessage, Combo, ComboMetadata, ComboMode, ControlAction, Instruction, MetadataPayload,
     MetadataResponse, PromptSchema, RecordControl, RecordEndPayload, ServerMessage, SessionEnv,
@@ -244,22 +245,29 @@ fn record_to_instruction(record: RecordedCommand) -> Instruction {
 }
 
 fn record_to_instruction_ref(record: &RecordedCommand) -> Instruction {
-    let mut sections = vec![];
-    if !record.stdout.is_empty() {
-        sections.push(record.stdout.join("\n"));
-    }
-    if !record.stderr.is_empty() {
-        let mut stderr = String::from("STDERR:\n");
-        stderr.push_str(&record.stderr.join("\n"));
-        sections.push(stderr);
-    }
-    if let Some(code) = record.exit_code {
-        sections.push(format!("Exit code: {code}"));
-    }
+    let stdout = if record.stdout.is_empty() {
+        String::new()
+    } else {
+        record.stdout.join("\n")
+    };
+    let stderr = if record.stderr.is_empty() {
+        String::new()
+    } else {
+        record.stderr.join("\n")
+    };
+    let exit_code = record
+        .exit_code
+        .and_then(|code| u8::try_from(code).ok())
+        .unwrap_or(255);
 
     Instruction::Command {
-        command: record.command.join(" "),
-        output: sections.join("\n\n"),
+        input: BashInput::new(record.command.join(" ")),
+        output: BashOutput {
+            exit_code,
+            stdout,
+            stderr,
+            timed_out: false,
+        },
     }
 }
 
@@ -1060,22 +1068,26 @@ mod tests {
         assert_eq!(combo.instructions.len(), 1);
         debug!(?combo, "print combo");
 
-        let Some(Instruction::Command { command, output }) = combo.instructions.first() else {
+        let Some(Instruction::Command { input, output }) = combo.instructions.first() else {
             panic!("expected first instruction to be Instruction::Command");
         };
         assert!(
-            command.starts_with("bash -c "),
-            "unexpected command: {command}"
-        );
-        assert!(output.contains("out"), "unexpected output: {output}");
-        assert!(
-            output.contains("STDERR:\nerr"),
-            "unexpected output: {output}"
+            input.command.starts_with("bash -c "),
+            "unexpected command: {}",
+            input.command
         );
         assert!(
-            output.contains("Exit code: 0"),
-            "unexpected output: {output}"
+            output.stdout.contains("out"),
+            "unexpected stdout: {}",
+            output.stdout
         );
+        assert!(
+            output.stderr.contains("err"),
+            "unexpected stderr: {}",
+            output.stderr
+        );
+        assert_eq!(output.exit_code, 0, "unexpected exit_code");
+        assert!(!output.timed_out, "unexpected timed_out");
 
         Ok(())
     }
@@ -1111,14 +1123,19 @@ mod tests {
             Some(&Instruction::Text("Please do the thing".to_string()))
         );
 
-        let Some(Instruction::Command { command, output }) = combo.instructions.get(1) else {
+        let Some(Instruction::Command { input, output }) = combo.instructions.get(1) else {
             panic!("expected second instruction to be Instruction::Command");
         };
         assert!(
-            command.starts_with("bash -c "),
-            "unexpected command: {command}"
+            input.command.starts_with("bash -c "),
+            "unexpected command: {}",
+            input.command
         );
-        assert!(output.contains("out"), "unexpected output: {output}");
+        assert!(
+            output.stdout.contains("out"),
+            "unexpected stdout: {}",
+            output.stdout
+        );
 
         Ok(())
     }
@@ -1130,7 +1147,7 @@ mod tests {
         let client = SessionSocketClient::connect(session_env.socket_path()).await?;
 
         let _ = client
-            .send_metadata_with_response(MetadataPayload {
+            .send_metadata_wait_response(MetadataPayload {
                 name: "interrupt".into(),
                 description: None,
                 model: None,
@@ -1162,7 +1179,7 @@ mod tests {
         let client = SessionSocketClient::connect(session_env.socket_path()).await?;
 
         let response = client
-            .send_metadata_with_response(MetadataPayload {
+            .send_metadata_wait_response(MetadataPayload {
                 name: "meta".into(),
                 description: None,
                 model: None,
@@ -1172,7 +1189,7 @@ mod tests {
         assert!(response.discovery);
 
         let second = client
-            .send_metadata_with_response(MetadataPayload {
+            .send_metadata_wait_response(MetadataPayload {
                 name: "again".into(),
                 description: None,
                 model: None,
