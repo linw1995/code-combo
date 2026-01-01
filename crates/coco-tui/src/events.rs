@@ -67,9 +67,9 @@ pub enum ComboEvent {
     Executing {
         name: String,
     },
-    RecordStarted {
+    RecordStart {
         name: String,
-        command: Vec<String>,
+        tool_use: ToolUse,
     },
     Output {
         name: String,
@@ -77,10 +77,14 @@ pub enum ComboEvent {
     },
     RecordOutput {
         name: String,
+        tool_use_id: String,
         chunk: OutputChunk,
     },
-    RecordEnded {
+    RecordEnd {
         name: String,
+        tool_use_id: String,
+        is_error: bool,
+        output: Final,
     },
     Preview {
         name: String,

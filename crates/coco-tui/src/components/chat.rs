@@ -347,9 +347,9 @@ impl Chat<'static> {
             ComboEvent::Discovering
             | ComboEvent::Executing { .. }
             | ComboEvent::Output { .. }
-            | ComboEvent::RecordStarted { .. }
+            | ComboEvent::RecordStart { .. }
             | ComboEvent::RecordOutput { .. }
-            | ComboEvent::RecordEnded { .. }
+            | ComboEvent::RecordEnd { .. }
             | ComboEvent::Preview { .. } => {
                 self.set_processing();
             }
@@ -1345,29 +1345,42 @@ async fn task_combo_execute(name: String, system_prompt: String, cancel_token: C
                 )
                 .unwrap();
             }
-            StarterEvent::RecordChunk { chunk } => {
+            StarterEvent::RecordOutput { tool_use_id, chunk } => {
                 tx.send(
                     ComboEvent::RecordOutput {
                         name: name.clone(),
+                        tool_use_id,
                         chunk,
                     }
                     .into(),
                 )
                 .unwrap();
             }
-            StarterEvent::RecordStarted { command } => {
+            StarterEvent::RecordStart { tool_use } => {
                 tx.send(
-                    ComboEvent::RecordStarted {
+                    ComboEvent::RecordStart {
                         name: name.clone(),
-                        command,
+                        tool_use,
                     }
                     .into(),
                 )
                 .unwrap();
             }
-            StarterEvent::RecordEnded { .. } => {
-                tx.send(ComboEvent::RecordEnded { name: name.clone() }.into())
-                    .unwrap();
+            StarterEvent::RecordEnd {
+                tool_use_id,
+                is_error,
+                output,
+            } => {
+                tx.send(
+                    ComboEvent::RecordEnd {
+                        name: name.clone(),
+                        tool_use_id,
+                        is_error,
+                        output,
+                    }
+                    .into(),
+                )
+                .unwrap();
             }
             _ => (),
         })

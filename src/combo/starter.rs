@@ -17,13 +17,14 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::tools::{BashInput, BashOutput};
+use crate::tools::{BASH_TOOL_NAME, BashInput, BashOutput, Final};
 use crate::{
     ClientMessage, Combo, ComboMetadata, ComboMode, ControlAction, Instruction, MetadataPayload,
     MetadataResponse, PromptSchema, RecordControl, RecordEndPayload, ServerMessage, SessionEnv,
-    SessionSocketServer, StreamKind,
+    SessionSocketServer, StreamKind, ToolUse,
     exec::{ChunkConfig, ExecCommand, OutputChunk, ProcessEvent},
 };
+use serde_json::json;
 
 #[derive(Debug, Clone, Snafu)]
 pub enum StarterError {
@@ -45,14 +46,32 @@ pub struct Starter {
 
 #[derive(Debug, Clone)]
 pub enum StarterEvent {
-    Started { command: String, args: Vec<String> },
-    Output { chunk: OutputChunk },
-    RecordStarted { command: Vec<String> },
-    RecordChunk { chunk: OutputChunk },
-    RecordEnded { exit_code: Option<i32> },
-    Finished { exit_code: Option<i32> },
+    Started {
+        command: String,
+        args: Vec<String>,
+    },
+    Output {
+        chunk: OutputChunk,
+    },
+    RecordStart {
+        tool_use: ToolUse,
+    },
+    RecordOutput {
+        tool_use_id: String,
+        chunk: OutputChunk,
+    },
+    RecordEnd {
+        tool_use_id: String,
+        is_error: bool,
+        output: Final,
+    },
+    Finished {
+        exit_code: Option<i32>,
+    },
     Cancelled,
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
 }
 
 #[derive(Debug)]
@@ -79,6 +98,7 @@ enum SessionItem {
 
 #[derive(Debug)]
 struct RecordedCommand {
+    tool_use_id: String,
     command: Vec<String>,
     stdout: Vec<String>,
     stderr: Vec<String>,
@@ -248,7 +268,7 @@ fn record_to_instruction(record: RecordedCommand) -> Instruction {
     record_to_instruction_ref(&record)
 }
 
-fn record_to_instruction_ref(record: &RecordedCommand) -> Instruction {
+fn record_output(record: &RecordedCommand) -> BashOutput {
     let stdout = if record.stdout.is_empty() {
         String::new()
     } else {
@@ -264,14 +284,18 @@ fn record_to_instruction_ref(record: &RecordedCommand) -> Instruction {
         .and_then(|code| u8::try_from(code).ok())
         .unwrap_or(255);
 
+    BashOutput {
+        exit_code,
+        stdout,
+        stderr,
+        timed_out: false,
+    }
+}
+
+fn record_to_instruction_ref(record: &RecordedCommand) -> Instruction {
     Instruction::Command {
         input: BashInput::new(record.command.join(" ")),
-        output: BashOutput {
-            exit_code,
-            stdout,
-            stderr,
-            timed_out: false,
-        },
+        output: record_output(record),
     }
 }
 
@@ -708,7 +732,25 @@ async fn run_session_server(
                         .build());
                     }
                     let record_index = state.items.len();
+                    let name = state
+                        .metadata
+                        .as_ref()
+                        .map(|metadata| metadata.name.as_str())
+                        .unwrap_or("combo");
+                    let tool_use_id = format!("combo_record_{name}_{record_index}");
+                    let input = BashInput::new(payload.command.join(" "));
+                    let tool_use = ToolUse {
+                        id: tool_use_id.clone(),
+                        name: BASH_TOOL_NAME.to_string(),
+                        input: serde_json::to_value(&input).unwrap_or_else(|_| {
+                            json!({
+                                "command": input.command,
+                                "timeout": input.timeout,
+                            })
+                        }),
+                    };
                     state.items.push(SessionItem::Record(RecordedCommand {
+                        tool_use_id: tool_use_id.clone(),
                         command: payload.command.clone(),
                         stdout: Vec::new(),
                         stderr: Vec::new(),
@@ -721,9 +763,7 @@ async fn run_session_server(
                         }))
                         .await;
                     event_tx
-                        .send(StarterEvent::RecordStarted {
-                            command: payload.command.clone(),
-                        })
+                        .send(StarterEvent::RecordStart { tool_use })
                         .await
                         .ok();
                     first_message = false;
@@ -749,13 +789,15 @@ async fn run_session_server(
                     else {
                         continue;
                     };
+                    let tool_use_id = record.tool_use_id.clone();
 
                     match stream {
                         StreamKind::Stdout => record.stdout.extend(lines.clone()),
                         StreamKind::Stderr => record.stderr.extend(lines.clone()),
                     }
                     event_tx
-                        .send(StarterEvent::RecordChunk {
+                        .send(StarterEvent::RecordOutput {
+                            tool_use_id,
                             chunk: OutputChunk {
                                 timestamp: OffsetDateTime::now_utc().unix_timestamp(),
                                 stream,
@@ -797,8 +839,23 @@ async fn run_session_server(
                         record.stderr.push(stderr);
                     }
                     record.exit_code = exit_code;
+                    let tool_use_id = record.tool_use_id.clone();
+                    let output = record_output(record);
+                    let is_error = output.exit_code != 0;
+                    let output_value = serde_json::to_value(&output).unwrap_or_else(|_| {
+                        json!({
+                            "exit_code": output.exit_code,
+                            "stdout": output.stdout,
+                            "stderr": output.stderr,
+                            "timed_out": output.timed_out,
+                        })
+                    });
                     event_tx
-                        .send(StarterEvent::RecordEnded { exit_code })
+                        .send(StarterEvent::RecordEnd {
+                            tool_use_id,
+                            is_error,
+                            output: Final::from(output_value),
+                        })
                         .await
                         .ok();
                 }
