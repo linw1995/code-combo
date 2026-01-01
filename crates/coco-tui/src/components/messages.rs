@@ -20,7 +20,10 @@ use crate::{
     session::{self, Session},
 };
 
-use super::{Action, AnswerEvent, AskEvent, Component, Content, Event, Message};
+use super::{
+    Action, AnswerEvent, AskEvent, Component, Content, Event, Message, NavigationKey,
+    NavigationResult,
+};
 
 mod combo;
 mod fold;
@@ -204,6 +207,99 @@ impl Messages {
         } else {
             self.update_focus(Some(self.messages.len() - 1));
             true
+        }
+    }
+
+    pub fn has_actionable(&self) -> bool {
+        self.messages
+            .read()
+            .iter()
+            .any(|message| message.is_actionable())
+    }
+
+    pub fn select_first_actionable(&mut self) -> bool {
+        let idx = {
+            let messages = self.messages.read();
+            messages
+                .iter()
+                .enumerate()
+                .find(|(_, message)| message.is_actionable())
+                .map(|(idx, _)| idx)
+        };
+        if let Some(idx) = idx {
+            self.update_focus(Some(idx));
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn select_next_actionable(&mut self) -> bool {
+        let Some(current) = self.focus.get() else {
+            return false;
+        };
+        let idx = {
+            let messages = self.messages.read();
+            messages
+                .iter()
+                .enumerate()
+                .skip(current + 1)
+                .find(|(_, message)| message.is_actionable())
+                .map(|(idx, _)| idx)
+        };
+        if let Some(idx) = idx {
+            self.update_focus(Some(idx));
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn select_prev_actionable(&mut self) -> bool {
+        let Some(current) = self.focus.get() else {
+            return false;
+        };
+        let idx = {
+            let messages = self.messages.read();
+            messages
+                .iter()
+                .enumerate()
+                .take(current)
+                .rev()
+                .find(|(_, message)| message.is_actionable())
+                .map(|(idx, _)| idx)
+        };
+        if let Some(idx) = idx {
+            self.update_focus(Some(idx));
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn handle_navigation(&mut self, key: NavigationKey) -> NavigationResult {
+        let Some(idx) = self.focus.get() else {
+            return NavigationResult::Ignored;
+        };
+        let child_result = self.messages.write_untracked()[idx].handle_navigation(key);
+        if !matches!(child_result, NavigationResult::Ignored) {
+            return NavigationResult::Forwarded;
+        }
+        match key {
+            NavigationKey::Up => {
+                if self.select_prev() {
+                    NavigationResult::Moved
+                } else {
+                    NavigationResult::Boundary
+                }
+            }
+            NavigationKey::Down => {
+                if self.select_next() {
+                    NavigationResult::Moved
+                } else {
+                    NavigationResult::Boundary
+                }
+            }
         }
     }
 

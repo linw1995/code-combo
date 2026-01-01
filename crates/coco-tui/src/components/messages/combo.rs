@@ -22,8 +22,8 @@ use super::streaming::StreamedLines;
 use crate::{
     actions::Action,
     components::{
-        Component, Content, ContentComponent, Message, Messages, Persistable, Plain, ShortcutHints,
-        Tool,
+        Component, Content, ContentComponent, Message, Messages, NavigationKey, NavigationResult,
+        Persistable, Plain, ShortcutHints, Tool,
     },
     error::*,
     events::{AnswerEvent, ComboEvent, Event},
@@ -92,6 +92,7 @@ pub struct Combo {
     state: State<Inner>,
     messages: Messages,
     is_focused: bool,
+    is_child_focused: bool,
 }
 
 const LIMIT: usize = 10;
@@ -114,11 +115,43 @@ impl Combo {
             }),
             messages: Messages::default(),
             is_focused: false,
+            is_child_focused: false,
         }
     }
 
     fn has_collapsible_body(&self) -> bool {
         matches!(self.state.starter_state, StarterState::Finalized) && self.has_body_content()
+    }
+
+    fn can_focus_messages(&self) -> bool {
+        if !matches!(self.state.view, ComboView::Messages) {
+            return false;
+        }
+        if self.has_collapsible_body() && self.state.display_state.is_collapsed() {
+            return false;
+        }
+        self.messages.has_actionable()
+    }
+
+    fn clear_child_focus(&mut self) {
+        self.is_child_focused = false;
+        self.messages.blur();
+    }
+
+    fn handle_tab_key(&mut self) {
+        if !self.can_focus_messages() {
+            return;
+        }
+        if !self.is_child_focused {
+            if self.messages.select_first_actionable() {
+                self.is_child_focused = true;
+            }
+            return;
+        }
+        if self.messages.select_next_actionable() {
+            return;
+        }
+        self.clear_child_focus();
     }
 
     fn on_combo_event(&mut self, event: &ComboEvent) {
@@ -136,6 +169,7 @@ impl Combo {
             }
             ComboEvent::Executing { name } => {
                 if &self.state.name == name {
+                    self.clear_child_focus();
                     let mut state = self.state.write();
                     state.starter_state = StarterState::Executing;
                     state.is_error = false;
@@ -179,6 +213,7 @@ impl Combo {
                     .map(|name| name == &self.state.name)
                     .unwrap_or(true)
                 {
+                    self.clear_child_focus();
                     {
                         let mut state = self.state.write();
                         state.starter_state = StarterState::Cancelled;
@@ -216,6 +251,7 @@ impl Combo {
     }
 
     fn toggle_view(&mut self) {
+        self.clear_child_focus();
         let mut state = self.state.write();
         state.view = match state.view {
             ComboView::Messages => ComboView::Stream,
@@ -224,11 +260,13 @@ impl Combo {
     }
 
     fn toggle_display_state(&mut self) {
+        self.clear_child_focus();
         let mut state = self.state.write();
         state.display_state = state.display_state.toggle();
     }
 
     fn on_blur(&mut self) {
+        self.clear_child_focus();
         if self.has_collapsible_body() {
             self.state.write().display_state.collapse();
         }
@@ -243,6 +281,7 @@ impl Combo {
     }
 
     fn rebuild_messages(&mut self) {
+        self.clear_child_focus();
         let (name, instructions, error_message) = {
             let state = self.state.read();
             (
@@ -481,15 +520,26 @@ impl Content for Combo {
     }
 
     fn is_actionable(&self) -> bool {
-        self.has_collapsible_body() || self.can_toggle_view()
+        self.has_collapsible_body() || self.can_toggle_view() || self.can_focus_messages()
     }
 
     fn shortcut_hints(&self) -> ShortcutHints {
-        if !self.has_collapsible_body() && !self.can_toggle_view() {
+        if !self.has_collapsible_body() && !self.can_toggle_view() && !self.can_focus_messages() {
             return ShortcutHints::default();
         }
         let mut hints = ShortcutHints::default();
-        if self.has_collapsible_body() {
+        if self.is_child_focused {
+            hints.extend(self.messages.shortcut_hints());
+        }
+        if self.can_focus_messages() {
+            let tab_text = if self.is_child_focused {
+                ("Next", "Tab")
+            } else {
+                ("Select", "Tab")
+            };
+            hints.push_visible(&[tab_text]);
+        }
+        if self.has_collapsible_body() && !self.is_child_focused {
             let toggle_text = if self.state.display_state.is_collapsed() {
                 ("Unfold", "z")
             } else {
@@ -497,7 +547,7 @@ impl Content for Combo {
             };
             hints.push_visible(&[toggle_text]);
         }
-        if self.can_toggle_view() {
+        if self.can_toggle_view() && !self.is_child_focused {
             hints.push_visible(&[("View", "v")]);
         }
         hints
@@ -524,6 +574,7 @@ impl Persistable for Combo {
             state: State::new(state),
             messages: Messages::default(),
             is_focused: false,
+            is_child_focused: false,
         };
         combo.rebuild_messages();
         Ok(combo)
@@ -536,7 +587,17 @@ impl Component for Combo {
     }
 
     fn handle_key_event(&mut self, key: &KeyEvent) {
-        if !self.has_collapsible_body() && !self.can_toggle_view() {
+        if let (KeyModifiers::NONE, KeyCode::Tab) = (key.modifiers, key.code) {
+            self.handle_tab_key();
+            return;
+        }
+
+        if self.is_child_focused {
+            self.messages.handle_key_event(key);
+            return;
+        }
+
+        if !self.has_collapsible_body() && !self.can_toggle_view() && !self.can_focus_messages() {
             return;
         }
 
@@ -606,6 +667,21 @@ impl Component for Combo {
         }
         Ok(())
     }
+
+    fn handle_navigation(&mut self, key: NavigationKey) -> NavigationResult {
+        if !self.is_child_focused {
+            return NavigationResult::Ignored;
+        }
+        let moved = match key {
+            NavigationKey::Up => self.messages.select_prev_actionable(),
+            NavigationKey::Down => self.messages.select_next_actionable(),
+        };
+        if moved {
+            NavigationResult::Moved
+        } else {
+            NavigationResult::Boundary
+        }
+    }
 }
 
 impl ContentComponent for Combo {}
@@ -664,9 +740,26 @@ mod tests {
     use crate::events::{ComboEvent, Event};
 
     use super::*;
+    use code_combo::tools::{BashInput, BashOutput};
 
     fn test_key_z() -> KeyEvent {
         KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE)
+    }
+
+    fn test_key_tab() -> KeyEvent {
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)
+    }
+
+    fn make_command_instruction(command: &str) -> code_combo::Instruction {
+        code_combo::Instruction::Command {
+            input: BashInput::new(command.to_string()),
+            output: BashOutput {
+                exit_code: 0,
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+                timed_out: false,
+            },
+        }
     }
 
     fn make_starter(name: &str) -> code_combo::Starter {
@@ -681,6 +774,24 @@ mod tests {
                 instructions: vec![code_combo::Instruction::Text(
                     "line1\nline2\nline3".to_string(),
                 )],
+            }),
+        }
+    }
+
+    fn make_starter_with_commands(name: &str, commands: &[&str]) -> code_combo::Starter {
+        let instructions = commands
+            .iter()
+            .map(|command| make_command_instruction(command))
+            .collect::<Vec<_>>();
+        code_combo::Starter {
+            path: "/tmp/demo".to_string(),
+            combo: Ok(code_combo::Combo {
+                metadata: code_combo::ComboMetadata {
+                    name: name.to_string(),
+                    description: String::new(),
+                    mode: code_combo::ComboMode::Unknown,
+                },
+                instructions,
             }),
         }
     }
@@ -736,5 +847,47 @@ mod tests {
         let session = combo.save();
         let loaded = Combo::load(session).unwrap();
         assert!(loaded.height(80) > 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn combo_cycles_actionable_messages_with_tab() {
+        let mut combo = Combo::new("demo");
+        combo.handle_event(&Event::Combo(ComboEvent::Executed {
+            name: "demo".to_string(),
+            starter: make_starter_with_commands("demo", &["echo 1", "echo 2"]),
+        }));
+
+        assert!(!combo.is_child_focused);
+        assert_eq!(combo.messages.selected_idx(), None);
+
+        combo.handle_key_event(&test_key_tab());
+        assert!(combo.is_child_focused);
+        assert_eq!(combo.messages.selected_idx(), Some(0));
+
+        combo.handle_key_event(&test_key_tab());
+        assert!(combo.is_child_focused);
+        assert_eq!(combo.messages.selected_idx(), Some(1));
+
+        combo.handle_key_event(&test_key_tab());
+        assert!(!combo.is_child_focused);
+        assert_eq!(combo.messages.selected_idx(), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn combo_moves_actionable_messages_with_jk() {
+        let mut combo = Combo::new("demo");
+        combo.handle_event(&Event::Combo(ComboEvent::Executed {
+            name: "demo".to_string(),
+            starter: make_starter_with_commands("demo", &["echo 1", "echo 2"]),
+        }));
+
+        combo.handle_key_event(&test_key_tab());
+        assert_eq!(combo.messages.selected_idx(), Some(0));
+
+        combo.handle_navigation(NavigationKey::Down);
+        assert_eq!(combo.messages.selected_idx(), Some(1));
+
+        combo.handle_navigation(NavigationKey::Up);
+        assert_eq!(combo.messages.selected_idx(), Some(0));
     }
 }

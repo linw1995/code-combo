@@ -26,8 +26,9 @@ use tracing::{debug, warn};
 
 use super::{
     Action, AnswerEvent, AskEvent, BotMessage, CacheInvalidation, Combo, ComboAction, ComboEvent,
-    CommandPaletteAction, Component, Event, Input, Message, Messages, Plain, SessionAction,
-    ShortcutHints, ShortcutHintsPanel, Tool, ToolAction, TranscriptMessage,
+    CommandPaletteAction, Component, Event, Input, Message, Messages, NavigationKey,
+    NavigationResult, Plain, SessionAction, ShortcutHints, ShortcutHintsPanel, Tool, ToolAction,
+    TranscriptMessage,
 };
 use crate::{
     components::{CommandPalette, Content, Persistable},
@@ -1014,10 +1015,12 @@ impl Component for Chat<'static> {
                 }
             }
             (Messages, KM::NONE, Char('k')) => {
-                self.messages.select_prev();
+                let _ = self.messages.handle_navigation(NavigationKey::Up);
             }
             (Messages, KM::NONE, Char('j')) => {
-                if !self.messages.select_next() {
+                if self.messages.handle_navigation(NavigationKey::Down)
+                    == NavigationResult::Boundary
+                {
                     // Move focus to InputBlur when no more messages are available
                     self.messages.blur();
                     self.update_focus(Focus::InputBlur);

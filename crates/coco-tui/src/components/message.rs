@@ -5,7 +5,7 @@ use crossterm::event::KeyEvent;
 use ratatui::{Frame, prelude::*, widgets::Paragraph};
 use serde::{Deserialize, Serialize};
 
-use super::{Component, ShortcutHints};
+use super::{Component, NavigationKey, NavigationResult, ShortcutHints};
 use crate::{
     components::{Persistable, Tool},
     error::*,
@@ -157,6 +157,10 @@ impl Component for Message {
     fn handle_key_event(&mut self, event: &KeyEvent) {
         // Delegate the handle_key_event to its inner content.
         self.content.handle_key_event(event);
+    }
+
+    fn handle_navigation(&mut self, key: NavigationKey) -> NavigationResult {
+        self.content.handle_navigation(key)
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
