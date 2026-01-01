@@ -93,6 +93,7 @@ pub struct Combo {
     messages: Messages,
     is_focused: bool,
     is_child_focused: bool,
+    has_child_output: bool,
 }
 
 const LIMIT: usize = 10;
@@ -116,6 +117,7 @@ impl Combo {
             messages: Messages::default(),
             is_focused: false,
             is_child_focused: false,
+            has_child_output: false,
         }
     }
 
@@ -147,6 +149,32 @@ impl Combo {
         }
     }
 
+    fn clear_combo_stream(&mut self) {
+        let mut state = self.state.write();
+        state.output_chunks.clear();
+        state.preview_lines = StreamedLines::new(Some(LIMIT));
+    }
+
+    fn current_output_tool_id(&self) -> Option<String> {
+        let state = self.state.read();
+        let idx = state
+            .instructions
+            .iter()
+            .rposition(|instruction| matches!(instruction, Instruction::Command { .. }))?;
+        Some(format!("combo_preview_{}_{}", state.name, idx))
+    }
+
+    fn forward_output_to_child(&mut self, chunk: &OutputChunk) -> bool {
+        let Some(tool_id) = self.current_output_tool_id() else {
+            return false;
+        };
+        let event = Event::Answer(AnswerEvent::ToolOutput {
+            id: tool_id,
+            chunk: chunk.clone(),
+        });
+        self.messages.on_tool_event(&event).is_some()
+    }
+
     fn on_combo_event(&mut self, event: &ComboEvent) {
         match event {
             ComboEvent::NotFound { name } => {
@@ -163,6 +191,7 @@ impl Combo {
             ComboEvent::Executing { name } => {
                 if &self.state.name == name {
                     self.clear_child_focus();
+                    self.has_child_output = false;
                     let mut state = self.state.write();
                     state.starter_state = StarterState::Executing;
                     state.is_error = false;
@@ -222,6 +251,14 @@ impl Combo {
         if self.state.name != name {
             return;
         }
+        if self.forward_output_to_child(chunk) {
+            if !self.has_child_output {
+                self.clear_combo_stream();
+            }
+            self.has_child_output = true;
+            return;
+        }
+        self.has_child_output = false;
         let mut state = self.state.write();
         state.output_chunks.push(chunk.clone());
         state.preview_lines.push_chunk(chunk);
@@ -236,7 +273,8 @@ impl Combo {
     }
 
     fn has_stream_content(&self) -> bool {
-        !self.state.output_chunks.is_empty() || !self.state.preview_lines.is_empty()
+        !self.has_child_output
+            && (!self.state.output_chunks.is_empty() || !self.state.preview_lines.is_empty())
     }
 
     fn can_toggle_view(&self) -> bool {
@@ -294,7 +332,9 @@ impl Combo {
     fn messages_body_height(&self, width: u16) -> u16 {
         let messages_height =
             u16::try_from(self.messages.height_for_width(width)).unwrap_or(u16::MAX);
-        let preview_height = if matches!(self.state.starter_state, StarterState::Executing) {
+        let preview_height = if matches!(self.state.starter_state, StarterState::Executing)
+            && !self.has_child_output
+        {
             self.state.preview_lines.len() as u16
         } else {
             0
@@ -310,6 +350,9 @@ impl Combo {
     }
 
     fn stream_line_count(&self) -> u16 {
+        if self.has_child_output {
+            return 0;
+        }
         let total = self
             .state
             .output_chunks
@@ -325,7 +368,9 @@ impl Combo {
         }
         let messages_height =
             u16::try_from(self.messages.height_for_width(area.width)).unwrap_or(u16::MAX);
-        let preview_height = if matches!(self.state.starter_state, StarterState::Executing) {
+        let preview_height = if matches!(self.state.starter_state, StarterState::Executing)
+            && !self.has_child_output
+        {
             self.state.preview_lines.len() as u16
         } else {
             0
@@ -567,6 +612,7 @@ impl Persistable for Combo {
             messages: Messages::default(),
             is_focused: false,
             is_child_focused: false,
+            has_child_output: false,
         };
         combo.rebuild_messages();
         Ok(combo)
@@ -885,5 +931,27 @@ mod tests {
 
         combo.handle_navigation(NavigationKey::Up);
         assert_eq!(combo.messages.selected_idx(), Some(0));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn combo_routes_output_to_child_component() {
+        let mut combo = Combo::new("demo");
+        combo.handle_event(&Event::Combo(ComboEvent::Executed {
+            name: "demo".to_string(),
+            starter: make_starter_with_commands("demo", &["echo 1"]),
+        }));
+
+        combo.handle_event(&Event::Combo(ComboEvent::Output {
+            name: "demo".to_string(),
+            chunk: code_combo::OutputChunk {
+                timestamp: 0,
+                stream: code_combo::StreamKind::Stdout,
+                lines: vec!["line1".to_string()],
+            },
+        }));
+
+        assert!(combo.has_child_output);
+        assert!(combo.state.output_chunks.is_empty());
+        assert!(combo.state.preview_lines.is_empty());
     }
 }
