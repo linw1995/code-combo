@@ -138,20 +138,13 @@ impl Combo {
         self.messages.blur();
     }
 
-    fn handle_tab_key(&mut self) {
-        if !self.can_focus_messages() {
+    fn handle_enter_key(&mut self) {
+        if !self.can_focus_messages() || self.is_child_focused {
             return;
         }
-        if !self.is_child_focused {
-            if self.messages.select_first_actionable() {
-                self.is_child_focused = true;
-            }
-            return;
+        if self.messages.select_first_actionable() {
+            self.is_child_focused = true;
         }
-        if self.messages.select_next_actionable() {
-            return;
-        }
-        self.clear_child_focus();
     }
 
     fn on_combo_event(&mut self, event: &ComboEvent) {
@@ -532,12 +525,11 @@ impl Content for Combo {
             hints.extend(self.messages.shortcut_hints());
         }
         if self.can_focus_messages() {
-            let tab_text = if self.is_child_focused {
-                ("Next", "Tab")
+            if self.is_child_focused {
+                hints.push_visible(&[("Back", "Esc")]);
             } else {
-                ("Select", "Tab")
-            };
-            hints.push_visible(&[tab_text]);
+                hints.push_visible(&[("Enter", "CR")]);
+            }
         }
         if self.has_collapsible_body() && !self.is_child_focused {
             let toggle_text = if self.state.display_state.is_collapsed() {
@@ -587,13 +579,17 @@ impl Component for Combo {
     }
 
     fn handle_key_event(&mut self, key: &KeyEvent) {
-        if let (KeyModifiers::NONE, KeyCode::Tab) = (key.modifiers, key.code) {
-            self.handle_tab_key();
+        if self.is_child_focused {
+            if let (KeyModifiers::NONE, KeyCode::Esc) = (key.modifiers, key.code) {
+                self.clear_child_focus();
+                return;
+            }
+            self.messages.handle_key_event(key);
             return;
         }
 
-        if self.is_child_focused {
-            self.messages.handle_key_event(key);
+        if let (KeyModifiers::NONE, KeyCode::Enter) = (key.modifiers, key.code) {
+            self.handle_enter_key();
             return;
         }
 
@@ -746,8 +742,12 @@ mod tests {
         KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE)
     }
 
-    fn test_key_tab() -> KeyEvent {
-        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)
+    fn test_key_enter() -> KeyEvent {
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+    }
+
+    fn test_key_esc() -> KeyEvent {
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
     }
 
     fn make_command_instruction(command: &str) -> code_combo::Instruction {
@@ -850,7 +850,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn combo_cycles_actionable_messages_with_tab() {
+    async fn combo_enters_and_exits_actionable_messages_with_enter_and_esc() {
         let mut combo = Combo::new("demo");
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
             name: "demo".to_string(),
@@ -860,15 +860,11 @@ mod tests {
         assert!(!combo.is_child_focused);
         assert_eq!(combo.messages.selected_idx(), None);
 
-        combo.handle_key_event(&test_key_tab());
+        combo.handle_key_event(&test_key_enter());
         assert!(combo.is_child_focused);
         assert_eq!(combo.messages.selected_idx(), Some(0));
 
-        combo.handle_key_event(&test_key_tab());
-        assert!(combo.is_child_focused);
-        assert_eq!(combo.messages.selected_idx(), Some(1));
-
-        combo.handle_key_event(&test_key_tab());
+        combo.handle_key_event(&test_key_esc());
         assert!(!combo.is_child_focused);
         assert_eq!(combo.messages.selected_idx(), None);
     }
@@ -881,7 +877,7 @@ mod tests {
             starter: make_starter_with_commands("demo", &["echo 1", "echo 2"]),
         }));
 
-        combo.handle_key_event(&test_key_tab());
+        combo.handle_key_event(&test_key_enter());
         assert_eq!(combo.messages.selected_idx(), Some(0));
 
         combo.handle_navigation(NavigationKey::Down);
