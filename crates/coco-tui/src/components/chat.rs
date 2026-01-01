@@ -347,6 +347,9 @@ impl Chat<'static> {
             ComboEvent::Discovering
             | ComboEvent::Executing { .. }
             | ComboEvent::Output { .. }
+            | ComboEvent::RecordStarted { .. }
+            | ComboEvent::RecordOutput { .. }
+            | ComboEvent::RecordEnded { .. }
             | ComboEvent::Preview { .. } => {
                 self.set_processing();
             }
@@ -1331,8 +1334,8 @@ async fn task_combo_execute(name: String, system_prompt: String, cancel_token: C
         .session_env(session_env)
         .prompt_responder(prompt_tx)
         .execute()
-        .consume_with_cancel(cancel_token.clone(), |event| {
-            if let StarterEvent::Output { chunk } = event {
+        .consume_with_cancel(cancel_token.clone(), |event| match event {
+            StarterEvent::Output { chunk } => {
                 tx.send(
                     ComboEvent::Output {
                         name: name.clone(),
@@ -1342,6 +1345,31 @@ async fn task_combo_execute(name: String, system_prompt: String, cancel_token: C
                 )
                 .unwrap();
             }
+            StarterEvent::RecordChunk { chunk } => {
+                tx.send(
+                    ComboEvent::RecordOutput {
+                        name: name.clone(),
+                        chunk,
+                    }
+                    .into(),
+                )
+                .unwrap();
+            }
+            StarterEvent::RecordStarted { command } => {
+                tx.send(
+                    ComboEvent::RecordStarted {
+                        name: name.clone(),
+                        command,
+                    }
+                    .into(),
+                )
+                .unwrap();
+            }
+            StarterEvent::RecordEnded { .. } => {
+                tx.send(ComboEvent::RecordEnded { name: name.clone() }.into())
+                    .unwrap();
+            }
+            _ => (),
         })
         .await
     {

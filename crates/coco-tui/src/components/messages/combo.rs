@@ -94,6 +94,7 @@ pub struct Combo {
     is_focused: bool,
     is_child_focused: bool,
     has_child_output: bool,
+    active_record_tool_id: Option<String>,
 }
 
 const LIMIT: usize = 10;
@@ -118,6 +119,7 @@ impl Combo {
             is_focused: false,
             is_child_focused: false,
             has_child_output: false,
+            active_record_tool_id: None,
         }
     }
 
@@ -155,24 +157,52 @@ impl Combo {
         state.preview_lines = StreamedLines::new(Some(LIMIT));
     }
 
-    fn current_output_tool_id(&self) -> Option<String> {
-        let state = self.state.read();
-        let idx = state
-            .instructions
-            .iter()
-            .rposition(|instruction| matches!(instruction, Instruction::Command { .. }))?;
-        Some(format!("combo_preview_{}_{}", state.name, idx))
+    fn push_record_command(&mut self, command: Vec<String>) {
+        let input = BashInput::new(command.join(" "));
+        let (tool_use, tool_id) = {
+            let mut state = self.state.write();
+            let idx = state.instructions.len();
+            state.view = ComboView::Messages;
+            state.instructions.push(Instruction::Command {
+                input: input.clone(),
+                output: BashOutput {
+                    exit_code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    timed_out: false,
+                },
+            });
+            let tool_use = ToolUse {
+                id: format!("combo_preview_{}_{}", state.name, idx),
+                name: BASH_TOOL_NAME.to_string(),
+                input: serde_json::to_value(&input).unwrap_or_else(|_| {
+                    json!({
+                        "command": input.command,
+                        "timeout": input.timeout,
+                    })
+                }),
+            };
+            let tool_id = tool_use.id.clone();
+            (tool_use, tool_id)
+        };
+        self.messages.push(Message::bot(Tool::new(tool_use).into()));
+        self.active_record_tool_id = Some(tool_id);
+        self.has_child_output = false;
     }
 
     fn forward_output_to_child(&mut self, chunk: &OutputChunk) -> bool {
-        let Some(tool_id) = self.current_output_tool_id() else {
+        let Some(tool_id) = self.active_record_tool_id.clone() else {
             return false;
         };
         let event = Event::Answer(AnswerEvent::ToolOutput {
             id: tool_id,
             chunk: chunk.clone(),
         });
-        self.messages.on_tool_event(&event).is_some()
+        if self.messages.on_tool_event(&event).is_some() {
+            return true;
+        }
+        self.active_record_tool_id = None;
+        false
     }
 
     fn on_combo_event(&mut self, event: &ComboEvent) {
@@ -182,7 +212,19 @@ impl Combo {
                     self.state.write().starter_state = StarterState::NotFound
                 }
             }
-            ComboEvent::Output { name, chunk } => self.on_ouput_event(name, chunk),
+            ComboEvent::Output { name, chunk } => self.on_ouput_event(name, chunk, false),
+            ComboEvent::RecordStarted { name, command } => {
+                if &self.state.name == name {
+                    self.push_record_command(command.clone());
+                }
+            }
+            ComboEvent::RecordOutput { name, chunk } => self.on_ouput_event(name, chunk, true),
+            ComboEvent::RecordEnded { name } => {
+                if &self.state.name == name {
+                    self.active_record_tool_id = None;
+                    self.has_child_output = false;
+                }
+            }
             ComboEvent::Preview { name, instructions } => {
                 if &self.state.name == name {
                     self.replace_instructions(instructions);
@@ -191,6 +233,7 @@ impl Combo {
             ComboEvent::Executing { name } => {
                 if &self.state.name == name {
                     self.clear_child_focus();
+                    self.active_record_tool_id = None;
                     self.has_child_output = false;
                     let mut state = self.state.write();
                     state.starter_state = StarterState::Executing;
@@ -226,6 +269,8 @@ impl Combo {
                         state.starter_state = StarterState::Finalized;
                         state.display_state.expand();
                     }
+                    self.active_record_tool_id = None;
+                    self.has_child_output = false;
                     self.rebuild_messages();
                 }
             }
@@ -236,6 +281,8 @@ impl Combo {
                     .unwrap_or(true)
                 {
                     self.clear_child_focus();
+                    self.active_record_tool_id = None;
+                    self.has_child_output = false;
                     {
                         let mut state = self.state.write();
                         state.starter_state = StarterState::Cancelled;
@@ -247,11 +294,11 @@ impl Combo {
         }
     }
 
-    fn on_ouput_event(&mut self, name: &str, chunk: &OutputChunk) {
+    fn on_ouput_event(&mut self, name: &str, chunk: &OutputChunk, allow_forward: bool) {
         if self.state.name != name {
             return;
         }
-        if self.forward_output_to_child(chunk) {
+        if allow_forward && self.forward_output_to_child(chunk) {
             if !self.has_child_output {
                 self.clear_combo_stream();
             }
@@ -613,6 +660,7 @@ impl Persistable for Combo {
             is_focused: false,
             is_child_focused: false,
             has_child_output: false,
+            active_record_tool_id: None,
         };
         combo.rebuild_messages();
         Ok(combo)
@@ -936,12 +984,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn combo_routes_output_to_child_component() {
         let mut combo = Combo::new("demo");
-        combo.handle_event(&Event::Combo(ComboEvent::Executed {
+        combo.handle_event(&Event::Combo(ComboEvent::Executing {
             name: "demo".to_string(),
-            starter: make_starter_with_commands("demo", &["echo 1"]),
+        }));
+        combo.handle_event(&Event::Combo(ComboEvent::RecordStarted {
+            name: "demo".to_string(),
+            command: vec!["echo".to_string(), "1".to_string()],
         }));
 
-        combo.handle_event(&Event::Combo(ComboEvent::Output {
+        combo.handle_event(&Event::Combo(ComboEvent::RecordOutput {
             name: "demo".to_string(),
             chunk: code_combo::OutputChunk {
                 timestamp: 0,

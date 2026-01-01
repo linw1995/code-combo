@@ -67,9 +67,20 @@ pub enum ComboEvent {
     Executing {
         name: String,
     },
+    RecordStarted {
+        name: String,
+        command: Vec<String>,
+    },
     Output {
         name: String,
         chunk: OutputChunk,
+    },
+    RecordOutput {
+        name: String,
+        chunk: OutputChunk,
+    },
+    RecordEnded {
+        name: String,
     },
     Preview {
         name: String,
