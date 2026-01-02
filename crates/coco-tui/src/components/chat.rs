@@ -447,7 +447,8 @@ impl Chat<'static> {
     fn spawn_combo_execute(&mut self, name: String) {
         let cancel_token = self.cancellation_guard.start_token();
         let system_prompt = self.agent.system_prompt().to_string();
-        tokio::task::spawn(task_combo_execute(name, system_prompt, cancel_token));
+        let agent = self.agent.clone();
+        tokio::task::spawn(task_combo_execute(name, system_prompt, cancel_token, agent));
     }
 
     fn spawn_tool_use(&mut self, tool_use: &ToolUse) {
@@ -1285,7 +1286,12 @@ async fn task_combo_discover(cancel_token: CancellationToken) {
     .unwrap();
 }
 
-async fn task_combo_execute(name: String, system_prompt: String, cancel_token: CancellationToken) {
+async fn task_combo_execute(
+    name: String,
+    system_prompt: String,
+    cancel_token: CancellationToken,
+    agent: Agent,
+) {
     let tx = global::event_tx();
     let config = global::config().await;
     let combo_dir = config.combo_dir();
@@ -1325,7 +1331,7 @@ async fn task_combo_execute(name: String, system_prompt: String, cancel_token: C
         .unwrap();
 
     let prompt_tx = spawn_prompt_responder(
-        config.clone(),
+        agent,
         name.clone(),
         system_prompt.clone(),
         cancel_token.clone(),
@@ -1436,7 +1442,7 @@ async fn task_combo_execute(name: String, system_prompt: String, cancel_token: C
 }
 
 fn spawn_prompt_responder(
-    config: Config,
+    agent: Agent,
     name: String,
     system_prompt: String,
     cancel_token: CancellationToken,
@@ -1444,7 +1450,7 @@ fn spawn_prompt_responder(
 ) -> mpsc::UnboundedSender<PromptRequest> {
     let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<PromptRequest>();
     tokio::task::spawn(async move {
-        let mut reply_agent = Agent::new(config);
+        let mut reply_agent = agent;
         while let Some(request) = prompt_rx.recv().await {
             let PromptRequest {
                 prompt,

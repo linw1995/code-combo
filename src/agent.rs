@@ -113,6 +113,10 @@ impl Agent {
         let reply_tool = build_reply_tool(&schemas)?;
         let client = self.build_reply_client()?;
         let messages = build_reply_prompt_messages(&prompt, &instructions, &schemas);
+        {
+            let mut history = self.messages.lock().await;
+            history.extend(messages.iter().cloned());
+        }
         let tool_choice = ToolChoice::tool().name(PROMPT_REPLY_TOOL_NAME).call();
         let system_prompt = system_prompt.trim();
         let system_prompt = if system_prompt.is_empty() {
@@ -128,6 +132,12 @@ impl Agent {
                     "failed to request prompt reply: {err}"
                 ))
             })?;
+        if !response.content.is_empty() {
+            let mut history = self.messages.lock().await;
+            history.push(Message::assistant(Content::Multiple(
+                response.content.clone(),
+            )));
+        }
         let Some(tool_use) = response.content.into_iter().find_map(|block| match block {
             AnthropicBlock::ToolUse(tool_use) if tool_use.name == PROMPT_REPLY_TOOL_NAME => {
                 Some(tool_use)
@@ -233,13 +243,12 @@ fn build_reply_prompt_messages(
         build_instruction_messages(instructions)
     };
     let prompt = prompt.trim();
-    let directive = build_reply_tool_directive(schemas);
-    let user_text = if prompt.is_empty() {
-        directive
-    } else {
-        format!("{prompt}\n\n{directive}")
-    };
-    messages.push(Message::user(Content::Text(user_text)));
+    if !prompt.is_empty() {
+        messages.push(Message::user(Content::Text(prompt.to_string())));
+    }
+    messages.push(Message::user(Content::Text(build_reply_tool_directive(
+        schemas,
+    ))));
     messages
 }
 
