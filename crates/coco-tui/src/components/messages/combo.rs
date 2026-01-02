@@ -829,6 +829,12 @@ fn build_command_message(
         })
     });
     let mut tool = Tool::new(tool_use.clone());
+    for chunk in build_output_chunks(output) {
+        tool.handle_event(&Event::Answer(AnswerEvent::ToolOutput {
+            id: tool_use.id.clone(),
+            chunk,
+        }));
+    }
     tool.handle_event(&Event::Answer(AnswerEvent::ToolResult {
         id: tool_use.id.clone(),
         is_error,
@@ -836,6 +842,39 @@ fn build_command_message(
         output: Final::Json(output_value),
     }));
     Message::bot(tool.into())
+}
+
+fn build_output_chunks(output: &BashOutput) -> Vec<OutputChunk> {
+    let mut chunks = Vec::new();
+    if !output.stdout.is_empty() {
+        let lines = output
+            .stdout
+            .lines()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
+        if !lines.is_empty() {
+            chunks.push(OutputChunk {
+                timestamp: 0,
+                stream: StreamKind::Stdout,
+                lines,
+            });
+        }
+    }
+    if !output.stderr.is_empty() {
+        let lines = output
+            .stderr
+            .lines()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
+        if !lines.is_empty() {
+            chunks.push(OutputChunk {
+                timestamp: 0,
+                stream: StreamKind::Stderr,
+                lines,
+            });
+        }
+    }
+    chunks
 }
 
 #[cfg(test)]

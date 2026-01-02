@@ -884,6 +884,11 @@ async fn run_session_server(
                             }
                             .build()
                         })?;
+                        if !discovery {
+                            state
+                                .items
+                                .push(SessionItem::Prompt(payload.prompt.clone()));
+                        }
                         let (response_tx, response_rx) = oneshot::channel();
                         responder
                             .send(PromptRequest {
@@ -1213,6 +1218,47 @@ mod tests {
             output.stdout.contains("out"),
             "unexpected stdout: {}",
             output.stdout
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn execute_starter_records_coco_ask_prompt_with_reply()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bash = find_bash();
+        let session_env = session_env_with_coco();
+        let (_guard, file_path) = create_temp_combo(
+            "ask_reply.sh",
+            formatdoc! {r#"
+            #!{bash}
+
+            coco metadata name=ask_reply || exit 0
+
+            coco ask --reply --schemas response:message "Please do the thing"
+            "#}
+            .as_str(),
+        )
+        .await?;
+
+        let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<PromptRequest>();
+        tokio::spawn(async move {
+            while let Some(request) = prompt_rx.recv().await {
+                let _ = request.response_tx.send(Ok("ok".to_string()));
+            }
+        });
+
+        let execution = StarterCommand::new(&file_path)
+            .session_env(session_env)
+            .prompt_responder(prompt_tx)
+            .execute();
+        let Starter { combo, .. } = execution.wait().await?;
+        let combo = combo?;
+        assert_eq!(combo.metadata.name, "ask_reply");
+        assert_eq!(combo.instructions.len(), 1);
+        assert_eq!(
+            combo.instructions.first(),
+            Some(&Instruction::Text("Please do the thing".to_string()))
         );
 
         Ok(())
