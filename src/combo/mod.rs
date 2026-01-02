@@ -52,5 +52,5 @@ pub use session::{
     SessionSocketServer,
 };
 pub use session_env::{SessionEnv, SessionEnvBuilder, SessionEnvError};
-pub use starter::{PromptRequest, PromptResponder};
+pub use starter::PromptResponseSender;
 pub use starter::{Starter, StarterCommand, StarterError, StarterEvent, StarterExecution};

@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     process::Stdio,
+    sync::{Arc, Mutex},
     task::{Context, Poll},
 };
 
@@ -68,6 +69,11 @@ pub enum StarterEvent {
     Prompt {
         prompt: String,
     },
+    PromptRequest {
+        prompt: String,
+        schemas: Vec<PromptSchema>,
+        responder: PromptResponseSender,
+    },
     Finished {
         exit_code: Option<i32>,
     },
@@ -77,14 +83,37 @@ pub enum StarterEvent {
     },
 }
 
-#[derive(Debug)]
-pub struct PromptRequest {
-    pub prompt: String,
-    pub schemas: Vec<PromptSchema>,
-    pub response_tx: oneshot::Sender<Result<String, String>>,
+type PromptResponseSenderState = Arc<Mutex<Option<oneshot::Sender<Result<String, String>>>>>;
+
+#[derive(Clone)]
+pub struct PromptResponseSender(PromptResponseSenderState);
+
+impl PromptResponseSender {
+    pub fn new(sender: oneshot::Sender<Result<String, String>>) -> Self {
+        Self(Arc::new(Mutex::new(Some(sender))))
+    }
+
+    pub fn send(&self, response: Result<String, String>) -> Result<(), String> {
+        let mut guard = self
+            .0
+            .lock()
+            .map_err(|_| "prompt response sender lock poisoned".to_string())?;
+        let Some(sender) = guard.take() else {
+            return Err(
+                "prompt response sender already used; it can only be used once".to_string(),
+            );
+        };
+        sender
+            .send(response)
+            .map_err(|_| "prompt response receiver dropped".to_string())
+    }
 }
 
-pub type PromptResponder = mpsc::UnboundedSender<PromptRequest>;
+impl std::fmt::Debug for PromptResponseSender {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PromptResponseSender")
+    }
+}
 
 #[derive(Default, Debug)]
 struct SessionState {
@@ -160,7 +189,6 @@ pub struct StarterCommand {
     envs: Vec<(String, String)>,
     discovery: bool,
     session_env: Option<SessionEnv>,
-    prompt_responder: Option<PromptResponder>,
 }
 
 impl StarterCommand {
@@ -171,7 +199,6 @@ impl StarterCommand {
             envs: Vec::new(),
             discovery: false,
             session_env: None,
-            prompt_responder: None,
         }
     }
 
@@ -212,11 +239,6 @@ impl StarterCommand {
         self
     }
 
-    pub fn prompt_responder(mut self, prompt_responder: PromptResponder) -> Self {
-        self.prompt_responder = Some(prompt_responder);
-        self
-    }
-
     pub fn execute(self) -> StarterExecution {
         execute_command(
             self.command,
@@ -224,7 +246,6 @@ impl StarterCommand {
             self.envs,
             self.discovery,
             self.session_env,
-            self.prompt_responder,
         )
     }
 }
@@ -298,7 +319,6 @@ fn execute_command(
     envs: Vec<(String, String)>,
     discovery: bool,
     session_env: Option<SessionEnv>,
-    prompt_responder: Option<PromptResponder>,
 ) -> StarterExecution {
     let session_env_envs = session_env
         .as_ref()
@@ -318,26 +338,22 @@ fn execute_command(
 
     let join_handle = task::spawn(async move {
         let _session_env_guard = session_env;
-        let prompt_responder = prompt_responder;
         let mut session_server = match _session_env_guard.as_ref() {
-            Some(env) => {
-                match spawn_session_server(env, discovery, prompt_responder, event_tx.clone()).await
-                {
-                    Ok(task) => Some(task),
-                    Err(error) => {
-                        event_tx
-                            .send(StarterEvent::Failed {
-                                reason: error.to_string(),
-                            })
-                            .await
-                            .ok();
-                        return Starter {
-                            path: command,
-                            combo: Err(error),
-                        };
-                    }
+            Some(env) => match spawn_session_server(env, discovery, event_tx.clone()).await {
+                Ok(task) => Some(task),
+                Err(error) => {
+                    event_tx
+                        .send(StarterEvent::Failed {
+                            reason: error.to_string(),
+                        })
+                        .await
+                        .ok();
+                    return Starter {
+                        path: command,
+                        combo: Err(error),
+                    };
                 }
-            }
+            },
             None => {
                 let error = InvalidSnafu {
                     reason: "session env is required for starter execution".to_string(),
@@ -585,7 +601,6 @@ impl SessionServerTask {
 async fn spawn_session_server(
     env: &SessionEnv,
     discovery: bool,
-    prompt_responder: Option<PromptResponder>,
     event_tx: mpsc::Sender<StarterEvent>,
 ) -> Result<SessionServerTask, StarterError> {
     let path = env.socket_path().to_path_buf();
@@ -599,8 +614,7 @@ async fn spawn_session_server(
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     Ok(SessionServerTask {
         handle: tokio::spawn(async move {
-            let rv = run_session_server(server, discovery, prompt_responder, event_tx, shutdown_rx)
-                .await;
+            let rv = run_session_server(server, discovery, event_tx, shutdown_rx).await;
             match &rv {
                 Ok(state) => info!(?state, "succeed to run session server"),
                 Err(err) => warn!(?err, "failed to run session server"),
@@ -614,7 +628,6 @@ async fn spawn_session_server(
 async fn run_session_server(
     server: SessionSocketServer,
     discovery: bool,
-    prompt_responder: Option<PromptResponder>,
     event_tx: mpsc::Sender<StarterEvent>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<SessionState, StarterError> {
@@ -822,34 +835,22 @@ async fn run_session_server(
                             }
                             .build());
                         }
-                        let responder = prompt_responder.as_ref().ok_or_else(|| {
-                            InvalidSnafu {
-                                reason: "prompt responder is not configured".to_string(),
-                            }
-                            .build()
-                        })?;
-                        if !discovery {
-                            event_tx
-                                .send(StarterEvent::Prompt {
-                                    prompt: payload.prompt.clone(),
-                                })
-                                .await
-                                .ok();
-                            event_index = event_index.saturating_add(1);
-                        }
                         let (response_tx, response_rx) = oneshot::channel();
-                        responder
-                            .send(PromptRequest {
+                        let responder = PromptResponseSender::new(response_tx);
+                        event_tx
+                            .send(StarterEvent::PromptRequest {
                                 prompt: payload.prompt,
                                 schemas: payload.schemas,
-                                response_tx,
+                                responder,
                             })
+                            .await
                             .map_err(|_| {
                                 InvalidSnafu {
                                     reason: "prompt responder is not available".to_string(),
                                 }
                                 .build()
                             })?;
+                        event_index = event_index.saturating_add(1);
                         let response = response_rx.await.map_err(|_| {
                             InvalidSnafu {
                                 reason: "prompt responder dropped response".to_string(),
@@ -1081,7 +1082,7 @@ mod tests {
                         saw_output = true;
                     }
                 }
-                StarterEvent::Prompt { .. } => {
+                StarterEvent::Prompt { .. } | StarterEvent::PromptRequest { .. } => {
                     saw_prompt = true;
                 }
                 _ => {}
@@ -1236,21 +1237,17 @@ mod tests {
         )
         .await?;
 
-        let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<PromptRequest>();
-        tokio::spawn(async move {
-            while let Some(request) = prompt_rx.recv().await {
-                let _ = request.response_tx.send(Ok("ok".to_string()));
-            }
-        });
-
         let mut execution = StarterCommand::new(&file_path)
             .session_env(session_env)
-            .prompt_responder(prompt_tx)
             .execute();
         let mut prompt_text = None;
         while let Some(event) = execution.next().await {
-            if let StarterEvent::Prompt { prompt } = event {
-                prompt_text = Some(prompt);
+            if let StarterEvent::PromptRequest {
+                prompt, responder, ..
+            } = event
+            {
+                prompt_text = Some(prompt.clone());
+                let _ = responder.send(Ok("ok".to_string()));
             }
         }
         let Starter { combo, .. } = execution.wait().await?;
@@ -1265,7 +1262,7 @@ mod tests {
     async fn discovery_server_interrupts_record() -> Result<(), Box<dyn std::error::Error>> {
         let session_env = session_env_with_coco();
         let (event_tx, _event_rx) = mpsc::channel(16);
-        let server = spawn_session_server(&session_env, true, None, event_tx).await?;
+        let server = spawn_session_server(&session_env, true, event_tx).await?;
         let client = SessionSocketClient::connect(session_env.socket_path()).await?;
 
         let _ = client
@@ -1298,7 +1295,7 @@ mod tests {
     async fn discovery_server_accepts_metadata_once() -> Result<(), Box<dyn std::error::Error>> {
         let session_env = session_env_with_coco();
         let (event_tx, _event_rx) = mpsc::channel(16);
-        let server = spawn_session_server(&session_env, true, None, event_tx).await?;
+        let server = spawn_session_server(&session_env, true, event_tx).await?;
         let client = SessionSocketClient::connect(session_env.socket_path()).await?;
 
         let response = client

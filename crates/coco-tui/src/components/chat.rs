@@ -3,10 +3,11 @@ use coco_macro::ComponentExt;
 use code_combo::tools::Final;
 use code_combo::{
     Agent, Block as ChatBlock, Config, Content as ChatContent, Message as ChatMessage, Output,
-    PromptRequest, SessionEnv, StarterCommand, StarterError, StarterEvent, StopReason, TextEdit,
-    ToolUse, discover_starters,
+    SessionEnv, StarterCommand, StarterError, StarterEvent, StopReason, TextEdit, ToolUse,
+    discover_starters,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use futures::StreamExt;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -1361,13 +1362,7 @@ async fn task_combo_execute(
     tx.send(ComboEvent::Executing { name: name.clone() }.into())
         .unwrap();
 
-    let prompt_tx = spawn_prompt_responder(
-        agent,
-        system_prompt.clone(),
-        cancel_token.clone(),
-        tx.clone(),
-        history_tx.clone(),
-    );
+    let mut reply_agent = agent;
 
     let session_env = SessionEnv::builder()
         .build()
@@ -1375,80 +1370,135 @@ async fn task_combo_execute(
     let starter_path = starter.path.clone();
     let mut pending_prompt: Option<String> = None;
 
-    let starter = match StarterCommand::new(&starter.path)
+    let mut execution = StarterCommand::new(&starter.path)
         .session_env(session_env)
-        .prompt_responder(prompt_tx)
-        .execute()
-        .consume_with_cancel(cancel_token.clone(), |event| match event {
-            StarterEvent::Output { chunk } => {
-                tx.send(
-                    ComboEvent::Output {
-                        name: name.clone(),
-                        chunk,
-                    }
-                    .into(),
-                )
-                .unwrap();
+        .execute();
+    let mut cancelled = false;
+    loop {
+        tokio::select! {
+            _ = cancel_token.cancelled(), if !cancelled => {
+                cancelled = true;
+                execution.cancel();
             }
-            StarterEvent::RecordOutput { tool_use_id, chunk } => {
-                tx.send(
-                    ComboEvent::RecordOutput {
-                        name: name.clone(),
-                        tool_use_id,
-                        chunk,
+            event = execution.next() => {
+                let Some(event) = event else { break };
+                match event {
+                    StarterEvent::Output { chunk } => {
+                        tx.send(
+                            ComboEvent::Output {
+                                name: name.clone(),
+                                chunk,
+                            }
+                            .into(),
+                        )
+                        .unwrap();
                     }
-                    .into(),
-                )
-                .unwrap();
-            }
-            StarterEvent::RecordStart { tool_use } => {
-                let _ = history_tx.send(HistoryEvent::Message(build_tool_use_message(&tool_use)));
-                tx.send(
-                    ComboEvent::RecordStart {
-                        name: name.clone(),
-                        tool_use,
+                    StarterEvent::RecordOutput { tool_use_id, chunk } => {
+                        tx.send(
+                            ComboEvent::RecordOutput {
+                                name: name.clone(),
+                                tool_use_id,
+                                chunk,
+                            }
+                            .into(),
+                        )
+                        .unwrap();
                     }
-                    .into(),
-                )
-                .unwrap();
-            }
-            StarterEvent::RecordEnd {
-                tool_use_id,
-                is_error,
-                output,
-            } => {
-                let _ = history_tx.send(HistoryEvent::Message(build_tool_result_message(
-                    &tool_use_id,
-                    is_error,
-                    &output,
-                )));
-                tx.send(
-                    ComboEvent::RecordEnd {
-                        name: name.clone(),
+                    StarterEvent::RecordStart { tool_use } => {
+                        let _ =
+                            history_tx.send(HistoryEvent::Message(build_tool_use_message(&tool_use)));
+                        tx.send(
+                            ComboEvent::RecordStart {
+                                name: name.clone(),
+                                tool_use,
+                            }
+                            .into(),
+                        )
+                        .unwrap();
+                    }
+                    StarterEvent::RecordEnd {
                         tool_use_id,
                         is_error,
                         output,
+                    } => {
+                        let _ = history_tx.send(HistoryEvent::Message(build_tool_result_message(
+                            &tool_use_id,
+                            is_error,
+                            &output,
+                        )));
+                        tx.send(
+                            ComboEvent::RecordEnd {
+                                name: name.clone(),
+                                tool_use_id,
+                                is_error,
+                                output,
+                            }
+                            .into(),
+                        )
+                        .unwrap();
                     }
-                    .into(),
-                )
-                .unwrap();
-            }
-            StarterEvent::Prompt { prompt } => {
-                flush_pending_prompt(&mut pending_prompt, &history_tx);
-                pending_prompt = Some(prompt.clone());
-                tx.send(
-                    ComboEvent::Prompt {
-                        name: name.clone(),
+                    StarterEvent::Prompt { prompt } => {
+                        flush_pending_prompt(&mut pending_prompt, &history_tx);
+                        pending_prompt = Some(prompt.clone());
+                        tx.send(
+                            ComboEvent::Prompt {
+                                name: name.clone(),
+                                prompt,
+                            }
+                            .into(),
+                        )
+                        .unwrap();
+                    }
+                    StarterEvent::PromptRequest {
                         prompt,
+                        schemas,
+                        responder,
+                    } => {
+                        let prompt_text = prompt.clone();
+                        flush_pending_prompt(&mut pending_prompt, &history_tx);
+                        pending_prompt = Some(prompt_text.clone());
+                        tx.send(
+                            ComboEvent::Prompt {
+                                name: name.clone(),
+                                prompt: prompt_text,
+                            }
+                            .into(),
+                        )
+                        .unwrap();
+
+                        let response = if cancel_token.is_cancelled() {
+                            Err("prompt reply cancelled".to_string())
+                        } else {
+                            flush_history(&history_tx).await;
+                            reply_agent
+                                .reply_prompt(&system_prompt, prompt, schemas)
+                                .await
+                                .map(|reply| reply.response)
+                                .map_err(|err| err.to_string())
+                        };
+                        if let Err(err) = &response {
+                            tx.send(
+                                ComboEvent::ReplyToolError {
+                                    message: err.clone(),
+                                }
+                                .into(),
+                            )
+                            .ok();
+                        }
+                        if let Err(err) = responder.send(response) {
+                            tx.send(
+                                ComboEvent::ReplyToolError { message: err }.into(),
+                            )
+                            .ok();
+                        }
                     }
-                    .into(),
-                )
-                .unwrap();
+                    _ => (),
+                }
             }
-            _ => (),
-        })
-        .await
-    {
+        }
+    }
+
+    let starter = match execution.wait().await {
         Ok(starter) => starter,
         Err(err) => {
             warn!(?err, "starter join error");
@@ -1495,49 +1545,6 @@ async fn task_combo_execute(
         .into(),
     )
     .unwrap();
-}
-
-fn spawn_prompt_responder(
-    agent: Agent,
-    system_prompt: String,
-    cancel_token: CancellationToken,
-    tx: mpsc::UnboundedSender<Event>,
-    history_tx: mpsc::UnboundedSender<HistoryEvent>,
-) -> mpsc::UnboundedSender<PromptRequest> {
-    let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<PromptRequest>();
-    tokio::task::spawn(async move {
-        let mut reply_agent = agent;
-        while let Some(request) = prompt_rx.recv().await {
-            let PromptRequest {
-                prompt,
-                schemas,
-                response_tx,
-            } = request;
-            let response = if cancel_token.is_cancelled() {
-                Err("prompt reply cancelled".to_string())
-            } else {
-                let (flush_tx, flush_rx) = oneshot::channel();
-                let _ = history_tx.send(HistoryEvent::Flush(flush_tx));
-                let _ = flush_rx.await;
-                reply_agent
-                    .reply_prompt(&system_prompt, prompt, schemas)
-                    .await
-                    .map(|reply| reply.response)
-                    .map_err(|err| err.to_string())
-            };
-            if let Err(err) = &response {
-                tx.send(
-                    ComboEvent::ReplyToolError {
-                        message: err.clone(),
-                    }
-                    .into(),
-                )
-                .ok();
-            }
-            let _ = response_tx.send(response);
-        }
-    });
-    prompt_tx
 }
 
 fn build_tool_use_message(tool_use: &ToolUse) -> ChatMessage {
