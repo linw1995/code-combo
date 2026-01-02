@@ -40,4 +40,5 @@ resp=$(
 )
 
 message=$(jq -r '.message' <<<"$resp")
-coco record "git commit -F - <<<\"$message\""
+escaped=$(printf '%q' "$message")
+coco record "git commit -F - <<< $escaped"
