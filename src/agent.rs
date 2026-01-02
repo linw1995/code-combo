@@ -104,16 +104,15 @@ impl Agent {
     pub async fn reply_prompt(
         &mut self,
         system_prompt: &str,
-        prompt: String,
         schemas: Vec<PromptSchema>,
     ) -> Result<PromptReply> {
         ensure_whatever!(!schemas.is_empty(), "schemas cannot be empty");
         let reply_tool = build_reply_tool(&schemas)?;
         let client = self.build_reply_client()?;
-        let new_messages = build_reply_prompt_messages(&prompt, &schemas);
         let messages = {
             let mut history = self.messages.lock().await;
-            history.extend(new_messages.iter().cloned());
+            let new_message = build_reply_prompt_message(&schemas);
+            history.push(new_message);
             history.clone()
         };
         let tool_choice = ToolChoice::tool().name(PROMPT_REPLY_TOOL_NAME).call();
@@ -237,16 +236,8 @@ impl Agent {
     }
 }
 
-fn build_reply_prompt_messages(prompt: &str, schemas: &[PromptSchema]) -> Vec<Message> {
-    let mut messages = Vec::new();
-    let prompt = prompt.trim();
-    if !prompt.is_empty() {
-        messages.push(Message::user(Content::Text(prompt.to_string())));
-    }
-    messages.push(Message::user(Content::Text(build_reply_tool_directive(
-        schemas,
-    ))));
-    messages
+fn build_reply_prompt_message(schemas: &[PromptSchema]) -> Message {
+    Message::user(Content::Text(build_reply_tool_directive(schemas)))
 }
 
 fn build_reply_tool(schemas: &[PromptSchema]) -> Result<AnthropicTool> {

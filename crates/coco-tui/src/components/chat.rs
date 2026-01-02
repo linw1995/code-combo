@@ -1280,12 +1280,6 @@ async fn task_combo_discover(cancel_token: CancellationToken) {
     .unwrap();
 }
 
-async fn flush_pending_prompt(pending_prompt: &mut Option<String>, agent: &Agent) {
-    if let Some(previous) = pending_prompt.take() {
-        agent.append_message(build_prompt_message(&previous)).await;
-    }
-}
-
 async fn task_combo_execute(
     name: String,
     system_prompt: String,
@@ -1336,7 +1330,6 @@ async fn task_combo_execute(
         .build()
         .expect("failed to build session");
     let starter_path = starter.path.clone();
-    let mut pending_prompt: Option<String> = None;
 
     let mut execution = StarterCommand::new(&starter.path)
         .session_env(session_env)
@@ -1409,8 +1402,9 @@ async fn task_combo_execute(
                         .unwrap();
                     }
                     StarterEvent::Prompt { prompt } => {
-                        flush_pending_prompt(&mut pending_prompt, &reply_agent).await;
-                        pending_prompt = Some(prompt.clone());
+                        reply_agent
+                            .append_message(build_prompt_message(&prompt))
+                            .await;
                         tx.send(
                             ComboEvent::Prompt {
                                 name: name.clone(),
@@ -1425,13 +1419,13 @@ async fn task_combo_execute(
                         schemas,
                         responder,
                     } => {
-                        let prompt_text = prompt.clone();
-                        flush_pending_prompt(&mut pending_prompt, &reply_agent).await;
-                        pending_prompt = Some(prompt_text.clone());
+                        reply_agent
+                            .append_message(build_prompt_message(&prompt))
+                            .await;
                         tx.send(
                             ComboEvent::Prompt {
                                 name: name.clone(),
-                                prompt: prompt_text,
+                                prompt: prompt.clone(),
                             }
                             .into(),
                         )
@@ -1441,7 +1435,7 @@ async fn task_combo_execute(
                             Err("prompt reply cancelled".to_string())
                         } else {
                             reply_agent
-                                .reply_prompt(&system_prompt, prompt, schemas)
+                                .reply_prompt(&system_prompt, schemas)
                                 .await
                                 .map(|reply| reply.response)
                                 .map_err(|err| err.to_string())
@@ -1478,12 +1472,11 @@ async fn task_combo_execute(
                     reason: format!("starter join error: {err}"),
                 }),
             };
-            let final_prompt = pending_prompt.take();
             tx.send(
                 ComboEvent::Executed {
                     name: name.clone(),
                     starter,
-                    final_prompt,
+                    final_prompt: None,
                 }
                 .into(),
             )
@@ -1503,12 +1496,11 @@ async fn task_combo_execute(
         return;
     }
 
-    let final_prompt = pending_prompt.take();
     tx.send(
         ComboEvent::Executed {
             name: name.clone(),
             starter,
-            final_prompt,
+            final_prompt: None,
         }
         .into(),
     )
