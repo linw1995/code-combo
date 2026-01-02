@@ -101,7 +101,7 @@ where
     let BashInput { command, timeout } = input;
 
     let argv = vec!["bash".to_string(), "-c".to_string(), command];
-    let envs = match prepare_mcp_env().await {
+    let envs = match prepare_mcp_envs().await {
         Ok(value) => value,
         Err(err) => {
             warn!(?err, "Failed to prepare MCP env for bash tool");
@@ -212,7 +212,7 @@ struct McpEnvState {
     envs: Vec<(String, String)>,
 }
 
-async fn prepare_mcp_env() -> Result<Vec<(String, String)>, String> {
+pub async fn prepare_mcp_envs() -> Result<Vec<(String, String)>, String> {
     let state = MCP_ENV_STATE.get_or_init(|| Mutex::new(None));
     let mut state = state.lock().await;
     if let Some(existing) = state.as_ref() {

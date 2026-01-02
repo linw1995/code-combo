@@ -1,5 +1,6 @@
 use std::{
     io::{Stdout, stdout},
+    process::{Command, Stdio},
     time::Duration,
 };
 
@@ -19,7 +20,13 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, trace, warn};
 
-use crate::{actions::Action, components::Component, error::Result, events::Event, global};
+use crate::{
+    actions::{Action, CommandPaletteAction},
+    components::Component,
+    error::Result,
+    events::Event,
+    global,
+};
 
 pub struct App {
     terminal: ratatui::Terminal<Backend<Stdout>>,
@@ -222,6 +229,15 @@ impl App {
             match action {
                 Action::Quit => self.should_quit = true,
                 Action::Render => self.render()?,
+                Action::CommandPalette(CommandPaletteAction::Shell) => {
+                    self.root.handle_action(&action);
+                    self.exit()?;
+                    if let Err(err) = self.run_shell() {
+                        warn!(?err, "failed to run shell");
+                    }
+                    self.enter()?;
+                    self.dirty = true;
+                }
                 _ => {
                     self.root.handle_action(&action);
                 }
@@ -239,6 +255,28 @@ impl App {
             })
             .whatever_context("failed to draw terminal")?;
         self.dirty = false;
+        Ok(())
+    }
+
+    fn run_shell(&self) -> Result<()> {
+        let envs = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(code_combo::tools::prepare_mcp_envs())
+        });
+        let envs = match envs {
+            Ok(envs) => envs,
+            Err(err) => whatever!("failed to prepare mcp envs: {err}"),
+        };
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let status = Command::new(&shell)
+            .envs(envs)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .whatever_context("failed to spawn shell")?;
+        if !status.success() {
+            warn!(?status, "shell exited with non-zero status");
+        }
         Ok(())
     }
 }

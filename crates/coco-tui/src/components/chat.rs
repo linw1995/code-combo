@@ -1140,6 +1140,9 @@ impl Component for Chat<'static> {
                     self.update_focus(Focus::InputBlur);
                     self.switch_theme(theme.to_owned());
                 }
+                CommandPaletteAction::Shell => {
+                    self.update_focus(Focus::InputBlur);
+                }
             },
             Action::SubmitPrompt(prompt) => {
                 if self.state.state == ChatState::Ready {

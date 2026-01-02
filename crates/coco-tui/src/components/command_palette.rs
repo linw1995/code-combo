@@ -28,6 +28,7 @@ const COMMAND_NEW_SESSION: &str = "New Session";
 const COMMAND_TRANSCRIPT: &str = "Transcript";
 const COMMAND_SWITCH_SESSION: &str = "Switch Session";
 const COMMAND_SWITCH_THEME: &str = "Switch Theme";
+const COMMAND_SHELL: &str = "Shell";
 
 const BREADCRUMB_ROOT: &str = "Command Palette";
 const BREADCRUMB_SESSIONS: &str = "Sessions";
@@ -278,6 +279,10 @@ impl CommandPalette {
                 name: COMMAND_SWITCH_THEME.to_string(),
                 shortcut: Some("<C-l>".to_string()),
             },
+            Command {
+                name: COMMAND_SHELL.to_string(),
+                shortcut: Some("<C-x>".to_string()),
+            },
         ]
     }
 
@@ -402,6 +407,7 @@ impl CommandPalette {
                     }
                     Some(COMMAND_NEW_SESSION) => Some(CommandPaletteAction::NewSession),
                     Some(COMMAND_TRANSCRIPT) => Some(CommandPaletteAction::Transcript),
+                    Some(COMMAND_SHELL) => Some(CommandPaletteAction::Shell),
                     Some(unknown) => {
                         warn!(?unknown, "unknown command");
                         None
@@ -480,6 +486,13 @@ impl Component for CommandPalette {
                     self.open_theme_switcher();
                 }
                 None
+            }
+            (KM::CONTROL, Char('x' | 'X')) => {
+                if self.mode == CommandPaletteMode::Main {
+                    Some(CommandPaletteAction::Shell)
+                } else {
+                    None
+                }
             }
             (KM::NONE, Char('k')) => {
                 self.command_list.select_prev();
