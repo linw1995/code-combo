@@ -145,6 +145,12 @@ impl Agent {
         }) else {
             whatever!("reply tool use not found in response");
         };
+        {
+            let mut history = self.messages.lock().await;
+            history.push(Message::user(Content::Multiple(vec![
+                AnthropicBlock::tool_result(&tool_use.id, None, Content::Text("ok".to_string())),
+            ])));
+        }
         let response = serde_json::to_string(&tool_use.input)
             .whatever_context("failed to serialize reply tool input")?;
         Ok(PromptReply { tool_use, response })
