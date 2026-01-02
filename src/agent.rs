@@ -112,7 +112,10 @@ impl Agent {
         ensure_whatever!(!schemas.is_empty(), "schemas cannot be empty");
         let reply_tool = build_reply_tool(&schemas)?;
         let client = self.build_reply_client()?;
-        let messages = build_prompt_messages(&prompt, &instructions);
+        let mut messages = build_prompt_messages(&prompt, &instructions);
+        messages.push(Message::user(Content::Text(build_reply_tool_directive(
+            &schemas,
+        ))));
         let tool_choice = ToolChoice::tool().name(PROMPT_REPLY_TOOL_NAME).call();
         let system_prompt = system_prompt.trim();
         let system_prompt = if system_prompt.is_empty() {
@@ -315,4 +318,17 @@ fn build_reply_tool(schemas: &[PromptSchema]) -> Result<AnthropicTool> {
         description: "Return the response using the provided schema.".to_string(),
         input_schema,
     })
+}
+
+fn build_reply_tool_directive(schemas: &[PromptSchema]) -> String {
+    let fields = schemas
+        .iter()
+        .map(|schema| schema.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "You must call the tool \"{PROMPT_REPLY_TOOL_NAME}\" exactly once. \
+Do not output plain text. Provide all required fields in the tool input. \
+Required fields: {fields}."
+    )
 }
