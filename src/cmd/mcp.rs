@@ -1,5 +1,6 @@
 use std::{
     collections::HashSet,
+    io::Read,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -130,7 +131,9 @@ fn build_mcp_parser(
     server_names: &[String],
     tools: Option<&[McpToolInfo]>,
 ) -> Command {
-    let mut cmd = Command::new("mcp").bin_name(format!("{parent_command} {command_name}"));
+    let mut cmd = Command::new("mcp")
+        .bin_name(format!("{parent_command} {command_name}"))
+        .disable_help_subcommand(true);
 
     let help_message = format!("Target MCP server name in [{}]", server_names.join(", "));
     let server_names = server_names.to_owned();
@@ -344,8 +347,13 @@ fn schema_type_to_kind(value: &str) -> Option<SchemaValueKind> {
 
 fn build_tool_arguments(tool: &McpToolInfo, matches: &clap::ArgMatches) -> Result<Option<Value>> {
     if let Some(raw) = matches.get_one::<String>(TOOL_ARGS_JSON) {
+        let raw = if raw == "-" {
+            read_args_json_from_stdin()?
+        } else {
+            raw.clone()
+        };
         let value =
-            serde_json::from_str(raw).whatever_context("failed to parse args-json argument")?;
+            serde_json::from_str(&raw).whatever_context("failed to parse args-json argument")?;
         return Ok(Some(value));
     }
 
@@ -370,6 +378,14 @@ fn build_tool_arguments(tool: &McpToolInfo, matches: &clap::ArgMatches) -> Resul
     } else {
         Ok(Some(Value::Object(arguments)))
     }
+}
+
+fn read_args_json_from_stdin() -> Result<String> {
+    let mut input = String::new();
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .whatever_context("failed to read args-json from stdin")?;
+    Ok(input)
 }
 
 fn collect_single_value(matches: &clap::ArgMatches, spec: &ToolArgSpec) -> Result<Option<Value>> {
@@ -821,7 +837,7 @@ mod tests {
         "};
         let missing_subcommand = indoc! {"
             error: 'coco mcp' requires a subcommand but one was not provided
-            \x20\x20[subcommands: echo, ping, help]
+            \x20\x20[subcommands: echo, ping]
 
             Usage: coco mcp <server> <tool>
 
@@ -842,7 +858,6 @@ mod tests {
             Tools:
             \x20\x20echo  Echo a message
             \x20\x20ping  Ping the server
-            \x20\x20help  Print this message or the help of the given subcommand(s)
 
             Arguments:
             \x20\x20<server>  Target MCP server name in [alpha, beta]

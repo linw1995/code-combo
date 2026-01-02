@@ -7,7 +7,7 @@ use std::{
 use crossterm::{
     cursor,
     event::{Event as CrosstermEvent, EventStream, KeyEvent},
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use futures::{FutureExt, StreamExt};
 use ratatui::backend::CrosstermBackend as Backend;
@@ -266,6 +266,9 @@ impl App {
             Ok(envs) => envs,
             Err(err) => whatever!("failed to prepare mcp envs: {err}"),
         };
+        let mut out = stdout();
+        let _ = crossterm::execute!(out, Clear(ClearType::All), cursor::MoveTo(0, 0));
+        println!("Entering shell. Type 'exit' to return.");
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
         let status = Command::new(&shell)
             .envs(envs)
