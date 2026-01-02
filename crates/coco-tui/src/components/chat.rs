@@ -356,8 +356,6 @@ impl Chat<'static> {
             ComboEvent::Executed { starter, .. } => {
                 if let Err(err) = starter.combo.as_ref() {
                     warn!(?err, "Failed to execute starter");
-                    self.set_ready();
-                    return;
                 }
                 self.spawn_chat_with_history();
             }
@@ -1321,6 +1319,7 @@ async fn task_combo_execute(
         .build()
         .expect("failed to build session");
     let starter_path = starter.path.clone();
+    let mut exit_code: Option<i32> = None;
 
     let mut execution = StarterCommand::new(&starter.path)
         .session_env(session_env)
@@ -1447,6 +1446,9 @@ async fn task_combo_execute(
                             .ok();
                         }
                     }
+                    StarterEvent::Finished { exit_code: code } => {
+                        exit_code = code;
+                    }
                     _ => (),
                 }
             }
@@ -1457,6 +1459,10 @@ async fn task_combo_execute(
         Ok(starter) => starter,
         Err(err) => {
             warn!(?err, "starter join error");
+            let error_message = format!("Combo execution failed: starter join error: {err}");
+            reply_agent
+                .append_message(ChatMessage::user(ChatContent::Text(error_message)))
+                .await;
             let starter = code_combo::Starter {
                 path: starter_path,
                 combo: Err(StarterError::Invalid {
@@ -1467,6 +1473,7 @@ async fn task_combo_execute(
                 ComboEvent::Executed {
                     name: name.clone(),
                     starter,
+                    exit_code,
                 }
                 .into(),
             )
@@ -1486,10 +1493,25 @@ async fn task_combo_execute(
         return;
     }
 
+    if let Err(err) = starter.combo.as_ref() {
+        let error_message = format!("Combo execution failed: {err}");
+        reply_agent
+            .append_message(ChatMessage::user(ChatContent::Text(error_message)))
+            .await;
+    } else if let Some(code) = exit_code
+        && code != 0
+    {
+        let error_message = format!("Combo execution failed: exit code {code}");
+        reply_agent
+            .append_message(ChatMessage::user(ChatContent::Text(error_message)))
+            .await;
+    }
+
     tx.send(
         ComboEvent::Executed {
             name: name.clone(),
             starter,
+            exit_code,
         }
         .into(),
     )

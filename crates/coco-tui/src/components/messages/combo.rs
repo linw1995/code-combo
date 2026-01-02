@@ -242,17 +242,25 @@ impl Combo {
                     self.messages.clear();
                 }
             }
-            ComboEvent::Executed { name, starter } => {
+            ComboEvent::Executed {
+                name,
+                starter,
+                exit_code,
+            } => {
                 if &self.state.name == name {
                     let mut state = self.state.write();
-                    let error_message = match &starter.combo {
-                        Ok(_) => {
-                            state.is_error = false;
-                            None
-                        }
-                        Err(err) => {
+                    let error_message = match (&starter.combo, *exit_code) {
+                        (Err(err), _) => {
                             state.is_error = true;
                             Some(format!("Failed to execute starter: {err}"))
+                        }
+                        (Ok(_), Some(code)) if code != 0 => {
+                            state.is_error = true;
+                            Some(format!("Combo exited with status {code}"))
+                        }
+                        _ => {
+                            state.is_error = false;
+                            None
                         }
                     };
                     state.starter_state = StarterState::Finalized;
@@ -807,6 +815,7 @@ mod tests {
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
             name: "demo".to_string(),
             starter: make_starter("demo"),
+            exit_code: None,
         }));
 
         assert!(combo.height(80) > 1);
@@ -848,6 +857,7 @@ mod tests {
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
             name: "demo".to_string(),
             starter: make_starter("demo"),
+            exit_code: None,
         }));
         combo.handle_action(&Action::Blur);
         combo.handle_key_event(&test_key_z());
@@ -856,6 +866,18 @@ mod tests {
         let session = combo.save();
         let loaded = Combo::load(session).unwrap();
         assert!(loaded.height(80) > 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn combo_marks_error_on_nonzero_exit() {
+        let mut combo = Combo::new("demo");
+        combo.handle_event(&Event::Combo(ComboEvent::Executed {
+            name: "demo".to_string(),
+            starter: make_starter("demo"),
+            exit_code: Some(1),
+        }));
+
+        assert!(combo.state.is_error);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -887,6 +909,7 @@ mod tests {
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
             name: "demo".to_string(),
             starter: make_starter("demo"),
+            exit_code: None,
         }));
 
         assert!(!combo.is_child_focused);
@@ -930,6 +953,7 @@ mod tests {
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
             name: "demo".to_string(),
             starter: make_starter("demo"),
+            exit_code: None,
         }));
 
         combo.handle_key_event(&test_key_enter());
