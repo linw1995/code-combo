@@ -2,9 +2,9 @@ use anthropic::Block as AnthropicBlock;
 use coco_macro::ComponentExt;
 use code_combo::tools::Final;
 use code_combo::{
-    Agent, Block as ChatBlock, Config, Content as ChatContent, Message as ChatMessage, Output,
-    SessionEnv, StarterCommand, StarterError, StarterEvent, StopReason, TextEdit, ToolUse,
-    discover_starters,
+    Agent, Block as ChatBlock, ChatResponse, Config, Content as ChatContent,
+    Message as ChatMessage, Output, SessionEnv, StarterCommand, StarterError, StarterEvent,
+    StopReason, TextEdit, ToolUse, discover_starters,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use futures::StreamExt;
@@ -353,27 +353,13 @@ impl Chat<'static> {
             | ComboEvent::Prompt { .. } => {
                 self.set_processing();
             }
-            ComboEvent::Executed {
-                starter,
-                final_prompt,
-                ..
-            } => {
+            ComboEvent::Executed { starter, .. } => {
                 if let Err(err) = starter.combo.as_ref() {
                     warn!(?err, "Failed to execute starter");
                     self.set_ready();
                     return;
                 }
-                let Some(prompt) = final_prompt.as_ref() else {
-                    self.set_ready();
-                    return;
-                };
-                let prompt = prompt.trim();
-                if prompt.is_empty() {
-                    self.set_ready();
-                    return;
-                }
-                let content = self.build_user_content(ChatContent::Text(prompt.to_string()));
-                self.spawn_chat_task(content);
+                self.spawn_chat_with_history();
             }
             ComboEvent::Discovered { .. }
             | ComboEvent::NotFound { .. }
@@ -431,6 +417,11 @@ impl Chat<'static> {
     fn spawn_chat_task(&mut self, content: ChatContent) {
         let cancel_token = self.cancellation_guard.start_token();
         tokio::task::spawn(task_chat(self.agent.clone(), content, cancel_token));
+    }
+
+    fn spawn_chat_with_history(&mut self) {
+        let cancel_token = self.cancellation_guard.start_token();
+        tokio::task::spawn(task_chat_with_history(self.agent.clone(), cancel_token));
     }
 
     fn spawn_combo_discover(&mut self) {
@@ -1476,7 +1467,6 @@ async fn task_combo_execute(
                 ComboEvent::Executed {
                     name: name.clone(),
                     starter,
-                    final_prompt: None,
                 }
                 .into(),
             )
@@ -1500,7 +1490,6 @@ async fn task_combo_execute(
         ComboEvent::Executed {
             name: name.clone(),
             starter,
-            final_prompt: None,
         }
         .into(),
     )
@@ -1552,11 +1541,37 @@ async fn task_chat(mut agent: Agent, content: ChatContent, cancel_token: Cancell
         chat_resp = agent.chat(msg) => chat_resp.expect("failed to chat with LLM"),
     };
 
+    handle_chat_response(agent, cancel_token, chat_resp).await;
+}
+
+async fn task_chat_with_history(mut agent: Agent, cancel_token: CancellationToken) {
+    let tx = global::event_tx();
+
+    if cancel_token.is_cancelled() {
+        return;
+    }
+    tx.send(Event::Ask(AskEvent::Bot)).unwrap();
+
+    let chat_resp = tokio::select! {
+        _ = cancel_token.cancelled() => {
+            tx.send(AnswerEvent::Cancelled.into()).ok();
+            return;
+        }
+        chat_resp = agent.chat_with_history() => chat_resp.expect("failed to chat with LLM"),
+    };
+
+    handle_chat_response(agent, cancel_token, chat_resp).await;
+}
+
+async fn handle_chat_response(
+    agent: Agent,
+    cancel_token: CancellationToken,
+    chat_resp: ChatResponse,
+) {
+    let tx = global::event_tx();
     let mut to_execute: Vec<code_combo::ToolUse> = vec![];
     let mut bot_messages = match chat_resp.message.content {
-        ChatContent::Text(text) => {
-            vec![BotMessage::Plain(text)]
-        }
+        ChatContent::Text(text) => vec![BotMessage::Plain(text)],
         ChatContent::Multiple(blocks) => {
             to_execute.extend(blocks.iter().filter_map(|b| {
                 if let code_combo::Block::ToolUse(tool_use) = b {

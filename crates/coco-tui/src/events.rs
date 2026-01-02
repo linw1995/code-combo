@@ -93,7 +93,6 @@ pub enum ComboEvent {
     Executed {
         name: String,
         starter: Starter,
-        final_prompt: Option<String>,
     },
 
     ReplyToolError {

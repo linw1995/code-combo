@@ -101,6 +101,35 @@ impl Agent {
         })
     }
 
+    pub async fn chat_with_history(&mut self) -> Result<ChatResponse> {
+        let (_, client) = self.pick_provider()?;
+
+        let messages = self.messages.lock().await.clone();
+        let response = client
+            .messages()
+            .system_prompt(&self.system_prompt)
+            .conversations(messages)
+            .tools(self.executor.anthropic_tools())
+            .call()
+            .await
+            .inspect_err(|err| {
+                warn!("send messsages error: {err:?}");
+            })
+            .unwrap();
+
+        let message = if response.content.is_empty() {
+            Message::assistant(Content::Multiple(Vec::default()))
+        } else {
+            let msg = Message::assistant(Content::Multiple(response.content));
+            self.messages.lock().await.push(msg.clone());
+            msg
+        };
+        Ok(ChatResponse {
+            message,
+            stop_reason: response.stop_reason,
+        })
+    }
+
     pub async fn reply_prompt(
         &mut self,
         system_prompt: &str,

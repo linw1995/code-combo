@@ -242,7 +242,7 @@ impl Combo {
                     self.messages.clear();
                 }
             }
-            ComboEvent::Executed { name, starter, .. } => {
+            ComboEvent::Executed { name, starter } => {
                 if &self.state.name == name {
                     let mut state = self.state.write();
                     let error_message = match &starter.combo {
@@ -807,7 +807,6 @@ mod tests {
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
             name: "demo".to_string(),
             starter: make_starter("demo"),
-            final_prompt: Some("line1".to_string()),
         }));
 
         assert!(combo.height(80) > 1);
@@ -849,7 +848,6 @@ mod tests {
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
             name: "demo".to_string(),
             starter: make_starter("demo"),
-            final_prompt: Some("line1".to_string()),
         }));
         combo.handle_action(&Action::Blur);
         combo.handle_key_event(&test_key_z());
@@ -889,7 +887,6 @@ mod tests {
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
             name: "demo".to_string(),
             starter: make_starter("demo"),
-            final_prompt: None,
         }));
 
         assert!(!combo.is_child_focused);
@@ -933,7 +930,6 @@ mod tests {
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
             name: "demo".to_string(),
             starter: make_starter("demo"),
-            final_prompt: None,
         }));
 
         combo.handle_key_event(&test_key_enter());
