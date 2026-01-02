@@ -198,16 +198,18 @@ pub async fn messages(
     let url = base_url
         .join("v1/messages")
         .whatever_context("join url error")?;
+    let req = serde_json::to_string(&req).whatever_context("encode request error")?;
     let resp = client
         .post(url)
-        .json(&req)
+        .body(req.clone())
+        .header("Content-Type", "application/json")
         .send()
         .await
         .whatever_context("send request error")?;
 
     let status = resp.status();
     let resp = resp.text().await.whatever_context("read response error")?;
-    trace!(?req, resp, ?status, "messages API invoked");
+    trace!(req, resp, ?status, "messages API invoked");
 
     serde_json::from_str(&resp).whatever_context("decode response error")
 }
