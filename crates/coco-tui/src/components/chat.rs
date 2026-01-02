@@ -20,10 +20,7 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use time::OffsetDateTime;
-use tokio::{
-    sync::{mpsc, oneshot},
-    time::Instant,
-};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -130,11 +127,6 @@ enum Focus {
 enum ViewMode {
     Chat,
     Transcript,
-}
-
-enum HistoryEvent {
-    Message(ChatMessage),
-    Flush(oneshot::Sender<()>),
 }
 
 const CTRL_C_WINDOW: Duration = Duration::from_secs(2);
@@ -1288,19 +1280,9 @@ async fn task_combo_discover(cancel_token: CancellationToken) {
     .unwrap();
 }
 
-async fn flush_history(history_tx: &mpsc::UnboundedSender<HistoryEvent>) {
-    let (flush_tx, flush_rx) = oneshot::channel();
-    if history_tx.send(HistoryEvent::Flush(flush_tx)).is_ok() {
-        let _ = flush_rx.await;
-    }
-}
-
-fn flush_pending_prompt(
-    pending_prompt: &mut Option<String>,
-    history_tx: &mpsc::UnboundedSender<HistoryEvent>,
-) {
+async fn flush_pending_prompt(pending_prompt: &mut Option<String>, agent: &Agent) {
     if let Some(previous) = pending_prompt.take() {
-        let _ = history_tx.send(HistoryEvent::Message(build_prompt_message(&previous)));
+        agent.append_message(build_prompt_message(&previous)).await;
     }
 }
 
@@ -1311,20 +1293,6 @@ async fn task_combo_execute(
     agent: Agent,
 ) {
     let tx = global::event_tx();
-    let (history_tx, mut history_rx) = mpsc::unbounded_channel::<HistoryEvent>();
-    let history_agent = agent.clone();
-    tokio::task::spawn(async move {
-        while let Some(event) = history_rx.recv().await {
-            match event {
-                HistoryEvent::Message(message) => {
-                    history_agent.append_message(message).await;
-                }
-                HistoryEvent::Flush(tx) => {
-                    let _ = tx.send(());
-                }
-            }
-        }
-    });
     let config = global::config().await;
     let combo_dir = config.combo_dir();
     let workspace_combo_dir = global::workspace_combo_dir();
@@ -1405,8 +1373,9 @@ async fn task_combo_execute(
                         .unwrap();
                     }
                     StarterEvent::RecordStart { tool_use } => {
-                        let _ =
-                            history_tx.send(HistoryEvent::Message(build_tool_use_message(&tool_use)));
+                        reply_agent
+                            .append_message(build_tool_use_message(&tool_use))
+                            .await;
                         tx.send(
                             ComboEvent::RecordStart {
                                 name: name.clone(),
@@ -1421,11 +1390,13 @@ async fn task_combo_execute(
                         is_error,
                         output,
                     } => {
-                        let _ = history_tx.send(HistoryEvent::Message(build_tool_result_message(
-                            &tool_use_id,
-                            is_error,
-                            &output,
-                        )));
+                        reply_agent
+                            .append_message(build_tool_result_message(
+                                &tool_use_id,
+                                is_error,
+                                &output,
+                            ))
+                            .await;
                         tx.send(
                             ComboEvent::RecordEnd {
                                 name: name.clone(),
@@ -1438,7 +1409,7 @@ async fn task_combo_execute(
                         .unwrap();
                     }
                     StarterEvent::Prompt { prompt } => {
-                        flush_pending_prompt(&mut pending_prompt, &history_tx);
+                        flush_pending_prompt(&mut pending_prompt, &reply_agent).await;
                         pending_prompt = Some(prompt.clone());
                         tx.send(
                             ComboEvent::Prompt {
@@ -1455,7 +1426,7 @@ async fn task_combo_execute(
                         responder,
                     } => {
                         let prompt_text = prompt.clone();
-                        flush_pending_prompt(&mut pending_prompt, &history_tx);
+                        flush_pending_prompt(&mut pending_prompt, &reply_agent).await;
                         pending_prompt = Some(prompt_text.clone());
                         tx.send(
                             ComboEvent::Prompt {
@@ -1469,7 +1440,6 @@ async fn task_combo_execute(
                         let response = if cancel_token.is_cancelled() {
                             Err("prompt reply cancelled".to_string())
                         } else {
-                            flush_history(&history_tx).await;
                             reply_agent
                                 .reply_prompt(&system_prompt, prompt, schemas)
                                 .await
@@ -1508,7 +1478,6 @@ async fn task_combo_execute(
                     reason: format!("starter join error: {err}"),
                 }),
             };
-            flush_history(&history_tx).await;
             let final_prompt = pending_prompt.take();
             tx.send(
                 ComboEvent::Executed {
@@ -1534,7 +1503,6 @@ async fn task_combo_execute(
         return;
     }
 
-    flush_history(&history_tx).await;
     let final_prompt = pending_prompt.take();
     tx.send(
         ComboEvent::Executed {
