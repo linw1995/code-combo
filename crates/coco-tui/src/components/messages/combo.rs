@@ -44,9 +44,12 @@ enum StarterState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 enum ComboView {
+    Stdout,
+    Stderr,
+    #[serde(alias = "stream")]
+    Mixed,
     #[default]
     Messages,
-    Stream,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -91,7 +94,7 @@ pub struct Combo {
 }
 
 const LIMIT: usize = 10;
-const STREAM_MARKER: &str = "|";
+const STREAM_MARKER: &str = "▐";
 
 fn default_display_state() -> FoldState {
     FoldState::Collapsed
@@ -345,13 +348,16 @@ impl Combo {
         self.has_stream_content()
     }
 
-    fn toggle_view(&mut self) {
-        self.clear_child_focus();
-        let mut state = self.state.write();
-        state.view = match state.view {
-            ComboView::Messages => ComboView::Stream,
-            ComboView::Stream => ComboView::Messages,
-        };
+    fn set_view(&mut self, view: ComboView) -> bool {
+        if !matches!(view, ComboView::Messages) && !self.can_toggle_view() {
+            return false;
+        }
+        if self.state.view != view {
+            self.clear_child_focus();
+            self.state.write().view = view;
+            return true;
+        }
+        false
     }
 
     fn toggle_display_state(&mut self) {
@@ -388,17 +394,30 @@ impl Combo {
             .saturating_add(preview_height)
     }
 
-    fn stream_line_count(&self) -> u16 {
+    fn stream_line_count(&self, view: ComboView) -> u16 {
         if self.has_child_output || self.combo_stream_suppressed {
+            return 0;
+        }
+        if matches!(view, ComboView::Messages) {
             return 0;
         }
         let total = self
             .state
             .output_chunks
             .iter()
+            .filter(|chunk| Self::matches_stream_view(view, chunk.stream))
             .map(|chunk| chunk.lines.len())
             .sum::<usize>();
         u16::try_from(total).unwrap_or(u16::MAX)
+    }
+
+    fn matches_stream_view(view: ComboView, stream: StreamKind) -> bool {
+        match view {
+            ComboView::Stdout => matches!(stream, StreamKind::Stdout),
+            ComboView::Stderr => matches!(stream, StreamKind::Stderr),
+            ComboView::Mixed => true,
+            ComboView::Messages => false,
+        }
     }
 
     fn draw_messages_view(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
@@ -452,11 +471,11 @@ impl Combo {
         Ok(())
     }
 
-    fn draw_stream_view(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+    fn draw_stream_view(&mut self, frame: &mut Frame, area: Rect, view: ComboView) -> Result<()> {
         if area.height == 0 {
             return Ok(());
         }
-        let (output, markers) = self.render_stream_lines();
+        let (output, markers) = self.render_stream_lines(view);
         self.draw_stream_section(frame, area, &output, markers.as_ref());
         Ok(())
     }
@@ -506,22 +525,31 @@ impl Combo {
         (output, markers)
     }
 
-    fn render_stream_lines(&self) -> (Paragraph<'static>, Option<Paragraph<'static>>) {
+    fn render_stream_lines(
+        &self,
+        view: ComboView,
+    ) -> (Paragraph<'static>, Option<Paragraph<'static>>) {
         let theme = global::theme();
         let mut lines = Vec::new();
         let mut markers = Vec::new();
+        let show_markers = matches!(view, ComboView::Mixed);
         for chunk in &self.state.output_chunks {
+            if !Self::matches_stream_view(view, chunk.stream) {
+                continue;
+            }
             let marker_style = match chunk.stream {
                 StreamKind::Stdout => theme.ui.bash_stdout_marker,
                 StreamKind::Stderr => theme.ui.bash_stderr_marker,
             };
             for line in &chunk.lines {
                 lines.push(Line::from(line.clone()));
-                markers.push(Line::from(Span::styled(STREAM_MARKER, marker_style)));
+                if show_markers {
+                    markers.push(Line::from(Span::styled(STREAM_MARKER, marker_style)));
+                }
             }
         }
         let output = Paragraph::new(lines);
-        let markers = if markers.is_empty() {
+        let markers = if !show_markers || markers.is_empty() {
             None
         } else {
             Some(Paragraph::new(markers))
@@ -592,7 +620,7 @@ impl Content for Combo {
         }
         let body_height = match self.state.view {
             ComboView::Messages => self.messages_body_height(width),
-            ComboView::Stream => self.stream_line_count(),
+            view => self.stream_line_count(view),
         };
         body_height as usize + border_height
     }
@@ -642,7 +670,7 @@ impl Content for Combo {
             hints.push_visible(&[toggle_text]);
         }
         if self.can_toggle_view() && !self.is_child_focused {
-            hints.push_visible(&[("View", "v")]);
+            hints.push_visible(&[("View", "1/2/3/4")]);
         }
         hints
     }
@@ -701,10 +729,20 @@ impl Component for Combo {
             return;
         }
 
-        if let (KeyModifiers::NONE, KeyCode::Char('v')) = (key.modifiers, key.code) {
-            if self.can_toggle_view() {
-                self.toggle_view();
-            }
+        if let (KeyModifiers::NONE, KeyCode::Char('1')) = (key.modifiers, key.code) {
+            self.set_view(ComboView::Stdout);
+            return;
+        }
+        if let (KeyModifiers::NONE, KeyCode::Char('2')) = (key.modifiers, key.code) {
+            self.set_view(ComboView::Stderr);
+            return;
+        }
+        if let (KeyModifiers::NONE, KeyCode::Char('3')) = (key.modifiers, key.code) {
+            self.set_view(ComboView::Mixed);
+            return;
+        }
+        if let (KeyModifiers::NONE, KeyCode::Char('4')) = (key.modifiers, key.code) {
+            self.set_view(ComboView::Messages);
             return;
         }
 
@@ -763,7 +801,7 @@ impl Component for Combo {
 
         match self.state.view {
             ComboView::Messages => self.draw_messages_view(frame, output_area)?,
-            ComboView::Stream => self.draw_stream_view(frame, output_area)?,
+            view => self.draw_stream_view(frame, output_area, view)?,
         }
         Ok(())
     }
