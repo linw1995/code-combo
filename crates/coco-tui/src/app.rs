@@ -236,6 +236,9 @@ impl App {
                         warn!(?err, "failed to run shell");
                     }
                     self.enter()?;
+                    self.terminal
+                        .clear()
+                        .whatever_context("failed to clear terminal after shell")?;
                     self.dirty = true;
                 }
                 _ => {
