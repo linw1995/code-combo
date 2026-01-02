@@ -50,6 +50,14 @@ pub struct Messages {
 }
 
 impl Messages {
+    fn clamp_offset(&mut self) {
+        let max_offset = self.total_height.saturating_sub(self.viewport_height);
+        let current = self.offset.get();
+        if current > max_offset {
+            *self.offset.write() = max_offset;
+        }
+    }
+
     pub fn extend(&mut self, iter: impl Iterator<Item = Message>) {
         let mut messages = self.messages.write();
         for message in iter {
@@ -87,9 +95,10 @@ impl Messages {
         // It has double end, so we need to add 1 to fit with position design.
         // position = N - 1: thumb at bottom
         // position = 0: thumb at top
-        let hiden_range = self.total_height - self.viewport_height;
-        let position_range = hiden_range + 1;
-        let position = (position_range - 1) - self.offset.get();
+        let hiden_range = self.total_height.saturating_sub(self.viewport_height);
+        let position_range = hiden_range.saturating_add(1);
+        let offset = self.offset.get().min(hiden_range);
+        let position = (position_range - 1).saturating_sub(offset);
         (position, position_range)
     }
 
@@ -100,6 +109,9 @@ impl Messages {
 
     pub fn draw_inline(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         let heights = self.message_heights(area.width, 0);
+        self.total_height = heights.iter().sum::<usize>() as u16;
+        self.viewport_height = area.height;
+        self.clamp_offset();
         if heights.is_empty() {
             return Ok(());
         }
@@ -549,6 +561,7 @@ impl Component for Messages {
         let heights = self.message_heights(area.width, scrollbar_width);
         self.total_height = heights.iter().sum::<usize>() as u16;
         self.viewport_height = area.height;
+        self.clamp_offset();
         let focus = self.focus.get();
         if focus != self.last_focus {
             self.ensure_focus_visible(&heights);
@@ -952,5 +965,36 @@ mod tests {
             .unwrap();
         let (position, _) = app.scroll_position();
         assert_eq!(position, 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clamp_offset_after_height_shrink() {
+        let mut app = Messages::default();
+        app.extend(
+            [
+                Message::user(Plain::new("0123456789abcdef".to_string()).into()),
+                Message::user(Plain::new("0123456789abcdef".to_string()).into()),
+            ]
+            .into_iter(),
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(16, 4)).unwrap();
+        terminal
+            .draw(|frame| app.draw(frame, frame.area()).unwrap())
+            .unwrap();
+
+        app.scroll_up(2);
+
+        app.messages.write_untracked().pop();
+        terminal
+            .draw(|frame| app.draw(frame, frame.area()).unwrap())
+            .unwrap();
+
+        let max_offset = app.total_height.saturating_sub(app.viewport_height);
+        assert_eq!(max_offset, 0);
+        assert_eq!(app.offset.get(), 0);
+        let (position, range) = app.scroll_position();
+        assert_eq!(position, 0);
+        assert_eq!(range, 1);
     }
 }
