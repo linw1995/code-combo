@@ -112,10 +112,7 @@ impl Agent {
         ensure_whatever!(!schemas.is_empty(), "schemas cannot be empty");
         let reply_tool = build_reply_tool(&schemas)?;
         let client = self.build_reply_client()?;
-        let mut messages = build_prompt_messages(&prompt, &instructions);
-        messages.push(Message::user(Content::Text(build_reply_tool_directive(
-            &schemas,
-        ))));
+        let messages = build_reply_prompt_messages(&prompt, &instructions, &schemas);
         let tool_choice = ToolChoice::tool().name(PROMPT_REPLY_TOOL_NAME).call();
         let system_prompt = system_prompt.trim();
         let system_prompt = if system_prompt.is_empty() {
@@ -225,12 +222,24 @@ impl Agent {
     }
 }
 
-fn build_prompt_messages(prompt: &str, instructions: &[Instruction]) -> Vec<Message> {
-    if instructions.is_empty() {
-        return vec![Message::user(prompt.into())];
-    }
-    let mut messages = build_instruction_messages(instructions);
-    append_prompt_to_messages(&mut messages, prompt);
+fn build_reply_prompt_messages(
+    prompt: &str,
+    instructions: &[Instruction],
+    schemas: &[PromptSchema],
+) -> Vec<Message> {
+    let mut messages = if instructions.is_empty() {
+        Vec::new()
+    } else {
+        build_instruction_messages(instructions)
+    };
+    let prompt = prompt.trim();
+    let directive = build_reply_tool_directive(schemas);
+    let user_text = if prompt.is_empty() {
+        directive
+    } else {
+        format!("{prompt}\n\n{directive}")
+    };
+    messages.push(Message::user(Content::Text(user_text)));
     messages
 }
 
@@ -268,29 +277,6 @@ fn build_instruction_messages(instructions: &[Instruction]) -> Vec<Message> {
         }
     }
     messages
-}
-
-fn append_prompt_to_messages(messages: &mut Vec<Message>, prompt: &str) {
-    if let Some(last) = messages.last_mut()
-        && matches!(last.role, Role::User)
-    {
-        match &mut last.content {
-            Content::Text(text) => {
-                if !text.is_empty() {
-                    text.push('\n');
-                }
-                text.push_str(prompt);
-            }
-            Content::Multiple(blocks) => {
-                blocks.push(AnthropicBlock::Text {
-                    text: prompt.to_string(),
-                });
-            }
-        }
-        return;
-    }
-
-    messages.push(Message::user(prompt.into()));
 }
 
 fn build_reply_tool(schemas: &[PromptSchema]) -> Result<AnthropicTool> {
