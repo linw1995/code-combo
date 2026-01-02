@@ -1,15 +1,55 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashSet,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crate::{
     Config, MCP_SOCKET_ENV, McpAction, McpCallToolPayload, McpRequest, McpResponse, McpServerInfo,
     McpToolInfo, SessionSocketClient, default_config_dir, error::Result,
 };
-use clap::{Arg, Command, error::ErrorKind};
+use clap::{
+    Arg, ArgAction, Command, builder::PossibleValuesParser, error::ErrorKind, value_parser,
+};
+use serde_json::{Map, Number, Value};
 use snafu::prelude::*;
 
 struct McpParsedArgs {
-    server: Option<String>,
-    tool: Option<String>,
+    server: String,
+    tool: String,
+    arguments: Option<Value>,
+}
+
+const TOOL_ARGS_JSON: &str = "__tool_args_json";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SchemaValueKind {
+    String,
+    Integer,
+    Number,
+    Boolean,
+    Json,
+}
+
+#[derive(Clone, Debug)]
+struct ToolArgSpec {
+    name: String,
+    required: bool,
+    kind: SchemaValueKind,
+    is_array: bool,
+    enum_values: Option<Vec<String>>,
+    description: Option<String>,
+}
+
+impl ToolArgSpec {
+    fn value_name(&self) -> &'static str {
+        match self.kind {
+            SchemaValueKind::String => "STRING",
+            SchemaValueKind::Integer => "INT",
+            SchemaValueKind::Number => "NUMBER",
+            SchemaValueKind::Boolean => "BOOL",
+            SchemaValueKind::Json => "JSON",
+        }
+    }
 }
 
 pub async fn handle_mcp(parent_command: &str, command_name: &str, args: Vec<String>) -> Result<()> {
@@ -31,40 +71,39 @@ pub async fn handle_mcp(parent_command: &str, command_name: &str, args: Vec<Stri
         .iter()
         .map(|server| server.name.clone())
         .collect::<Vec<_>>();
-    let parsed = match parse_mcp_args(parent_command, command_name, &args, &server_names) {
-        Ok(parsed) => parsed,
-        Err(err) => {
-            match err.kind() {
+    let parsed = if let Some(server) = detect_target_server(&args, &server_names) {
+        let tools = fetch_tool_list(&client, &server).await?;
+        let argv = build_mcp_argv(command_name, &args);
+        let cmd = build_mcp_parser(parent_command, command_name, &server_names, Some(&tools));
+        let matches = match cmd.try_get_matches_from(argv) {
+            Ok(matches) => matches,
+            Err(err) => match err.kind() {
                 ErrorKind::DisplayHelp
                 | ErrorKind::MissingRequiredArgument
-                | ErrorKind::MissingSubcommand => {
-                    if let Some(server) = detect_target_server(&args, &server_names) {
-                        let tools = fetch_tool_list(&client, &server).await?;
-                        return emit_mcp_parser_output_with_tools(
-                            parent_command,
-                            command_name,
-                            &args,
-                            &server_names,
-                            &tools,
-                        );
-                    }
-                    err.exit();
-                }
-                _ => (),
-            }
-            whatever!("{err}");
+                | ErrorKind::MissingSubcommand => err.exit(),
+                _ => whatever!("{err}"),
+            },
+        };
+        build_parsed_args(&matches, &tools)?
+    } else {
+        let argv = build_mcp_argv(command_name, &args);
+        let cmd = build_mcp_parser(parent_command, command_name, &server_names, None);
+        match cmd.try_get_matches_from(argv) {
+            Ok(_) => whatever!("server is required"),
+            Err(err) => match err.kind() {
+                ErrorKind::DisplayHelp
+                | ErrorKind::MissingRequiredArgument
+                | ErrorKind::MissingSubcommand => err.exit(),
+                _ => whatever!("{err}"),
+            },
         }
     };
 
-    let Some(server) = parsed.server else {
-        whatever!("server is required");
-    };
-    let Some(tool) = parsed.tool else {
-        whatever!("tool is required");
-    };
+    let server = parsed.server;
+    let tool = parsed.tool;
     let payload = McpCallToolPayload {
         tool: tool.clone(),
-        arguments: None,
+        arguments: parsed.arguments,
     };
     let request = McpRequest {
         request_id: new_request_id(),
@@ -83,22 +122,6 @@ pub async fn handle_mcp(parent_command: &str, command_name: &str, args: Vec<Stri
     let output = serde_json::to_string(&result).whatever_context("failed to serialize result")?;
     println!("{output}");
     Ok(())
-}
-
-fn parse_mcp_args(
-    parent_command: &str,
-    command_name: &str,
-    args: &[String],
-    server_names: &[String],
-) -> std::result::Result<McpParsedArgs, clap::Error> {
-    let argv = build_mcp_argv(command_name, args);
-    let matches = build_mcp_parser(parent_command, command_name, server_names, None)
-        .try_get_matches_from(argv)?;
-
-    Ok(McpParsedArgs {
-        server: matches.get_one::<String>("server").cloned(),
-        tool: matches.get_one::<String>("tool").cloned(),
-    })
 }
 
 fn build_mcp_parser(
@@ -125,37 +148,296 @@ fn build_mcp_parser(
         .help(help_message);
     cmd = cmd.arg(server_arg);
 
-    let tool_arg = if let Some(tools) = tools {
-        let help_message = format!(
-            "Target MCP tool name in [{}]",
-            tools
-                .iter()
-                .map(|t| t.name.clone())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        let tools = tools.to_owned();
-        let choice = move |src: &str| -> Result<McpToolInfo> {
-            tools
-                .iter()
-                .find(|tool| src == tool.name)
-                .cloned()
-                .whatever_context("target MCP tool not exists")
-        };
-        Arg::new("tool")
-            .value_parser(choice)
-            .required(true)
-            .allow_hyphen_values(true)
-            .help(help_message)
-    } else {
-        Arg::new("tool")
-            .required(true)
-            .allow_hyphen_values(true)
-            .help("Target MCP tool name")
-    };
-    cmd = cmd.arg(tool_arg);
+    if let Some(tools) = tools {
+        let mut tools = tools.to_vec();
+        tools.sort_by(|left, right| left.name.cmp(&right.name));
+        cmd = cmd
+            .subcommand_required(true)
+            .subcommand_value_name("tool")
+            .subcommand_help_heading("Tools");
+        for tool in &tools {
+            cmd = cmd.subcommand(build_tool_subcommand(tool));
+        }
+    }
 
     cmd
+}
+
+fn build_tool_subcommand(tool: &McpToolInfo) -> Command {
+    let mut cmd = Command::new(tool.name.clone());
+    if let Some(description) = &tool.description {
+        cmd = cmd.about(description.clone());
+    }
+
+    let specs = tool_arg_specs(&tool.input_schema);
+    let mut arg_names = Vec::new();
+    for spec in specs {
+        let mut arg = Arg::new(spec.name.clone())
+            .long(spec.name.clone())
+            .value_name(spec.value_name());
+        if let Some(description) = spec.description {
+            arg = arg.help(description);
+        }
+
+        arg = match spec.kind {
+            SchemaValueKind::String | SchemaValueKind::Json => arg,
+            SchemaValueKind::Integer => arg.value_parser(value_parser!(i64)),
+            SchemaValueKind::Number => arg.value_parser(value_parser!(f64)),
+            SchemaValueKind::Boolean => arg.value_parser(value_parser!(bool)),
+        };
+
+        if let Some(values) = &spec.enum_values {
+            arg = arg.value_parser(PossibleValuesParser::new(values.clone()));
+        }
+
+        if spec.is_array {
+            arg = arg.action(ArgAction::Append);
+        }
+
+        if spec.required {
+            arg = arg.required_unless_present(TOOL_ARGS_JSON);
+        }
+
+        arg_names.push(spec.name.clone());
+        cmd = cmd.arg(arg);
+    }
+
+    let mut args_json = Arg::new(TOOL_ARGS_JSON)
+        .long("args-json")
+        .value_name("JSON")
+        .help("JSON-encoded tool arguments");
+    if !arg_names.is_empty() {
+        args_json = args_json.conflicts_with_all(arg_names.iter().cloned());
+    }
+    cmd.arg(args_json)
+}
+
+fn build_parsed_args(matches: &clap::ArgMatches, tools: &[McpToolInfo]) -> Result<McpParsedArgs> {
+    let server = matches
+        .get_one::<String>("server")
+        .cloned()
+        .whatever_context("server is required")?;
+    let (tool_name, tool_matches) = matches.subcommand().whatever_context("tool is required")?;
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name == tool_name)
+        .whatever_context("target MCP tool not exists")?;
+    let arguments = build_tool_arguments(tool, tool_matches)?;
+    Ok(McpParsedArgs {
+        server,
+        tool: tool.name.clone(),
+        arguments,
+    })
+}
+
+fn tool_arg_specs(schema: &Value) -> Vec<ToolArgSpec> {
+    let Some(schema_obj) = schema.as_object() else {
+        return Vec::new();
+    };
+    let properties = schema_obj
+        .get("properties")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if properties.is_empty() {
+        return Vec::new();
+    }
+
+    let required = schema_obj
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut names = properties.keys().cloned().collect::<Vec<_>>();
+    names.sort();
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let schema = properties.get(&name)?;
+            let description = schema
+                .get("description")
+                .and_then(Value::as_str)
+                .map(|value| value.to_string());
+            let (kind, is_array, enum_values) = parse_property_schema(schema);
+            let is_required = required.contains(&name);
+            Some(ToolArgSpec {
+                name,
+                required: is_required,
+                kind,
+                is_array,
+                enum_values,
+                description,
+            })
+        })
+        .collect()
+}
+
+fn parse_property_schema(schema: &Value) -> (SchemaValueKind, bool, Option<Vec<String>>) {
+    let schema_type = schema.get("type");
+    if schema_type
+        .and_then(Value::as_str)
+        .map(|value| value == "array")
+        .unwrap_or(false)
+    {
+        let items = schema.get("items").unwrap_or(&Value::Null);
+        let (kind, enum_values) = parse_scalar_schema(items);
+        return (kind, true, enum_values);
+    }
+
+    let (kind, enum_values) = parse_scalar_schema(schema);
+    (kind, false, enum_values)
+}
+
+fn parse_scalar_schema(schema: &Value) -> (SchemaValueKind, Option<Vec<String>>) {
+    if let Some(types) = schema.get("type").and_then(Value::as_array)
+        && let Some(kind) = types
+            .iter()
+            .filter_map(Value::as_str)
+            .find_map(schema_type_to_kind)
+    {
+        return (kind, extract_string_enum(schema, kind));
+    }
+
+    if let Some(schema_type) = schema.get("type").and_then(Value::as_str) {
+        let kind = schema_type_to_kind(schema_type).unwrap_or(SchemaValueKind::Json);
+        return (kind, extract_string_enum(schema, kind));
+    }
+
+    let kind = if schema.get("enum").is_some() {
+        SchemaValueKind::String
+    } else {
+        SchemaValueKind::Json
+    };
+    (kind, extract_string_enum(schema, kind))
+}
+
+fn extract_string_enum(schema: &Value, kind: SchemaValueKind) -> Option<Vec<String>> {
+    if kind != SchemaValueKind::String {
+        return None;
+    }
+    schema.get("enum").and_then(Value::as_array).map(|items| {
+        items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    })
+}
+
+fn schema_type_to_kind(value: &str) -> Option<SchemaValueKind> {
+    match value {
+        "string" => Some(SchemaValueKind::String),
+        "integer" => Some(SchemaValueKind::Integer),
+        "number" => Some(SchemaValueKind::Number),
+        "boolean" => Some(SchemaValueKind::Boolean),
+        "object" => Some(SchemaValueKind::Json),
+        _ => None,
+    }
+}
+
+fn build_tool_arguments(tool: &McpToolInfo, matches: &clap::ArgMatches) -> Result<Option<Value>> {
+    if let Some(raw) = matches.get_one::<String>(TOOL_ARGS_JSON) {
+        let value =
+            serde_json::from_str(raw).whatever_context("failed to parse args-json argument")?;
+        return Ok(Some(value));
+    }
+
+    let specs = tool_arg_specs(&tool.input_schema);
+    if specs.is_empty() {
+        return Ok(None);
+    }
+
+    let mut arguments = Map::new();
+    for spec in specs {
+        if spec.is_array {
+            if let Some(values) = collect_array_values(matches, &spec)? {
+                arguments.insert(spec.name, Value::Array(values));
+            }
+        } else if let Some(value) = collect_single_value(matches, &spec)? {
+            arguments.insert(spec.name, value);
+        }
+    }
+
+    if arguments.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(Value::Object(arguments)))
+    }
+}
+
+fn collect_single_value(matches: &clap::ArgMatches, spec: &ToolArgSpec) -> Result<Option<Value>> {
+    match spec.kind {
+        SchemaValueKind::String => Ok(matches
+            .get_one::<String>(&spec.name)
+            .map(|value| Value::String(value.clone()))),
+        SchemaValueKind::Integer => Ok(matches
+            .get_one::<i64>(&spec.name)
+            .map(|value| Value::Number(Number::from(*value)))),
+        SchemaValueKind::Number => matches
+            .get_one::<f64>(&spec.name)
+            .map(|value| number_value_from_f64(*value, &spec.name))
+            .transpose(),
+        SchemaValueKind::Boolean => Ok(matches
+            .get_one::<bool>(&spec.name)
+            .map(|value| Value::Bool(*value))),
+        SchemaValueKind::Json => matches
+            .get_one::<String>(&spec.name)
+            .map(|value| json_value_from_str(value, &spec.name))
+            .transpose(),
+    }
+}
+
+fn collect_array_values(
+    matches: &clap::ArgMatches,
+    spec: &ToolArgSpec,
+) -> Result<Option<Vec<Value>>> {
+    match spec.kind {
+        SchemaValueKind::String => Ok(matches
+            .get_many::<String>(&spec.name)
+            .map(|values| values.map(|value| Value::String(value.clone())).collect())),
+        SchemaValueKind::Integer => Ok(matches.get_many::<i64>(&spec.name).map(|values| {
+            values
+                .map(|value| Value::Number(Number::from(*value)))
+                .collect()
+        })),
+        SchemaValueKind::Number => matches
+            .get_many::<f64>(&spec.name)
+            .map(|values| {
+                values
+                    .map(|value| number_value_from_f64(*value, &spec.name))
+                    .collect::<Result<Vec<_>>>()
+            })
+            .transpose(),
+        SchemaValueKind::Boolean => Ok(matches
+            .get_many::<bool>(&spec.name)
+            .map(|values| values.map(|value| Value::Bool(*value)).collect())),
+        SchemaValueKind::Json => matches
+            .get_many::<String>(&spec.name)
+            .map(|values| {
+                values
+                    .map(|value| json_value_from_str(value, &spec.name))
+                    .collect::<Result<Vec<_>>>()
+            })
+            .transpose(),
+    }
+}
+
+fn number_value_from_f64(value: f64, name: &str) -> Result<Value> {
+    Number::from_f64(value)
+        .map(Value::Number)
+        .whatever_context(format!("failed to parse JSON number for {name}"))
+}
+
+fn json_value_from_str(value: &str, name: &str) -> Result<Value> {
+    serde_json::from_str::<Value>(value)
+        .whatever_context(format!("failed to parse JSON value for {name}"))
 }
 
 async fn fetch_server_list(client: &SessionSocketClient) -> Result<Vec<McpServerInfo>> {
@@ -213,21 +495,6 @@ fn build_mcp_argv(command_name: &str, args: &[String]) -> Vec<String> {
     argv.push(command_name.to_string());
     argv.extend(args.iter().cloned());
     argv
-}
-
-fn emit_mcp_parser_output_with_tools(
-    parent_command: &str,
-    command_name: &str,
-    args: &[String],
-    server_names: &[String],
-    tools: &[McpToolInfo],
-) -> Result<()> {
-    let argv = build_mcp_argv(command_name, args);
-    let cmd = build_mcp_parser(parent_command, command_name, server_names, Some(tools));
-    match cmd.try_get_matches_from(argv) {
-        Ok(_) => Ok(()),
-        Err(err) => err.exit(),
-    }
 }
 
 fn new_request_id() -> String {
@@ -288,12 +555,14 @@ mod tests {
         socket_path: &std::path::Path,
         server: &str,
         tool: &str,
+        args: &[&str],
     ) -> Result<String> {
         let coco_bin = resolve_coco_bin()?;
         let output = Command::new(coco_bin)
             .arg("mcp")
             .arg(server)
             .arg(tool)
+            .args(args)
             .env(MCP_SOCKET_ENV, socket_path)
             .output()
             .await
@@ -423,11 +692,16 @@ mod tests {
         let parent_command = "coco";
         let command_name = "mcp";
         let server_names = vec!["alpha".to_string()];
+        let tools = vec![McpToolInfo {
+            name: "ping".to_string(),
+            description: None,
+            input_schema: serde_json::json!({}),
+        }];
 
-        let err = build_mcp_parser(parent_command, command_name, &server_names, None)
+        let err = build_mcp_parser(parent_command, command_name, &server_names, Some(&tools))
             .try_get_matches_from(vec![command_name, "alpha"])
             .expect_err("expected tool to be required");
-        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+        assert_eq!(err.kind(), ErrorKind::MissingSubcommand);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -508,14 +782,20 @@ mod tests {
             "tool list should include ping"
         );
 
-        let output = run_coco_mcp(socket_path.as_path(), "alpha", "ping").await?;
+        let output = run_coco_mcp(
+            socket_path.as_path(),
+            "alpha",
+            "echo",
+            &["--message", "hello"],
+        )
+        .await?;
         let value: serde_json::Value =
             serde_json::from_str(&output).whatever_context("failed to parse JSON output")?;
 
         let expected = serde_json::json!({
             "content": [
                 {
-                    "text": "pong",
+                    "text": "echo: hello",
                     "type": "text"
                 }
             ],
@@ -531,29 +811,27 @@ mod tests {
     #[snafu::report]
     async fn mcp_cmd_help_and_errors_for_cli() -> Result<()> {
         let (guard, socket_path) = setup_mcp_test_env().await?;
-        let missing_required_both = indoc! {"
+        let missing_required_server = indoc! {"
             error: the following required arguments were not provided:
             \x20\x20<server>
-            \x20\x20<tool>
 
-            Usage: coco mcp <server> <tool>
+            Usage: coco mcp <server>
 
             For more information, try '--help'.
         "};
-        let missing_required_tool = indoc! {"
-            error: the following required arguments were not provided:
-            \x20\x20<tool>
+        let missing_subcommand = indoc! {"
+            error: 'coco mcp' requires a subcommand but one was not provided
+            \x20\x20[subcommands: echo, ping, help]
 
             Usage: coco mcp <server> <tool>
 
             For more information, try '--help'.
         "};
         let help_without_tools = indoc! {"
-            Usage: coco mcp <server> <tool>
+            Usage: coco mcp <server>
 
             Arguments:
             \x20\x20<server>  Target MCP server name in [alpha, beta]
-            \x20\x20<tool>    Target MCP tool name
 
             Options:
             \x20\x20-h, --help  Print help
@@ -561,19 +839,34 @@ mod tests {
         let help_with_tools = indoc! {"
             Usage: coco mcp <server> <tool>
 
+            Tools:
+            \x20\x20echo  Echo a message
+            \x20\x20ping  Ping the server
+            \x20\x20help  Print this message or the help of the given subcommand(s)
+
             Arguments:
             \x20\x20<server>  Target MCP server name in [alpha, beta]
-            \x20\x20<tool>    Target MCP tool name in [echo, ping]
 
             Options:
             \x20\x20-h, --help  Print help
+        "};
+        let ping_help = indoc! {"
+            Ping the server
+
+            Usage: coco mcp <server> ping [OPTIONS]
+
+            Options:
+            \x20\x20\x20\x20\x20\x20--args-json <JSON>  JSON-encoded tool arguments
+            \x20\x20-h, --help              Print help
         "};
         let invalid_server = indoc! {"
             Error: failed to handle client command
 
             Caused by these errors (recent errors listed first):
             \x20\x201: failed to handle mcp
-            \x20\x202: error: invalid value 'aplpha' for '<server>': target MCP server not configured
+            \x20\x202: error: unexpected argument 'ping' found
+
+            Usage: coco mcp <server>
 
             For more information, try '--help'.
 
@@ -585,7 +878,7 @@ mod tests {
                 vec![],
                 ExpectedOutput {
                     stdout: "",
-                    stderr: missing_required_both,
+                    stderr: missing_required_server,
                     success: false,
                 },
             ),
@@ -612,7 +905,7 @@ mod tests {
                 vec!["alpha"],
                 ExpectedOutput {
                     stdout: "",
-                    stderr: missing_required_tool,
+                    stderr: missing_subcommand,
                     success: false,
                 },
             ),
@@ -638,7 +931,7 @@ mod tests {
                 "coco mcp alpha ping -h",
                 vec!["alpha", "ping", "-h"],
                 ExpectedOutput {
-                    stdout: help_with_tools,
+                    stdout: ping_help,
                     stderr: "",
                     success: true,
                 },
