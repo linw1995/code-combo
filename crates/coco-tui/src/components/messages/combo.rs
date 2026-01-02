@@ -94,6 +94,8 @@ pub struct Combo {
     is_focused: bool,
     is_child_focused: bool,
     has_child_output: bool,
+    is_recording: bool,
+    combo_stream_suppressed: bool,
 }
 
 const LIMIT: usize = 10;
@@ -118,6 +120,8 @@ impl Combo {
             is_focused: false,
             is_child_focused: false,
             has_child_output: false,
+            is_recording: false,
+            combo_stream_suppressed: false,
         }
     }
 
@@ -194,6 +198,9 @@ impl Combo {
             ComboEvent::Output { name, chunk } => self.on_ouput_event(name, chunk, None),
             ComboEvent::RecordStart { name, tool_use } => {
                 if &self.state.name == name {
+                    self.is_recording = true;
+                    self.combo_stream_suppressed = true;
+                    self.clear_combo_stream();
                     self.push_record_tool_use(tool_use.clone());
                     self.has_child_output = false;
                 }
@@ -212,6 +219,9 @@ impl Combo {
                 if &self.state.name == name {
                     self.forward_result_to_child(tool_use_id, *is_error, output.clone());
                     self.has_child_output = false;
+                    self.is_recording = false;
+                    self.combo_stream_suppressed = true;
+                    self.clear_combo_stream();
                 }
             }
             ComboEvent::Preview { name, instructions } => {
@@ -223,6 +233,8 @@ impl Combo {
                 if &self.state.name == name {
                     self.clear_child_focus();
                     self.has_child_output = false;
+                    self.is_recording = false;
+                    self.combo_stream_suppressed = false;
                     let mut state = self.state.write();
                     state.starter_state = StarterState::Executing;
                     state.is_error = false;
@@ -269,6 +281,9 @@ impl Combo {
                 {
                     self.clear_child_focus();
                     self.has_child_output = false;
+                    self.is_recording = false;
+                    self.combo_stream_suppressed = true;
+                    self.clear_combo_stream();
                     {
                         let mut state = self.state.write();
                         state.starter_state = StarterState::Cancelled;
@@ -293,6 +308,13 @@ impl Combo {
             self.has_child_output = true;
             return;
         }
+        if self.is_recording {
+            return;
+        }
+        if self.combo_stream_suppressed {
+            self.clear_combo_stream();
+            self.combo_stream_suppressed = false;
+        }
         self.has_child_output = false;
         let mut state = self.state.write();
         state.output_chunks.push(chunk.clone());
@@ -308,7 +330,8 @@ impl Combo {
     }
 
     fn has_stream_content(&self) -> bool {
-        !self.has_child_output
+        !self.combo_stream_suppressed
+            && !self.has_child_output
             && (!self.state.output_chunks.is_empty() || !self.state.preview_lines.is_empty())
     }
 
@@ -369,6 +392,7 @@ impl Combo {
             u16::try_from(self.messages.height_for_width(width)).unwrap_or(u16::MAX);
         let preview_height = if matches!(self.state.starter_state, StarterState::Executing)
             && !self.has_child_output
+            && !self.combo_stream_suppressed
         {
             self.state.preview_lines.len() as u16
         } else {
@@ -385,7 +409,7 @@ impl Combo {
     }
 
     fn stream_line_count(&self) -> u16 {
-        if self.has_child_output {
+        if self.has_child_output || self.combo_stream_suppressed {
             return 0;
         }
         let total = self
@@ -405,6 +429,7 @@ impl Combo {
             u16::try_from(self.messages.height_for_width(area.width)).unwrap_or(u16::MAX);
         let preview_height = if matches!(self.state.starter_state, StarterState::Executing)
             && !self.has_child_output
+            && !self.combo_stream_suppressed
         {
             self.state.preview_lines.len() as u16
         } else {
@@ -648,6 +673,8 @@ impl Persistable for Combo {
             is_focused: false,
             is_child_focused: false,
             has_child_output: false,
+            is_recording: false,
+            combo_stream_suppressed: false,
         };
         combo.rebuild_messages();
         Ok(combo)
@@ -998,5 +1025,60 @@ mod tests {
         assert!(combo.has_child_output);
         assert!(combo.state.output_chunks.is_empty());
         assert!(combo.state.preview_lines.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn combo_suppresses_stream_until_new_output_after_record() {
+        let mut combo = Combo::new("demo");
+        let input = BashInput::new("echo 1".to_string());
+        let tool_use = ToolUse {
+            id: "combo_record_demo_0".to_string(),
+            name: BASH_TOOL_NAME.to_string(),
+            input: serde_json::to_value(&input).unwrap(),
+        };
+        combo.handle_event(&Event::Combo(ComboEvent::Executing {
+            name: "demo".to_string(),
+        }));
+        combo.handle_event(&Event::Combo(ComboEvent::RecordStart {
+            name: "demo".to_string(),
+            tool_use,
+        }));
+
+        combo.handle_event(&Event::Combo(ComboEvent::Output {
+            name: "demo".to_string(),
+            chunk: code_combo::OutputChunk {
+                timestamp: 0,
+                stream: code_combo::StreamKind::Stdout,
+                lines: vec!["combo-line".to_string()],
+            },
+        }));
+
+        assert!(combo.combo_stream_suppressed);
+        assert!(combo.state.output_chunks.is_empty());
+        assert!(combo.state.preview_lines.is_empty());
+
+        combo.handle_event(&Event::Combo(ComboEvent::RecordEnd {
+            name: "demo".to_string(),
+            tool_use_id: "combo_record_demo_0".to_string(),
+            is_error: false,
+            output: Final::Message("ok".to_string()),
+        }));
+
+        assert!(combo.combo_stream_suppressed);
+        assert!(combo.state.output_chunks.is_empty());
+        assert!(combo.state.preview_lines.is_empty());
+
+        combo.handle_event(&Event::Combo(ComboEvent::Output {
+            name: "demo".to_string(),
+            chunk: code_combo::OutputChunk {
+                timestamp: 0,
+                stream: code_combo::StreamKind::Stdout,
+                lines: vec!["after-record".to_string()],
+            },
+        }));
+
+        assert!(!combo.combo_stream_suppressed);
+        assert_eq!(combo.state.output_chunks.len(), 1);
+        assert_eq!(combo.state.preview_lines.len(), 1);
     }
 }

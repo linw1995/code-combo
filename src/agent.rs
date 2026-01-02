@@ -113,10 +113,7 @@ impl Agent {
         let reply_tool = build_reply_tool(&schemas)?;
         let client = self.build_reply_client()?;
         let messages = build_prompt_messages(&prompt, &instructions);
-        let tool_choice = ToolChoice::tool()
-            .name(PROMPT_REPLY_TOOL_NAME)
-            .disable_parallel_tool_use(true)
-            .call();
+        let tool_choice = ToolChoice::tool().name(PROMPT_REPLY_TOOL_NAME).call();
         let system_prompt = system_prompt.trim();
         let system_prompt = if system_prompt.is_empty() {
             None
