@@ -1,4 +1,4 @@
-use code_combo::{Instruction, OutputChunk, Starter, TextEdit, ToolUse, tools::Final};
+use code_combo::{OutputChunk, Starter, TextEdit, ToolUse, tools::Final};
 use crossterm::event::{KeyEvent, MouseEvent};
 
 #[derive(Debug, Clone)]
@@ -86,13 +86,14 @@ pub enum ComboEvent {
         is_error: bool,
         output: Final,
     },
-    Preview {
+    Prompt {
         name: String,
-        instructions: Vec<Instruction>,
+        prompt: String,
     },
     Executed {
         name: String,
         starter: Starter,
+        final_prompt: Option<String>,
     },
 
     ReplyToolError {

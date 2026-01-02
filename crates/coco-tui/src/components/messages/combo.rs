@@ -10,12 +10,8 @@ use ratatui::{
     widgets::{Block, Borders},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
-use code_combo::{
-    Instruction, OutputChunk, StreamKind, ToolUse,
-    tools::{BASH_TOOL_NAME, BashInput, BashOutput, Final},
-};
+use code_combo::{OutputChunk, StreamKind, ToolUse, tools::Final};
 
 use super::fold::FoldState;
 use super::streaming::StreamedLines;
@@ -61,13 +57,9 @@ struct Inner {
     #[serde(default)]
     view: ComboView,
     #[serde(default)]
-    instructions: Vec<Instruction>,
-    #[serde(default)]
     output_chunks: Vec<OutputChunk>,
     #[serde(default = "default_preview_lines")]
     preview_lines: StreamedLines,
-    #[serde(default)]
-    error_message: Option<String>,
 }
 
 impl Default for Inner {
@@ -78,10 +70,8 @@ impl Default for Inner {
             starter_state: StarterState::default(),
             display_state: default_display_state(),
             view: ComboView::default(),
-            instructions: Vec::new(),
             output_chunks: Vec::new(),
             preview_lines: default_preview_lines(),
-            error_message: None,
         }
     }
 }
@@ -165,6 +155,12 @@ impl Combo {
         self.has_child_output = false;
     }
 
+    fn push_prompt(&mut self, prompt: &str) {
+        self.state.write().view = ComboView::Messages;
+        self.messages
+            .push(Message::user(Plain::new(prompt.to_string()).into()));
+    }
+
     fn forward_output_to_child(&mut self, tool_use_id: &str, chunk: &OutputChunk) -> bool {
         let event = Event::Answer(AnswerEvent::ToolOutput {
             id: tool_use_id.to_string(),
@@ -224,9 +220,9 @@ impl Combo {
                     self.clear_combo_stream();
                 }
             }
-            ComboEvent::Preview { name, instructions } => {
+            ComboEvent::Prompt { name, prompt } => {
                 if &self.state.name == name {
-                    self.replace_instructions(instructions);
+                    self.push_prompt(prompt);
                 }
             }
             ComboEvent::Executing { name } => {
@@ -238,9 +234,7 @@ impl Combo {
                     let mut state = self.state.write();
                     state.starter_state = StarterState::Executing;
                     state.is_error = false;
-                    state.error_message = None;
                     state.view = ComboView::Messages;
-                    state.instructions.clear();
                     state.output_chunks.clear();
                     state.preview_lines = StreamedLines::new(Some(LIMIT));
                     state.display_state.expand();
@@ -250,27 +244,25 @@ impl Combo {
             }
             ComboEvent::Executed { name, starter, .. } => {
                 if &self.state.name == name {
-                    {
-                        let mut state = self.state.write();
-                        let instructions = match &starter.combo {
-                            Ok(combo) => {
-                                state.is_error = false;
-                                state.error_message = None;
-                                combo.instructions.clone()
-                            }
-                            Err(err) => {
-                                state.is_error = true;
-                                state.error_message =
-                                    Some(format!("Failed to execute starter: {err}"));
-                                Vec::new()
-                            }
-                        };
-                        state.instructions = instructions;
-                        state.starter_state = StarterState::Finalized;
-                        state.display_state.expand();
+                    let mut state = self.state.write();
+                    let error_message = match &starter.combo {
+                        Ok(_) => {
+                            state.is_error = false;
+                            None
+                        }
+                        Err(err) => {
+                            state.is_error = true;
+                            Some(format!("Failed to execute starter: {err}"))
+                        }
+                    };
+                    state.starter_state = StarterState::Finalized;
+                    state.display_state.expand();
+                    drop(state);
+                    if let Some(message) = error_message {
+                        self.messages
+                            .push(Message::system(Plain::new(message).into()));
                     }
                     self.has_child_output = false;
-                    self.rebuild_messages();
                 }
             }
             ComboEvent::Cancelled { name } => {
@@ -322,7 +314,7 @@ impl Combo {
     }
 
     fn has_message_content(&self) -> bool {
-        !self.state.instructions.is_empty() || self.state.error_message.is_some()
+        !self.messages.is_empty()
     }
 
     fn has_body_content(&self) -> bool {
@@ -359,32 +351,6 @@ impl Combo {
         if self.has_collapsible_body() {
             self.state.write().display_state.collapse();
         }
-    }
-
-    fn replace_instructions(&mut self, instructions: &[Instruction]) {
-        {
-            let mut state = self.state.write();
-            state.instructions = instructions.to_vec();
-        }
-        self.rebuild_messages();
-    }
-
-    fn rebuild_messages(&mut self) {
-        self.clear_child_focus();
-        let (name, instructions, error_message) = {
-            let state = self.state.read();
-            (
-                state.name.clone(),
-                state.instructions.clone(),
-                state.error_message.clone(),
-            )
-        };
-        let mut messages = build_instruction_messages(&name, &instructions);
-        if let Some(message) = error_message {
-            messages.push(Message::system(Plain::new(message).into()));
-        }
-        self.messages.clear();
-        self.messages.extend(messages.into_iter());
     }
 
     fn messages_body_height(&self, width: u16) -> u16 {
@@ -662,21 +628,20 @@ impl Content for Combo {
 
 impl Persistable for Combo {
     fn save(&self) -> Session {
-        session::save(&self.state)
+        session::save_related(&self.state, self.messages.save())
     }
 
     fn load(session: Session) -> Result<Self> {
-        let state: Inner = session::load(session)?;
-        let mut combo = Self {
+        let (state, messages): (Inner, Session) = session::load_related(session)?;
+        let combo = Self {
             state: State::new(state),
-            messages: Messages::default(),
+            messages: Messages::load(messages)?,
             is_focused: false,
             is_child_focused: false,
             has_child_output: false,
             is_recording: false,
             combo_stream_suppressed: false,
         };
-        combo.rebuild_messages();
         Ok(combo)
     }
 }
@@ -790,100 +755,13 @@ impl Component for Combo {
 
 impl ContentComponent for Combo {}
 
-fn build_instruction_messages(name: &str, instructions: &[Instruction]) -> Vec<Message> {
-    instructions
-        .iter()
-        .enumerate()
-        .map(|(idx, instruction)| match instruction {
-            Instruction::Text(text) => Message::user(Plain::new(text.clone()).into()),
-            Instruction::Command { input, output } => {
-                build_command_message(name, idx, input, output)
-            }
-        })
-        .collect()
-}
-
-fn build_command_message(
-    name: &str,
-    idx: usize,
-    input: &BashInput,
-    output: &BashOutput,
-) -> Message {
-    let tool_use = ToolUse {
-        id: format!("combo_preview_{name}_{idx}"),
-        name: BASH_TOOL_NAME.to_string(),
-        input: serde_json::to_value(input).unwrap_or_else(|_| {
-            json!({
-                "command": input.command,
-                "timeout": input.timeout,
-            })
-        }),
-    };
-    let is_error = output.exit_code != 0;
-    let output_value = serde_json::to_value(output).unwrap_or_else(|_| {
-        json!({
-            "exit_code": output.exit_code,
-            "stdout": output.stdout,
-            "stderr": output.stderr,
-            "timed_out": output.timed_out,
-        })
-    });
-    let mut tool = Tool::new(tool_use.clone());
-    for chunk in build_output_chunks(output) {
-        tool.handle_event(&Event::Answer(AnswerEvent::ToolOutput {
-            id: tool_use.id.clone(),
-            chunk,
-        }));
-    }
-    tool.handle_event(&Event::Answer(AnswerEvent::ToolResult {
-        id: tool_use.id.clone(),
-        is_error,
-        is_user_cancelled: false,
-        output: Final::Json(output_value),
-    }));
-    Message::bot(tool.into())
-}
-
-fn build_output_chunks(output: &BashOutput) -> Vec<OutputChunk> {
-    let mut chunks = Vec::new();
-    if !output.stdout.is_empty() {
-        let lines = output
-            .stdout
-            .lines()
-            .map(|line| line.to_string())
-            .collect::<Vec<_>>();
-        if !lines.is_empty() {
-            chunks.push(OutputChunk {
-                timestamp: 0,
-                stream: StreamKind::Stdout,
-                lines,
-            });
-        }
-    }
-    if !output.stderr.is_empty() {
-        let lines = output
-            .stderr
-            .lines()
-            .map(|line| line.to_string())
-            .collect::<Vec<_>>();
-        if !lines.is_empty() {
-            chunks.push(OutputChunk {
-                timestamp: 0,
-                stream: StreamKind::Stderr,
-                lines,
-            });
-        }
-    }
-    chunks
-}
-
 #[cfg(test)]
 mod tests {
     use crate::actions::Action;
     use crate::events::{ComboEvent, Event};
 
     use super::*;
-    use code_combo::tools::{BashInput, BashOutput};
+    use code_combo::tools::{BASH_TOOL_NAME, BashInput};
 
     fn test_key_z() -> KeyEvent {
         KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE)
@@ -897,18 +775,6 @@ mod tests {
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
     }
 
-    fn make_command_instruction(command: &str) -> code_combo::Instruction {
-        code_combo::Instruction::Command {
-            input: BashInput::new(command.to_string()),
-            output: BashOutput {
-                exit_code: 0,
-                stdout: "ok".to_string(),
-                stderr: String::new(),
-                timed_out: false,
-            },
-        }
-    }
-
     fn make_starter(name: &str) -> code_combo::Starter {
         code_combo::Starter {
             path: "/tmp/demo".to_string(),
@@ -918,37 +784,30 @@ mod tests {
                     description: String::new(),
                     mode: code_combo::ComboMode::Unknown,
                 },
-                instructions: vec![code_combo::Instruction::Text(
-                    "line1\nline2\nline3".to_string(),
-                )],
             }),
         }
     }
 
-    fn make_starter_with_commands(name: &str, commands: &[&str]) -> code_combo::Starter {
-        let instructions = commands
-            .iter()
-            .map(|command| make_command_instruction(command))
-            .collect::<Vec<_>>();
-        code_combo::Starter {
-            path: "/tmp/demo".to_string(),
-            combo: Ok(code_combo::Combo {
-                metadata: code_combo::ComboMetadata {
-                    name: name.to_string(),
-                    description: String::new(),
-                    mode: code_combo::ComboMode::Unknown,
-                },
-                instructions,
-            }),
+    fn make_tool_use(id: &str, command: &str) -> ToolUse {
+        let input = BashInput::new(command.to_string());
+        ToolUse {
+            id: id.to_string(),
+            name: BASH_TOOL_NAME.to_string(),
+            input: serde_json::to_value(&input).unwrap(),
         }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn combo_is_collapsed_by_default_and_toggles_with_z() {
         let mut combo = Combo::new("demo");
+        combo.handle_event(&Event::Combo(ComboEvent::Prompt {
+            name: "demo".to_string(),
+            prompt: "line1".to_string(),
+        }));
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
             name: "demo".to_string(),
             starter: make_starter("demo"),
+            final_prompt: Some("line1".to_string()),
         }));
 
         assert!(combo.height(80) > 1);
@@ -983,9 +842,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn combo_persists_collapsed_state() {
         let mut combo = Combo::new("demo");
+        combo.handle_event(&Event::Combo(ComboEvent::Prompt {
+            name: "demo".to_string(),
+            prompt: "line1".to_string(),
+        }));
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
             name: "demo".to_string(),
             starter: make_starter("demo"),
+            final_prompt: Some("line1".to_string()),
         }));
         combo.handle_action(&Action::Blur);
         combo.handle_key_event(&test_key_z());
@@ -999,9 +863,33 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn combo_enters_and_exits_actionable_messages_with_enter_and_esc() {
         let mut combo = Combo::new("demo");
+        combo.handle_event(&Event::Combo(ComboEvent::Executing {
+            name: "demo".to_string(),
+        }));
+        combo.handle_event(&Event::Combo(ComboEvent::RecordStart {
+            name: "demo".to_string(),
+            tool_use: make_tool_use("combo_record_demo_0", "echo 1"),
+        }));
+        combo.handle_event(&Event::Combo(ComboEvent::RecordEnd {
+            name: "demo".to_string(),
+            tool_use_id: "combo_record_demo_0".to_string(),
+            is_error: false,
+            output: Final::Message("ok".to_string()),
+        }));
+        combo.handle_event(&Event::Combo(ComboEvent::RecordStart {
+            name: "demo".to_string(),
+            tool_use: make_tool_use("combo_record_demo_1", "echo 2"),
+        }));
+        combo.handle_event(&Event::Combo(ComboEvent::RecordEnd {
+            name: "demo".to_string(),
+            tool_use_id: "combo_record_demo_1".to_string(),
+            is_error: false,
+            output: Final::Message("ok".to_string()),
+        }));
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
             name: "demo".to_string(),
-            starter: make_starter_with_commands("demo", &["echo 1", "echo 2"]),
+            starter: make_starter("demo"),
+            final_prompt: None,
         }));
 
         assert!(!combo.is_child_focused);
@@ -1019,9 +907,33 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn combo_moves_actionable_messages_with_jk() {
         let mut combo = Combo::new("demo");
+        combo.handle_event(&Event::Combo(ComboEvent::Executing {
+            name: "demo".to_string(),
+        }));
+        combo.handle_event(&Event::Combo(ComboEvent::RecordStart {
+            name: "demo".to_string(),
+            tool_use: make_tool_use("combo_record_demo_0", "echo 1"),
+        }));
+        combo.handle_event(&Event::Combo(ComboEvent::RecordEnd {
+            name: "demo".to_string(),
+            tool_use_id: "combo_record_demo_0".to_string(),
+            is_error: false,
+            output: Final::Message("ok".to_string()),
+        }));
+        combo.handle_event(&Event::Combo(ComboEvent::RecordStart {
+            name: "demo".to_string(),
+            tool_use: make_tool_use("combo_record_demo_1", "echo 2"),
+        }));
+        combo.handle_event(&Event::Combo(ComboEvent::RecordEnd {
+            name: "demo".to_string(),
+            tool_use_id: "combo_record_demo_1".to_string(),
+            is_error: false,
+            output: Final::Message("ok".to_string()),
+        }));
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
             name: "demo".to_string(),
-            starter: make_starter_with_commands("demo", &["echo 1", "echo 2"]),
+            starter: make_starter("demo"),
+            final_prompt: None,
         }));
 
         combo.handle_key_event(&test_key_enter());
@@ -1037,12 +949,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn combo_routes_output_to_child_component() {
         let mut combo = Combo::new("demo");
-        let input = BashInput::new("echo 1".to_string());
-        let tool_use = ToolUse {
-            id: "combo_record_demo_0".to_string(),
-            name: BASH_TOOL_NAME.to_string(),
-            input: serde_json::to_value(&input).unwrap(),
-        };
+        let tool_use = make_tool_use("combo_record_demo_0", "echo 1");
         combo.handle_event(&Event::Combo(ComboEvent::Executing {
             name: "demo".to_string(),
         }));
@@ -1069,12 +976,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn combo_suppresses_stream_until_new_output_after_record() {
         let mut combo = Combo::new("demo");
-        let input = BashInput::new("echo 1".to_string());
-        let tool_use = ToolUse {
-            id: "combo_record_demo_0".to_string(),
-            name: BASH_TOOL_NAME.to_string(),
-            input: serde_json::to_value(&input).unwrap(),
-        };
+        let tool_use = make_tool_use("combo_record_demo_0", "echo 1");
         combo.handle_event(&Event::Combo(ComboEvent::Executing {
             name: "demo".to_string(),
         }));

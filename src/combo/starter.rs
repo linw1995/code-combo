@@ -19,7 +19,7 @@ use tracing::{debug, info, warn};
 
 use crate::tools::{BASH_TOOL_NAME, BashInput, BashOutput, Final};
 use crate::{
-    ClientMessage, Combo, ComboMetadata, ComboMode, ControlAction, Instruction, MetadataPayload,
+    ClientMessage, Combo, ComboMetadata, ComboMode, ControlAction, MetadataPayload,
     MetadataResponse, PromptSchema, RecordControl, RecordEndPayload, ServerMessage, SessionEnv,
     SessionSocketServer, StreamKind, ToolUse,
     exec::{ChunkConfig, ExecCommand, OutputChunk, ProcessEvent},
@@ -65,6 +65,9 @@ pub enum StarterEvent {
         is_error: bool,
         output: Final,
     },
+    Prompt {
+        prompt: String,
+    },
     Finished {
         exit_code: Option<i32>,
     },
@@ -86,19 +89,11 @@ pub type PromptResponder = mpsc::UnboundedSender<PromptRequest>;
 #[derive(Default, Debug)]
 struct SessionState {
     metadata: Option<MetadataPayload>,
-    items: Vec<SessionItem>,
-}
-
-#[derive(Debug)]
-enum SessionItem {
-    Record(RecordedCommand),
-    Prompt(String),
 }
 
 #[derive(Debug)]
 struct RecordedCommand {
     tool_use_id: String,
-    command: Vec<String>,
     stdout: Vec<String>,
     stderr: Vec<String>,
     exit_code: Option<i32>,
@@ -234,24 +229,12 @@ impl StarterCommand {
     }
 }
 
-fn parse_combo(command: &str, text: &str) -> Combo {
-    let filtered = text
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("coco record"))
-        .collect::<Vec<_>>()
-        .join("\n");
-
+fn parse_combo(command: &str) -> Combo {
     let name = Path::new(command)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("combo")
         .to_string();
-
-    let instructions = if filtered.trim().is_empty() {
-        Vec::new()
-    } else {
-        vec![Instruction::Text(filtered)]
-    };
 
     Combo {
         metadata: ComboMetadata {
@@ -259,12 +242,7 @@ fn parse_combo(command: &str, text: &str) -> Combo {
             description: String::new(),
             mode: ComboMode::Unknown,
         },
-        instructions,
     }
-}
-
-fn record_to_instruction(record: RecordedCommand) -> Instruction {
-    record_to_instruction_ref(&record)
 }
 
 fn record_output(record: &RecordedCommand) -> BashOutput {
@@ -291,16 +269,8 @@ fn record_output(record: &RecordedCommand) -> BashOutput {
     }
 }
 
-fn record_to_instruction_ref(record: &RecordedCommand) -> Instruction {
-    Instruction::Command {
-        input: BashInput::new(record.command.join(" ")),
-        output: record_output(record),
-    }
-}
-
 fn build_combo_from_session(
     command: &str,
-    buffer: &str,
     session_state: Option<SessionState>,
 ) -> Result<Combo, StarterError> {
     if let Some(state) = session_state {
@@ -310,29 +280,16 @@ fn build_combo_from_session(
             }
             .build()
         })?;
-        let instructions = if state.items.is_empty() {
-            parse_combo(command, buffer).instructions
-        } else {
-            state
-                .items
-                .into_iter()
-                .map(|item| match item {
-                    SessionItem::Record(record) => record_to_instruction(record),
-                    SessionItem::Prompt(prompt) => Instruction::Text(prompt),
-                })
-                .collect()
-        };
         return Ok(Combo {
             metadata: ComboMetadata {
                 name: metadata.name,
                 description: metadata.description.unwrap_or_default(),
                 mode: ComboMode::Unknown,
             },
-            instructions,
         });
     }
 
-    Ok(parse_combo(command, buffer))
+    Ok(parse_combo(command))
 }
 
 fn execute_command(
@@ -439,7 +396,6 @@ fn execute_command(
             .await
             .ok();
 
-        let mut buffer = String::new();
         let mut cancelled = false;
         let mut exit_code: Option<i32> = None;
 
@@ -457,10 +413,6 @@ fn execute_command(
                         ProcessEvent::Chunk(chunk) => {
                             if cancelled {
                                 continue;
-                            }
-                            for line in &chunk.lines {
-                                buffer.push_str(line);
-                                buffer.push('\n');
                             }
                             event_tx.send(StarterEvent::Output { chunk }).await.ok();
                         }
@@ -510,7 +462,7 @@ fn execute_command(
                         if let Some(task) = session_server.take() {
                             task.abort();
                         }
-                        let combo = parse_combo(&command, &buffer);
+                        let combo = parse_combo(&command);
                         return Starter {
                             path: command,
                             combo: Ok(combo),
@@ -553,7 +505,7 @@ fn execute_command(
                         None
                     };
 
-                    build_combo_from_session(&command, &buffer, session_state)
+                    build_combo_from_session(&command, session_state)
                 }
             }
             Err(err) => {
@@ -669,6 +621,7 @@ async fn run_session_server(
     let mut state = SessionState::default();
     let mut metadata_seen = false;
     let mut first_message = true;
+    let mut event_index: usize = 0;
 
     loop {
         let accept = tokio::select! {
@@ -677,7 +630,7 @@ async fn run_session_server(
         };
         let mut conn = accept.context(AcceptSessionConnectionSnafu)?;
 
-        let mut current_record_index: Option<usize> = None;
+        let mut current_record: Option<RecordedCommand> = None;
 
         loop {
             let message = tokio::select! {
@@ -730,7 +683,8 @@ async fn run_session_server(
                         }
                         .build());
                     }
-                    let record_index = state.items.len();
+                    let record_index = event_index;
+                    event_index = event_index.saturating_add(1);
                     let name = state
                         .metadata
                         .as_ref()
@@ -748,14 +702,12 @@ async fn run_session_server(
                             })
                         }),
                     };
-                    state.items.push(SessionItem::Record(RecordedCommand {
+                    current_record = Some(RecordedCommand {
                         tool_use_id: tool_use_id.clone(),
-                        command: payload.command.clone(),
                         stdout: Vec::new(),
                         stderr: Vec::new(),
                         exit_code: None,
-                    }));
-                    current_record_index = Some(record_index);
+                    });
                     let _ = conn
                         .send_server_message(&ServerMessage::RecordControl(RecordControl {
                             action: ControlAction::Allow,
@@ -781,11 +733,7 @@ async fn run_session_server(
                     }
                     let stream = chunk.stream;
                     let lines = chunk.lines;
-                    let Some(record_index) = current_record_index else {
-                        continue;
-                    };
-                    let Some(SessionItem::Record(record)) = state.items.get_mut(record_index)
-                    else {
+                    let Some(record) = current_record.as_mut() else {
                         continue;
                     };
                     let tool_use_id = record.tool_use_id.clone();
@@ -823,11 +771,7 @@ async fn run_session_server(
                         }
                         .build());
                     }
-                    let Some(record_index) = current_record_index.take() else {
-                        continue;
-                    };
-                    let Some(SessionItem::Record(record)) = state.items.get_mut(record_index)
-                    else {
+                    let Some(mut record) = current_record.take() else {
                         continue;
                     };
 
@@ -839,7 +783,7 @@ async fn run_session_server(
                     }
                     record.exit_code = exit_code;
                     let tool_use_id = record.tool_use_id.clone();
-                    let output = record_output(record);
+                    let output = record_output(&record);
                     let is_error = output.exit_code != 0;
                     let output_value = serde_json::to_value(&output).unwrap_or_else(|_| {
                         json!({
@@ -885,9 +829,13 @@ async fn run_session_server(
                             .build()
                         })?;
                         if !discovery {
-                            state
-                                .items
-                                .push(SessionItem::Prompt(payload.prompt.clone()));
+                            event_tx
+                                .send(StarterEvent::Prompt {
+                                    prompt: payload.prompt.clone(),
+                                })
+                                .await
+                                .ok();
+                            event_index = event_index.saturating_add(1);
                         }
                         let (response_tx, response_rx) = oneshot::channel();
                         responder
@@ -923,7 +871,13 @@ async fn run_session_server(
                                 .build()
                             })?;
                     } else if !discovery {
-                        state.items.push(SessionItem::Prompt(payload.prompt));
+                        event_tx
+                            .send(StarterEvent::Prompt {
+                                prompt: payload.prompt,
+                            })
+                            .await
+                            .ok();
+                        event_index = event_index.saturating_add(1);
                     }
                     first_message = false;
                 }
@@ -960,7 +914,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::combo::{RecordStartPayload, SessionSocketClient};
-    use crate::{ComboMode, Instruction, MetadataPayload, SessionEnv};
+    use crate::{ComboMode, MetadataPayload, SessionEnv};
     use tokio::time::Duration;
 
     static COCO_BIN_PATH: OnceLock<PathBuf> = OnceLock::new();
@@ -1031,6 +985,17 @@ mod tests {
         tokio::fs::set_permissions(&file_path, permissions).await?;
 
         Ok((temp_dir, file_path.to_string_lossy().to_string()))
+    }
+
+    fn bash_output_from_final(output: &Final) -> BashOutput {
+        match output {
+            Final::Json(value) => {
+                serde_json::from_value(value.clone()).expect("invalid bash output payload")
+            }
+            Final::Message(message) => {
+                panic!("unexpected message output: {message}");
+            }
+        }
     }
 
     #[tokio::test]
@@ -1104,9 +1069,24 @@ mod tests {
         )
         .await?;
 
-        let execution = StarterCommand::new(&file_path)
+        let mut execution = StarterCommand::new(&file_path)
             .session_env(session_env)
             .execute();
+        let mut saw_output = false;
+        let mut saw_prompt = false;
+        while let Some(event) = execution.next().await {
+            match event {
+                StarterEvent::Output { chunk } => {
+                    if chunk.lines.iter().any(|line| line.contains("Hello world")) {
+                        saw_output = true;
+                    }
+                }
+                StarterEvent::Prompt { .. } => {
+                    saw_prompt = true;
+                }
+                _ => {}
+            }
+        }
         let Starter { path, combo } = execution.wait().await?;
         debug!(?path, ?combo, "execute_starter success");
         assert_eq!(path, file_path);
@@ -1115,11 +1095,8 @@ mod tests {
         assert_eq!(combo.metadata.name, "test");
         assert_eq!(combo.metadata.description, "");
         assert_eq!(combo.metadata.mode, ComboMode::Unknown);
-        assert_eq!(combo.instructions.len(), 1);
-        assert_eq!(
-            combo.instructions.first(),
-            Some(&Instruction::Text("Hello world".to_string()))
-        );
+        assert!(saw_output, "expected output event to include Hello world");
+        assert!(!saw_prompt, "unexpected prompt event in output-only combo");
 
         Ok(())
     }
@@ -1142,23 +1119,40 @@ mod tests {
         )
         .await?;
 
-        let execution = StarterCommand::new(&file_path)
+        let mut execution = StarterCommand::new(&file_path)
             .session_env(session_env)
             .execute();
+        let mut saw_record_start = false;
+        let mut saw_record_output = false;
+        let mut record_output: Option<BashOutput> = None;
+        while let Some(event) = execution.next().await {
+            match event {
+                StarterEvent::RecordStart { tool_use } => {
+                    saw_record_start = true;
+                    assert_eq!(tool_use.name, BASH_TOOL_NAME);
+                }
+                StarterEvent::RecordOutput { chunk, .. } => {
+                    if chunk
+                        .lines
+                        .iter()
+                        .any(|line| line.contains("out") || line.contains("err"))
+                    {
+                        saw_record_output = true;
+                    }
+                }
+                StarterEvent::RecordEnd { output, .. } => {
+                    record_output = Some(bash_output_from_final(&output));
+                }
+                _ => {}
+            }
+        }
         let Starter { combo, .. } = execution.wait().await?;
         let combo = combo?;
         assert_eq!(combo.metadata.name, "record");
-        assert_eq!(combo.instructions.len(), 1);
-        debug!(?combo, "print combo");
 
-        let Some(Instruction::Command { input, output }) = combo.instructions.first() else {
-            panic!("expected first instruction to be Instruction::Command");
-        };
-        assert!(
-            input.command.starts_with("bash -c "),
-            "unexpected command: {}",
-            input.command
-        );
+        assert!(saw_record_start, "expected record start event");
+        assert!(saw_record_output, "expected record output event");
+        let output = record_output.expect("expected record end output");
         assert!(
             output.stdout.contains("out"),
             "unexpected stdout: {}",
@@ -1193,27 +1187,28 @@ mod tests {
         )
         .await?;
 
-        let execution = StarterCommand::new(&file_path)
+        let mut execution = StarterCommand::new(&file_path)
             .session_env(session_env)
             .execute();
+        let mut prompt_text = None;
+        let mut record_output: Option<BashOutput> = None;
+        while let Some(event) = execution.next().await {
+            match event {
+                StarterEvent::Prompt { prompt } => {
+                    prompt_text = Some(prompt);
+                }
+                StarterEvent::RecordEnd { output, .. } => {
+                    record_output = Some(bash_output_from_final(&output));
+                }
+                _ => {}
+            }
+        }
         let Starter { combo, .. } = execution.wait().await?;
         let combo = combo?;
         assert_eq!(combo.metadata.name, "ask");
-        assert_eq!(combo.instructions.len(), 2);
 
-        assert_eq!(
-            combo.instructions.first(),
-            Some(&Instruction::Text("Please do the thing".to_string()))
-        );
-
-        let Some(Instruction::Command { input, output }) = combo.instructions.get(1) else {
-            panic!("expected second instruction to be Instruction::Command");
-        };
-        assert!(
-            input.command.starts_with("bash -c "),
-            "unexpected command: {}",
-            input.command
-        );
+        assert_eq!(prompt_text.as_deref(), Some("Please do the thing"));
+        let output = record_output.expect("expected record end output");
         assert!(
             output.stdout.contains("out"),
             "unexpected stdout: {}",
@@ -1248,18 +1243,20 @@ mod tests {
             }
         });
 
-        let execution = StarterCommand::new(&file_path)
+        let mut execution = StarterCommand::new(&file_path)
             .session_env(session_env)
             .prompt_responder(prompt_tx)
             .execute();
+        let mut prompt_text = None;
+        while let Some(event) = execution.next().await {
+            if let StarterEvent::Prompt { prompt } = event {
+                prompt_text = Some(prompt);
+            }
+        }
         let Starter { combo, .. } = execution.wait().await?;
         let combo = combo?;
         assert_eq!(combo.metadata.name, "ask_reply");
-        assert_eq!(combo.instructions.len(), 1);
-        assert_eq!(
-            combo.instructions.first(),
-            Some(&Instruction::Text("Please do the thing".to_string()))
-        );
+        assert_eq!(prompt_text.as_deref(), Some("Please do the thing"));
 
         Ok(())
     }
@@ -1374,18 +1371,24 @@ mod tests {
         )
         .await?;
 
-        let execution = StarterCommand::new(&file_path)
+        let mut execution = StarterCommand::new(&file_path)
             .env("GREETING", "Hello from envs")
             .session_env(session_env)
             .execute();
+        let mut saw_env_output = false;
+        while let Some(event) = execution.next().await {
+            if let StarterEvent::Output { chunk } = event
+                && chunk
+                    .lines
+                    .iter()
+                    .any(|line| line.contains("Hello from envs"))
+            {
+                saw_env_output = true;
+            }
+        }
         let Starter { combo, .. } = execution.wait().await?;
         assert!(combo.is_ok());
-        let instructions = combo.unwrap().instructions;
-        assert!(
-            instructions
-                .iter()
-                .any(|inst| inst == &Instruction::Text("Hello from envs".to_string()))
-        );
+        assert!(saw_env_output, "expected env output to be streamed");
 
         Ok(())
     }

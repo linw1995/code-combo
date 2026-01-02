@@ -1,11 +1,10 @@
 use anthropic::Block as AnthropicBlock;
 use coco_macro::ComponentExt;
-use code_combo::tools::BASH_TOOL_NAME;
 use code_combo::tools::Final;
 use code_combo::{
-    Agent, Block as ChatBlock, Config, Content as ChatContent, Instruction, Message as ChatMessage,
-    Output, PromptRequest, Role, SessionEnv, StarterCommand, StarterError, StarterEvent,
-    StopReason, TextEdit, ToolUse, discover_starters,
+    Agent, Block as ChatBlock, Config, Content as ChatContent, Message as ChatMessage, Output,
+    PromptRequest, SessionEnv, StarterCommand, StarterError, StarterEvent, StopReason, TextEdit,
+    ToolUse, discover_starters,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -18,7 +17,6 @@ use ratatui::{
 };
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::time::Duration;
 use time::OffsetDateTime;
 use tokio::{
@@ -359,25 +357,30 @@ impl Chat<'static> {
             | ComboEvent::RecordStart { .. }
             | ComboEvent::RecordOutput { .. }
             | ComboEvent::RecordEnd { .. }
-            | ComboEvent::Preview { .. } => {
+            | ComboEvent::Prompt { .. } => {
                 self.set_processing();
             }
-            ComboEvent::Executed { starter, .. } => {
-                let combo = match starter.combo.as_ref() {
-                    Ok(combo) => combo,
-                    Err(err) => {
-                        warn!(?err, "Failed to execute starter");
-                        self.set_ready();
-                        return;
-                    }
-                };
-                let (history, content) = build_combo_messages(&combo.instructions);
-                let content = self.build_user_content(content);
-                if history.is_empty() {
-                    self.spawn_chat_task(content);
-                } else {
-                    self.spawn_chat_task_with_history(history, content);
+            ComboEvent::Executed {
+                starter,
+                final_prompt,
+                ..
+            } => {
+                if let Err(err) = starter.combo.as_ref() {
+                    warn!(?err, "Failed to execute starter");
+                    self.set_ready();
+                    return;
                 }
+                let Some(prompt) = final_prompt.as_ref() else {
+                    self.set_ready();
+                    return;
+                };
+                let prompt = prompt.trim();
+                if prompt.is_empty() {
+                    self.set_ready();
+                    return;
+                }
+                let content = self.build_user_content(ChatContent::Text(prompt.to_string()));
+                self.spawn_chat_task(content);
             }
             ComboEvent::Discovered { .. }
             | ComboEvent::NotFound { .. }
@@ -435,17 +438,6 @@ impl Chat<'static> {
     fn spawn_chat_task(&mut self, content: ChatContent) {
         let cancel_token = self.cancellation_guard.start_token();
         tokio::task::spawn(task_chat(self.agent.clone(), content, cancel_token));
-    }
-
-    fn spawn_chat_task_with_history(&mut self, history: Vec<ChatMessage>, content: ChatContent) {
-        let cancel_token = self.cancellation_guard.start_token();
-        let agent = self.agent.clone();
-        tokio::task::spawn(async move {
-            for message in history {
-                agent.append_message(message).await;
-            }
-            task_chat(agent, content, cancel_token).await;
-        });
     }
 
     fn spawn_combo_discover(&mut self) {
@@ -1295,6 +1287,22 @@ async fn task_combo_discover(cancel_token: CancellationToken) {
     .unwrap();
 }
 
+async fn flush_history(history_tx: &mpsc::UnboundedSender<HistoryEvent>) {
+    let (flush_tx, flush_rx) = oneshot::channel();
+    if history_tx.send(HistoryEvent::Flush(flush_tx)).is_ok() {
+        let _ = flush_rx.await;
+    }
+}
+
+fn flush_pending_prompt(
+    pending_prompt: &mut Option<String>,
+    history_tx: &mpsc::UnboundedSender<HistoryEvent>,
+) {
+    if let Some(previous) = pending_prompt.take() {
+        let _ = history_tx.send(HistoryEvent::Message(build_prompt_message(&previous)));
+    }
+}
+
 async fn task_combo_execute(
     name: String,
     system_prompt: String,
@@ -1365,6 +1373,7 @@ async fn task_combo_execute(
         .build()
         .expect("failed to build session");
     let starter_path = starter.path.clone();
+    let mut pending_prompt: Option<String> = None;
 
     let starter = match StarterCommand::new(&starter.path)
         .session_env(session_env)
@@ -1424,6 +1433,18 @@ async fn task_combo_execute(
                 )
                 .unwrap();
             }
+            StarterEvent::Prompt { prompt } => {
+                flush_pending_prompt(&mut pending_prompt, &history_tx);
+                pending_prompt = Some(prompt.clone());
+                tx.send(
+                    ComboEvent::Prompt {
+                        name: name.clone(),
+                        prompt,
+                    }
+                    .into(),
+                )
+                .unwrap();
+            }
             _ => (),
         })
         .await
@@ -1437,10 +1458,13 @@ async fn task_combo_execute(
                     reason: format!("starter join error: {err}"),
                 }),
             };
+            flush_history(&history_tx).await;
+            let final_prompt = pending_prompt.take();
             tx.send(
                 ComboEvent::Executed {
                     name: name.clone(),
                     starter,
+                    final_prompt,
                 }
                 .into(),
             )
@@ -1460,10 +1484,13 @@ async fn task_combo_execute(
         return;
     }
 
+    flush_history(&history_tx).await;
+    let final_prompt = pending_prompt.take();
     tx.send(
         ComboEvent::Executed {
             name: name.clone(),
             starter,
+            final_prompt,
         }
         .into(),
     )
@@ -1529,67 +1556,16 @@ fn build_tool_result_message(tool_use_id: &str, is_error: bool, output: &Final) 
     )]))
 }
 
+fn build_prompt_message(prompt: &str) -> ChatMessage {
+    ChatMessage::user(ChatContent::Text(prompt.to_string()))
+}
+
 fn final_to_content(output: &Final) -> ChatContent {
     let text = match output {
         Final::Json(value) => serde_json::to_string(value).unwrap_or_else(|_| value.to_string()),
         Final::Message(message) => message.clone(),
     };
     ChatContent::Text(text)
-}
-
-fn build_instruction_messages(instructions: &[Instruction]) -> Vec<code_combo::Message> {
-    let mut messages = Vec::new();
-    for (idx, instruction) in instructions.iter().enumerate() {
-        match instruction {
-            Instruction::Command { input, output } => {
-                let tool_use_id = format!("combo_instruction_{idx}");
-                let input_value = serde_json::to_value(input).unwrap_or_else(|_| {
-                    json!({
-                        "command": input.command,
-                        "timeout": input.timeout,
-                    })
-                });
-                let output_value = serde_json::to_string(output).unwrap_or_else(|_| {
-                    json!({
-                        "exit_code": output.exit_code,
-                        "stdout": output.stdout,
-                        "stderr": output.stderr,
-                        "timed_out": output.timed_out,
-                    })
-                    .to_string()
-                });
-                messages.push(code_combo::Message::assistant(
-                    code_combo::Content::Multiple(vec![AnthropicBlock::tool_use(
-                        &tool_use_id,
-                        BASH_TOOL_NAME,
-                        input_value,
-                    )]),
-                ));
-                messages.push(code_combo::Message::user(code_combo::Content::Multiple(
-                    vec![AnthropicBlock::tool_result(
-                        &tool_use_id,
-                        None,
-                        output_value.as_str().into(),
-                    )],
-                )));
-            }
-            Instruction::Text(text) => {
-                messages.push(code_combo::Message::user(ChatContent::Text(text.clone())));
-            }
-        }
-    }
-    messages
-}
-
-fn build_combo_messages(instructions: &[Instruction]) -> (Vec<code_combo::Message>, ChatContent) {
-    let mut messages = build_instruction_messages(instructions);
-    if let Some(message) = messages.pop() {
-        if matches!(message.role, Role::User) {
-            return (messages, message.content);
-        }
-        messages.push(message);
-    }
-    (messages, ChatContent::Text(String::new()))
 }
 
 async fn task_chat(mut agent: Agent, content: ChatContent, cancel_token: CancellationToken) {
