@@ -1,10 +1,10 @@
-use std::{path::PathBuf, time::Duration};
+use std::{path::PathBuf, sync::OnceLock, time::Duration};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::time::sleep;
+use tokio::{sync::Mutex, time::sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
@@ -34,6 +34,8 @@ pub struct BashOutput {
     #[serde(default)]
     pub timed_out: bool,
 }
+
+static MCP_ENV_STATE: OnceLock<Mutex<Option<McpEnvState>>> = OnceLock::new();
 
 fn default_timeout_ms() -> u64 {
     600_000
@@ -99,11 +101,11 @@ where
     let BashInput { command, timeout } = input;
 
     let argv = vec!["bash".to_string(), "-c".to_string(), command];
-    let (envs, mcp_guard) = match prepare_mcp_env().await {
+    let envs = match prepare_mcp_env().await {
         Ok(value) => value,
         Err(err) => {
             warn!(?err, "Failed to prepare MCP env for bash tool");
-            (Vec::new(), None)
+            Vec::new()
         }
     };
     let mut proc = ExecCommand::from_argv(argv)
@@ -175,10 +177,6 @@ where
         output.exit_code = status.code().unwrap_or(255) as u8;
     }
 
-    if let Some(mcp_guard) = mcp_guard {
-        mcp_guard.shutdown().await;
-    }
-
     Ok(output)
 }
 
@@ -208,27 +206,28 @@ impl Tool for BashTool {
     }
 }
 
-struct McpEnvGuard {
+struct McpEnvState {
     _env: SessionEnv,
-    server: McpSocketServer,
+    _server: McpSocketServer,
+    envs: Vec<(String, String)>,
 }
 
-impl McpEnvGuard {
-    async fn shutdown(self) {
-        self.server.shutdown().await;
+async fn prepare_mcp_env() -> Result<Vec<(String, String)>, String> {
+    let state = MCP_ENV_STATE.get_or_init(|| Mutex::new(None));
+    let mut state = state.lock().await;
+    if let Some(existing) = state.as_ref() {
+        return Ok(existing.envs.clone());
     }
-}
 
-async fn prepare_mcp_env() -> Result<(Vec<(String, String)>, Option<McpEnvGuard>), String> {
     let (config_dir, config_path) = resolve_config_path();
     if !config_path.exists() {
-        return Ok((Vec::new(), None));
+        return Ok(Vec::new());
     }
     let mut config = Config::parse_file(config_path.to_string_lossy().to_string().as_ref())
         .map_err(|err| format!("Failed to parse config file: {err}"))?;
     config.config_dir = config_dir;
     let Some(mut mcp) = config.mcp else {
-        return Ok((Vec::new(), None));
+        return Ok(Vec::new());
     };
 
     let env = SessionEnv::builder()
@@ -240,7 +239,7 @@ async fn prepare_mcp_env() -> Result<(Vec<(String, String)>, Option<McpEnvGuard>
     let server = McpSocketServer::start(mcp, &config.config_dir)
         .await
         .map_err(|err| format!("Failed to start mcp server: {err}"))?;
-    let envs = env
+    let envs: Vec<_> = env
         .envs()
         .into_iter()
         .map(|(key, value)| {
@@ -250,7 +249,12 @@ async fn prepare_mcp_env() -> Result<(Vec<(String, String)>, Option<McpEnvGuard>
             )
         })
         .collect();
-    Ok((envs, Some(McpEnvGuard { _env: env, server })))
+    *state = Some(McpEnvState {
+        _env: env,
+        _server: server,
+        envs: envs.clone(),
+    });
+    Ok(envs)
 }
 
 fn resolve_config_path() -> (PathBuf, PathBuf) {
