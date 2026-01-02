@@ -1,6 +1,7 @@
 use anthropic::Block as AnthropicBlock;
 use coco_macro::ComponentExt;
 use code_combo::tools::BASH_TOOL_NAME;
+use code_combo::tools::Final;
 use code_combo::{
     Agent, Block as ChatBlock, Config, Content as ChatContent, Instruction, Message as ChatMessage,
     Output, PromptRequest, Role, SessionEnv, StarterCommand, StarterError, StarterEvent,
@@ -20,7 +21,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::time::Duration;
 use time::OffsetDateTime;
-use tokio::{sync::mpsc, time::Instant};
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::Instant,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -127,6 +131,11 @@ enum Focus {
 enum ViewMode {
     Chat,
     Transcript,
+}
+
+enum HistoryEvent {
+    Message(ChatMessage),
+    Flush(oneshot::Sender<()>),
 }
 
 const CTRL_C_WINDOW: Duration = Duration::from_secs(2);
@@ -1293,6 +1302,20 @@ async fn task_combo_execute(
     agent: Agent,
 ) {
     let tx = global::event_tx();
+    let (history_tx, mut history_rx) = mpsc::unbounded_channel::<HistoryEvent>();
+    let history_agent = agent.clone();
+    tokio::task::spawn(async move {
+        while let Some(event) = history_rx.recv().await {
+            match event {
+                HistoryEvent::Message(message) => {
+                    history_agent.append_message(message).await;
+                }
+                HistoryEvent::Flush(tx) => {
+                    let _ = tx.send(());
+                }
+            }
+        }
+    });
     let config = global::config().await;
     let combo_dir = config.combo_dir();
     let workspace_combo_dir = global::workspace_combo_dir();
@@ -1332,10 +1355,10 @@ async fn task_combo_execute(
 
     let prompt_tx = spawn_prompt_responder(
         agent,
-        name.clone(),
         system_prompt.clone(),
         cancel_token.clone(),
         tx.clone(),
+        history_tx.clone(),
     );
 
     let session_env = SessionEnv::builder()
@@ -1370,6 +1393,7 @@ async fn task_combo_execute(
                 .unwrap();
             }
             StarterEvent::RecordStart { tool_use } => {
+                let _ = history_tx.send(HistoryEvent::Message(build_tool_use_message(&tool_use)));
                 tx.send(
                     ComboEvent::RecordStart {
                         name: name.clone(),
@@ -1384,6 +1408,11 @@ async fn task_combo_execute(
                 is_error,
                 output,
             } => {
+                let _ = history_tx.send(HistoryEvent::Message(build_tool_result_message(
+                    &tool_use_id,
+                    is_error,
+                    &output,
+                )));
                 tx.send(
                     ComboEvent::RecordEnd {
                         name: name.clone(),
@@ -1443,10 +1472,10 @@ async fn task_combo_execute(
 
 fn spawn_prompt_responder(
     agent: Agent,
-    name: String,
     system_prompt: String,
     cancel_token: CancellationToken,
     tx: mpsc::UnboundedSender<Event>,
+    history_tx: mpsc::UnboundedSender<HistoryEvent>,
 ) -> mpsc::UnboundedSender<PromptRequest> {
     let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<PromptRequest>();
     tokio::task::spawn(async move {
@@ -1455,22 +1484,16 @@ fn spawn_prompt_responder(
             let PromptRequest {
                 prompt,
                 schemas,
-                instructions,
                 response_tx,
             } = request;
-            tx.send(
-                ComboEvent::Preview {
-                    name: name.clone(),
-                    instructions: instructions.clone(),
-                }
-                .into(),
-            )
-            .ok();
             let response = if cancel_token.is_cancelled() {
                 Err("prompt reply cancelled".to_string())
             } else {
+                let (flush_tx, flush_rx) = oneshot::channel();
+                let _ = history_tx.send(HistoryEvent::Flush(flush_tx));
+                let _ = flush_rx.await;
                 reply_agent
-                    .reply_prompt(&system_prompt, prompt, schemas, instructions)
+                    .reply_prompt(&system_prompt, prompt, schemas)
                     .await
                     .map(|reply| reply.response)
                     .map_err(|err| err.to_string())
@@ -1488,6 +1511,30 @@ fn spawn_prompt_responder(
         }
     });
     prompt_tx
+}
+
+fn build_tool_use_message(tool_use: &ToolUse) -> ChatMessage {
+    ChatMessage::assistant(ChatContent::Multiple(vec![AnthropicBlock::tool_use(
+        &tool_use.id,
+        &tool_use.name,
+        tool_use.input.clone(),
+    )]))
+}
+
+fn build_tool_result_message(tool_use_id: &str, is_error: bool, output: &Final) -> ChatMessage {
+    ChatMessage::user(ChatContent::Multiple(vec![AnthropicBlock::tool_result(
+        tool_use_id,
+        Some(is_error),
+        final_to_content(output),
+    )]))
+}
+
+fn final_to_content(output: &Final) -> ChatContent {
+    let text = match output {
+        Final::Json(value) => serde_json::to_string(value).unwrap_or_else(|_| value.to_string()),
+        Final::Message(message) => message.clone(),
+    };
+    ChatContent::Text(text)
 }
 
 fn build_instruction_messages(instructions: &[Instruction]) -> Vec<code_combo::Message> {

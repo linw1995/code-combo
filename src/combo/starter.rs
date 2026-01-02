@@ -78,7 +78,6 @@ pub enum StarterEvent {
 pub struct PromptRequest {
     pub prompt: String,
     pub schemas: Vec<PromptSchema>,
-    pub instructions: Vec<Instruction>,
     pub response_tx: oneshot::Sender<Result<String, String>>,
 }
 
@@ -886,19 +885,10 @@ async fn run_session_server(
                             .build()
                         })?;
                         let (response_tx, response_rx) = oneshot::channel();
-                        let instructions = state
-                            .items
-                            .iter()
-                            .map(|item| match item {
-                                SessionItem::Record(record) => record_to_instruction_ref(record),
-                                SessionItem::Prompt(prompt) => Instruction::Text(prompt.clone()),
-                            })
-                            .collect::<Vec<_>>();
                         responder
                             .send(PromptRequest {
                                 prompt: payload.prompt,
                                 schemas: payload.schemas,
-                                instructions,
                                 response_tx,
                             })
                             .map_err(|_| {

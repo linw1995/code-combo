@@ -8,8 +8,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::Config;
-use crate::tools::BASH_TOOL_NAME;
-use crate::{Instruction, PromptSchema, ProviderKind, Result};
+use crate::{PromptSchema, ProviderKind, Result};
 use executor::PermissionControl;
 
 mod bash_executor;
@@ -107,16 +106,16 @@ impl Agent {
         system_prompt: &str,
         prompt: String,
         schemas: Vec<PromptSchema>,
-        instructions: Vec<Instruction>,
     ) -> Result<PromptReply> {
         ensure_whatever!(!schemas.is_empty(), "schemas cannot be empty");
         let reply_tool = build_reply_tool(&schemas)?;
         let client = self.build_reply_client()?;
-        let messages = build_reply_prompt_messages(&prompt, &instructions, &schemas);
-        {
+        let new_messages = build_reply_prompt_messages(&prompt, &schemas);
+        let messages = {
             let mut history = self.messages.lock().await;
-            history.extend(messages.iter().cloned());
-        }
+            history.extend(new_messages.iter().cloned());
+            history.clone()
+        };
         let tool_choice = ToolChoice::tool().name(PROMPT_REPLY_TOOL_NAME).call();
         let system_prompt = system_prompt.trim();
         let system_prompt = if system_prompt.is_empty() {
@@ -232,16 +231,8 @@ impl Agent {
     }
 }
 
-fn build_reply_prompt_messages(
-    prompt: &str,
-    instructions: &[Instruction],
-    schemas: &[PromptSchema],
-) -> Vec<Message> {
-    let mut messages = if instructions.is_empty() {
-        Vec::new()
-    } else {
-        build_instruction_messages(instructions)
-    };
+fn build_reply_prompt_messages(prompt: &str, schemas: &[PromptSchema]) -> Vec<Message> {
+    let mut messages = Vec::new();
     let prompt = prompt.trim();
     if !prompt.is_empty() {
         messages.push(Message::user(Content::Text(prompt.to_string())));
@@ -249,42 +240,6 @@ fn build_reply_prompt_messages(
     messages.push(Message::user(Content::Text(build_reply_tool_directive(
         schemas,
     ))));
-    messages
-}
-
-fn build_instruction_messages(instructions: &[Instruction]) -> Vec<Message> {
-    let mut messages = Vec::new();
-    for (idx, instruction) in instructions.iter().enumerate() {
-        match instruction {
-            Instruction::Command { input, output } => {
-                let tool_use_id = format!("combo_instruction_{idx}");
-                let input_value = serde_json::to_value(input).unwrap_or_else(|_| {
-                    json!({
-                        "command": input.command,
-                        "timeout": input.timeout,
-                    })
-                });
-                let output_value = serde_json::to_string(output).unwrap_or_else(|_| {
-                    json!({
-                        "exit_code": output.exit_code,
-                        "stdout": output.stdout,
-                        "stderr": output.stderr,
-                        "timed_out": output.timed_out,
-                    })
-                    .to_string()
-                });
-                messages.push(Message::assistant(Content::Multiple(vec![
-                    AnthropicBlock::tool_use(&tool_use_id, BASH_TOOL_NAME, input_value),
-                ])));
-                messages.push(Message::user(Content::Multiple(vec![
-                    AnthropicBlock::tool_result(&tool_use_id, None, output_value.as_str().into()),
-                ])));
-            }
-            Instruction::Text(text) => {
-                messages.push(Message::user(Content::Text(text.clone())));
-            }
-        }
-    }
     messages
 }
 
