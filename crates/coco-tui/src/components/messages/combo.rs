@@ -18,7 +18,7 @@ use code_combo::{OutputChunk, StreamKind, ToolUse, tools::Final};
 use super::fold::FoldState;
 use super::streaming::StreamedLines;
 use crate::{
-    actions::Action,
+    actions::{Action, ToolAction},
     components::{
         Component, Content, ContentComponent, Message, Messages, NavigationKey, NavigationResult,
         Persistable, Plain, ShortcutHints, Tool,
@@ -153,8 +153,11 @@ impl Combo {
 
     fn push_record_tool_use(&mut self, tool_use: ToolUse) {
         self.state.write().view = ComboView::Messages;
+        let executing = tool_use.clone();
         self.messages
             .push(Message::user(Tool::new(tool_use).into()));
+        self.messages
+            .apply_action_to_last(&Action::Tool(ToolAction::GrantSession(executing)));
         self.has_child_output = false;
     }
 

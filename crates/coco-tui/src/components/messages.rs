@@ -77,6 +77,12 @@ impl Messages {
         messages.push(message);
     }
 
+    pub fn apply_action_to_last(&mut self, action: &Action) {
+        if let Some(last) = self.messages.write_untracked().last_mut() {
+            last.handle_action(action);
+        }
+    }
+
     /// Clear all messages
     pub fn clear(&mut self) {
         self.messages.write().clear();
