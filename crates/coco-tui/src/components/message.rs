@@ -1,4 +1,4 @@
-use std::any::Any;
+use std::{any::Any, ops::Range};
 
 use coco_macro::ComponentExt;
 use crossterm::event::KeyEvent;
@@ -24,6 +24,11 @@ pub enum Role {
 pub trait Content {
     /// the height of content rect.
     fn height(&self, width: u16) -> usize;
+
+    /// Provide a focused range (relative to the content area) for auto scrolling.
+    fn focus_range(&self, _width: u16) -> Option<Range<u16>> {
+        None
+    }
 
     /// Check if the content is actionable.
     fn is_actionable(&self) -> bool {
@@ -126,6 +131,16 @@ impl Content for Message {
         let bottom_padding = 1;
         let content_height = self.content.height(width.saturating_sub(role_width));
         content_height + bottom_padding
+    }
+
+    fn focus_range(&self, width: u16) -> Option<Range<u16>> {
+        let role_width = match self.state.role {
+            Role::User => 7,
+            Role::Bot => 6,
+            Role::System => 2,
+        };
+        let content_width = width.saturating_sub(role_width);
+        self.content.focus_range(content_width)
     }
 
     fn is_actionable(&self) -> bool {

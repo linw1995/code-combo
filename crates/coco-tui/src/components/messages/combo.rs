@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use coco_macro::{ComponentExt, ContentComponentExt};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -593,6 +595,23 @@ impl Content for Combo {
 
     fn is_actionable(&self) -> bool {
         self.has_collapsible_body() || self.can_toggle_view() || self.can_focus_messages()
+    }
+
+    fn focus_range(&self, width: u16) -> Option<Range<u16>> {
+        if !self.is_child_focused {
+            return None;
+        }
+        if !matches!(self.state.view, ComboView::Messages) {
+            return None;
+        }
+        if self.has_collapsible_body() && self.state.display_state.is_collapsed() {
+            return None;
+        }
+        let border_height = 1;
+        let range = self.messages.focus_range(width, 0)?;
+        let start = range.start.saturating_add(border_height);
+        let end = range.end.saturating_add(border_height);
+        Some(start..end)
     }
 
     fn shortcut_hints(&self) -> ShortcutHints {

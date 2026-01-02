@@ -40,6 +40,7 @@ pub struct Messages {
     messages: State<Vec<Message>>,
     focus: State<Option<usize>>,
     last_focus: Option<usize>,
+    last_focus_range: Option<Range<u16>>,
 
     // scrolling
     viewport_height: u16,
@@ -81,6 +82,7 @@ impl Messages {
         self.messages.write().clear();
         *self.focus.write() = None;
         self.last_focus = None;
+        self.last_focus_range = None;
         *self.offset.write() = 0;
         self.total_height = 0;
     }
@@ -108,10 +110,22 @@ impl Messages {
     }
 
     pub fn draw_inline(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        let heights = self.message_heights(area.width, 0);
+        let scrollbar_width = 0;
+        let inner_width = Self::inner_width(area.width, scrollbar_width);
+        let heights = self.message_heights_for_inner_width(inner_width);
         self.total_height = heights.iter().sum::<usize>() as u16;
         self.viewport_height = area.height;
         self.clamp_offset();
+
+        let focus = self.focus.get();
+        let focus_range = self.focus_range_with_heights(inner_width, &heights);
+        if focus != self.last_focus || focus_range != self.last_focus_range {
+            if let Some(idx) = focus {
+                self.ensure_focus_visible(idx, &heights, focus_range.as_ref());
+            }
+            self.last_focus = focus;
+            self.last_focus_range = focus_range;
+        }
         if heights.is_empty() {
             return Ok(());
         }
@@ -346,10 +360,12 @@ impl Messages {
         None
     }
 
-    fn ensure_focus_visible(&mut self, heights: &[usize]) {
-        let Some(idx) = self.focus.get() else {
-            return;
-        };
+    fn ensure_focus_visible(
+        &mut self,
+        idx: usize,
+        heights: &[usize],
+        focus_range: Option<&Range<u16>>,
+    ) {
         if self.total_height <= self.viewport_height {
             if self.offset.get() != 0 {
                 *self.offset.write() = 0;
@@ -366,15 +382,26 @@ impl Messages {
         }
         let message_height = heights[idx] as u16;
         let message_bottom = message_top.saturating_add(message_height);
+        let (focus_top, focus_bottom) = if let Some(range) = focus_range {
+            let start = range.start.min(message_height);
+            let mut end = range.end.min(message_height);
+            end = end.max(start);
+            (
+                message_top.saturating_add(start),
+                message_top.saturating_add(end),
+            )
+        } else {
+            (message_top, message_bottom)
+        };
 
         let (visible_start, _) = self.scroll_position();
         let visible_end = visible_start.saturating_add(self.viewport_height);
         let max_offset = self.total_height.saturating_sub(self.viewport_height);
 
-        let desired_top = if message_top < visible_start {
-            message_top
-        } else if message_bottom > visible_end {
-            message_bottom.saturating_sub(self.viewport_height)
+        let desired_top = if focus_top < visible_start {
+            focus_top
+        } else if focus_bottom > visible_end {
+            focus_bottom.saturating_sub(self.viewport_height)
         } else {
             return;
         };
@@ -479,9 +506,45 @@ impl Messages {
         Ok(())
     }
 
-    fn message_heights(&self, width: u16, scrollbar_width: u16) -> Vec<usize> {
+    pub(super) fn focus_range(&self, width: u16, scrollbar_width: u16) -> Option<Range<u16>> {
+        let inner_width = Self::inner_width(width, scrollbar_width);
+        let heights = self.message_heights_for_inner_width(inner_width);
+        self.focus_range_with_heights(inner_width, &heights)
+    }
+
+    fn focus_range_with_heights(&self, inner_width: u16, heights: &[usize]) -> Option<Range<u16>> {
+        let idx = self.focus.get()?;
+        if idx >= heights.len() {
+            return None;
+        }
+        let mut top = 0u16;
+        for height in heights.iter().take(idx) {
+            top = top.saturating_add(*height as u16);
+        }
+        let message_height = heights[idx] as u16;
+        let message_focus = self.messages.read()[idx].focus_range(inner_width);
+        let range = if let Some(range) = message_focus {
+            let start = range.start.min(message_height);
+            let mut end = range.end.min(message_height);
+            end = end.max(start);
+            start..end
+        } else {
+            0..message_height
+        };
+        Some(top.saturating_add(range.start)..top.saturating_add(range.end))
+    }
+
+    fn inner_width(width: u16, scrollbar_width: u16) -> u16 {
         let border_width = 1;
-        let inner_width = width.saturating_sub(border_width + scrollbar_width).max(1);
+        width.saturating_sub(border_width + scrollbar_width).max(1)
+    }
+
+    fn message_heights(&self, width: u16, scrollbar_width: u16) -> Vec<usize> {
+        let inner_width = Self::inner_width(width, scrollbar_width);
+        self.message_heights_for_inner_width(inner_width)
+    }
+
+    fn message_heights_for_inner_width(&self, inner_width: u16) -> Vec<usize> {
         self.messages
             .iter()
             .map(|m| m.height(inner_width))
@@ -558,14 +621,19 @@ impl Component for Messages {
         use Constraint::{Length, Min};
 
         let scrollbar_width = 2;
-        let heights = self.message_heights(area.width, scrollbar_width);
+        let inner_width = Self::inner_width(area.width, scrollbar_width);
+        let heights = self.message_heights_for_inner_width(inner_width);
         self.total_height = heights.iter().sum::<usize>() as u16;
         self.viewport_height = area.height;
         self.clamp_offset();
         let focus = self.focus.get();
-        if focus != self.last_focus {
-            self.ensure_focus_visible(&heights);
+        let focus_range = self.focus_range_with_heights(inner_width, &heights);
+        if focus != self.last_focus || focus_range != self.last_focus_range {
+            if let Some(idx) = focus {
+                self.ensure_focus_visible(idx, &heights, focus_range.as_ref());
+            }
             self.last_focus = focus;
+            self.last_focus_range = focus_range;
         }
 
         if self.total_height > area.height {
@@ -699,11 +767,64 @@ fn find_visible_range(
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        ops::Range,
+        sync::{Arc, Mutex},
+    };
+
     use ratatui::backend::TestBackend;
 
+    use crate::components::{ContentComponent, Identity, Persistable};
     use crate::global::theme;
+    use crate::session::{self, Session};
 
     use super::*;
+
+    struct FocusDummy {
+        height: usize,
+        range: Arc<Mutex<Range<u16>>>,
+    }
+
+    impl FocusDummy {
+        fn new(height: usize, range: Arc<Mutex<Range<u16>>>) -> Self {
+            Self { height, range }
+        }
+    }
+
+    impl Identity for FocusDummy {
+        fn id(&self) -> &'static str {
+            "focus_dummy"
+        }
+    }
+
+    impl Persistable for FocusDummy {
+        fn save(&self) -> Session {
+            session::save(self.height)
+        }
+
+        fn load(session: Session) -> Result<Self> {
+            let height = session::load(session)?;
+            Ok(Self::new(height, Arc::new(Mutex::new(0..0))))
+        }
+    }
+
+    impl Component for FocusDummy {
+        fn draw(&mut self, _frame: &mut Frame, _area: Rect) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Content for FocusDummy {
+        fn height(&self, _width: u16) -> usize {
+            self.height
+        }
+
+        fn focus_range(&self, _width: u16) -> Option<Range<u16>> {
+            Some(self.range.lock().unwrap().clone())
+        }
+    }
+
+    impl ContentComponent for FocusDummy {}
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn simple_system_message() {
@@ -996,5 +1117,27 @@ mod tests {
         let (position, range) = app.scroll_position();
         assert_eq!(position, 0);
         assert_eq!(range, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scroll_on_focus_range_change() {
+        let range = Arc::new(Mutex::new(5..6));
+        let mut app = Messages::default();
+        app.extend([Message::user(FocusDummy::new(6, range.clone()).into())].into_iter());
+        app.focus(0);
+
+        let mut terminal = Terminal::new(TestBackend::new(12, 3)).unwrap();
+        terminal
+            .draw(|frame| app.draw(frame, frame.area()).unwrap())
+            .unwrap();
+        assert_eq!(app.offset.get(), 0);
+
+        *range.lock().unwrap() = 0..1;
+        terminal
+            .draw(|frame| app.draw(frame, frame.area()).unwrap())
+            .unwrap();
+
+        let max_offset = app.total_height.saturating_sub(app.viewport_height);
+        assert_eq!(app.offset.get(), max_offset);
     }
 }
