@@ -153,7 +153,8 @@ impl Combo {
 
     fn push_record_tool_use(&mut self, tool_use: ToolUse) {
         self.state.write().view = ComboView::Messages;
-        self.messages.push(Message::bot(Tool::new(tool_use).into()));
+        self.messages
+            .push(Message::user(Tool::new(tool_use).into()));
         self.has_child_output = false;
     }
 
