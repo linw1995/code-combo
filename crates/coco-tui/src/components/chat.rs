@@ -354,7 +354,14 @@ impl Chat<'static> {
                 self.set_processing();
             }
             ComboEvent::Executed { starter, .. } => {
-                let combo = starter.combo.as_ref().unwrap();
+                let combo = match starter.combo.as_ref() {
+                    Ok(combo) => combo,
+                    Err(err) => {
+                        warn!(?err, "Failed to execute starter");
+                        self.set_ready();
+                        return;
+                    }
+                };
                 let (history, content) = build_combo_messages(&combo.instructions);
                 let content = self.build_user_content(content);
                 if history.is_empty() {
