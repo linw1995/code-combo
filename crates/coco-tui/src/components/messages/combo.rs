@@ -147,9 +147,6 @@ impl Combo {
     }
 
     fn clear_combo_stream(&mut self) {
-        let mut state = self.state.write();
-        state.output_chunks.clear();
-        drop(state);
         self.preview_lines = StreamedLines::new(Some(LIMIT));
     }
 
