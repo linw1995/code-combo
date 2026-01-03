@@ -1273,7 +1273,7 @@ async fn task_combo_execute(
     name: String,
     system_prompt: String,
     cancel_token: CancellationToken,
-    agent: Agent,
+    mut agent: Agent,
 ) {
     let tx = global::event_tx();
     let config = global::config().await;
@@ -1312,8 +1312,6 @@ async fn task_combo_execute(
     // Skip the `ComboEvent::Discovered` event and advance directly to `ComboEvent::Executing`
     tx.send(ComboEvent::Executing { name: name.clone() }.into())
         .unwrap();
-
-    let mut reply_agent = agent;
 
     let session_env = SessionEnv::builder()
         .build()
@@ -1356,7 +1354,7 @@ async fn task_combo_execute(
                         .unwrap();
                     }
                     StarterEvent::RecordStart { tool_use } => {
-                        reply_agent
+                        agent
                             .append_message(build_tool_use_message(&tool_use))
                             .await;
                         tx.send(
@@ -1373,7 +1371,7 @@ async fn task_combo_execute(
                         is_error,
                         output,
                     } => {
-                        reply_agent
+                        agent
                             .append_message(build_tool_result_message(
                                 &tool_use_id,
                                 is_error,
@@ -1392,7 +1390,7 @@ async fn task_combo_execute(
                         .unwrap();
                     }
                     StarterEvent::Prompt { prompt } => {
-                        reply_agent
+                        agent
                             .append_message(build_prompt_message(&prompt))
                             .await;
                         tx.send(
@@ -1409,7 +1407,7 @@ async fn task_combo_execute(
                         schemas,
                         responder,
                     } => {
-                        reply_agent
+                        agent
                             .append_message(build_prompt_message(&prompt))
                             .await;
                         tx.send(
@@ -1424,7 +1422,7 @@ async fn task_combo_execute(
                         let response = if cancel_token.is_cancelled() {
                             Err("prompt reply cancelled".to_string())
                         } else {
-                            reply_agent
+                            agent
                                 .reply_prompt(&system_prompt, schemas)
                                 .await
                                 .map(|reply| reply.response)
@@ -1460,7 +1458,7 @@ async fn task_combo_execute(
         Err(err) => {
             warn!(?err, "starter join error");
             let error_message = format!("Combo execution failed: starter join error: {err}");
-            reply_agent
+            agent
                 .append_message(ChatMessage::user(ChatContent::Text(error_message)))
                 .await;
             let starter = code_combo::Starter {
@@ -1495,14 +1493,14 @@ async fn task_combo_execute(
 
     if let Err(err) = starter.combo.as_ref() {
         let error_message = format!("Combo execution failed: {err}");
-        reply_agent
+        agent
             .append_message(ChatMessage::user(ChatContent::Text(error_message)))
             .await;
     } else if let Some(code) = exit_code
         && code != 0
     {
         let error_message = format!("Combo execution failed: exit code {code}");
-        reply_agent
+        agent
             .append_message(ChatMessage::user(ChatContent::Text(error_message)))
             .await;
     }

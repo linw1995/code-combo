@@ -798,14 +798,8 @@ async fn run_session_server(
                     let tool_use_id = record.tool_use_id.clone();
                     let output = record_output(&record);
                     let is_error = output.exit_code != 0;
-                    let output_value = serde_json::to_value(&output).unwrap_or_else(|_| {
-                        json!({
-                            "exit_code": output.exit_code,
-                            "stdout": output.stdout,
-                            "stderr": output.stderr,
-                            "timed_out": output.timed_out,
-                        })
-                    });
+                    let output_value =
+                        serde_json::to_value(&output).expect("failed to encode record output");
                     event_tx
                         .send(StarterEvent::RecordEnd {
                             tool_use_id,

@@ -46,7 +46,6 @@ enum StarterState {
 enum ComboView {
     Stdout,
     Stderr,
-    #[serde(alias = "stream")]
     Mixed,
     #[default]
     Messages,
@@ -63,8 +62,6 @@ struct Inner {
     view: ComboView,
     #[serde(default)]
     output_chunks: Vec<OutputChunk>,
-    #[serde(default = "default_preview_lines")]
-    preview_lines: StreamedLines,
 }
 
 impl Default for Inner {
@@ -76,7 +73,6 @@ impl Default for Inner {
             display_state: default_display_state(),
             view: ComboView::default(),
             output_chunks: Vec::new(),
-            preview_lines: default_preview_lines(),
         }
     }
 }
@@ -86,6 +82,7 @@ impl Default for Inner {
 pub struct Combo {
     state: State<Inner>,
     messages: Messages,
+    preview_lines: StreamedLines,
     is_focused: bool,
     is_child_focused: bool,
     has_child_output: bool,
@@ -112,6 +109,7 @@ impl Combo {
                 ..Default::default()
             }),
             messages: Messages::default(),
+            preview_lines: default_preview_lines(),
             is_focused: false,
             is_child_focused: false,
             has_child_output: false,
@@ -151,7 +149,8 @@ impl Combo {
     fn clear_combo_stream(&mut self) {
         let mut state = self.state.write();
         state.output_chunks.clear();
-        state.preview_lines = StreamedLines::new(Some(LIMIT));
+        drop(state);
+        self.preview_lines = StreamedLines::new(Some(LIMIT));
     }
 
     fn push_record_tool_use(&mut self, tool_use: ToolUse) {
@@ -245,9 +244,9 @@ impl Combo {
                     state.is_error = false;
                     state.view = ComboView::Messages;
                     state.output_chunks.clear();
-                    state.preview_lines = StreamedLines::new(Some(LIMIT));
                     state.display_state.expand();
                     drop(state);
+                    self.preview_lines = StreamedLines::new(Some(LIMIT));
                     self.messages.clear();
                 }
             }
@@ -328,7 +327,8 @@ impl Combo {
         self.has_child_output = false;
         let mut state = self.state.write();
         state.output_chunks.push(chunk.clone());
-        state.preview_lines.push_chunk(chunk);
+        drop(state);
+        self.preview_lines.push_chunk(chunk);
     }
 
     fn has_message_content(&self) -> bool {
@@ -342,7 +342,7 @@ impl Combo {
     fn has_stream_content(&self) -> bool {
         !self.combo_stream_suppressed
             && !self.has_child_output
-            && (!self.state.output_chunks.is_empty() || !self.state.preview_lines.is_empty())
+            && (!self.state.output_chunks.is_empty() || !self.preview_lines.is_empty())
     }
 
     fn can_toggle_view(&self) -> bool {
@@ -381,7 +381,7 @@ impl Combo {
             && !self.has_child_output
             && !self.combo_stream_suppressed
         {
-            self.state.preview_lines.len() as u16
+            self.preview_lines.len() as u16
         } else {
             0
         };
@@ -431,7 +431,7 @@ impl Combo {
             && !self.has_child_output
             && !self.combo_stream_suppressed
         {
-            self.state.preview_lines.len() as u16
+            self.preview_lines.len() as u16
         } else {
             0
         };
@@ -509,7 +509,7 @@ impl Combo {
         let theme = global::theme();
         let mut lines = Vec::new();
         let mut markers = Vec::new();
-        for line in self.state.preview_lines.iter() {
+        for line in self.preview_lines.iter() {
             let marker_style = match line.stream {
                 StreamKind::Stdout => theme.ui.bash_stdout_marker,
                 StreamKind::Stderr => theme.ui.bash_stderr_marker,
@@ -693,9 +693,11 @@ impl Persistable for Combo {
 
     fn load(session: Session) -> Result<Self> {
         let (state, messages): (Inner, Session) = session::load_related(session)?;
+        let preview_lines = StreamedLines::from_chunks(&state.output_chunks, Some(LIMIT));
         let combo = Self {
             state: State::new(state),
             messages: Messages::load(messages)?,
+            preview_lines,
             is_focused: false,
             is_child_focused: false,
             has_child_output: false,
@@ -713,44 +715,39 @@ impl Component for Combo {
 
     fn handle_key_event(&mut self, key: &KeyEvent) {
         if self.is_child_focused {
-            if let (KeyModifiers::NONE, KeyCode::Esc) = (key.modifiers, key.code) {
-                self.clear_child_focus();
-                return;
+            match (key.modifiers, key.code) {
+                (KeyModifiers::NONE, KeyCode::Esc) => self.clear_child_focus(),
+                _ => self.messages.handle_key_event(key),
             }
-            self.messages.handle_key_event(key);
             return;
         }
 
         if let (KeyModifiers::NONE, KeyCode::Enter) = (key.modifiers, key.code) {
             self.handle_enter_key();
             return;
-        }
+        };
 
         if !self.has_collapsible_body() && !self.can_toggle_view() && !self.can_focus_messages() {
             return;
         }
 
-        if let (KeyModifiers::NONE, KeyCode::Char('1')) = (key.modifiers, key.code) {
-            self.set_view(ComboView::Stdout);
-            return;
-        }
-        if let (KeyModifiers::NONE, KeyCode::Char('2')) = (key.modifiers, key.code) {
-            self.set_view(ComboView::Stderr);
-            return;
-        }
-        if let (KeyModifiers::NONE, KeyCode::Char('3')) = (key.modifiers, key.code) {
-            self.set_view(ComboView::Mixed);
-            return;
-        }
-        if let (KeyModifiers::NONE, KeyCode::Char('4')) = (key.modifiers, key.code) {
-            self.set_view(ComboView::Messages);
-            return;
-        }
-
-        if let (KeyModifiers::NONE, KeyCode::Char('z')) = (key.modifiers, key.code)
-            && self.has_collapsible_body()
-        {
-            self.toggle_display_state();
+        match (key.modifiers, key.code) {
+            (KeyModifiers::NONE, KeyCode::Char('1')) => {
+                self.set_view(ComboView::Stdout);
+            }
+            (KeyModifiers::NONE, KeyCode::Char('2')) => {
+                self.set_view(ComboView::Stderr);
+            }
+            (KeyModifiers::NONE, KeyCode::Char('3')) => {
+                self.set_view(ComboView::Mixed);
+            }
+            (KeyModifiers::NONE, KeyCode::Char('4')) => {
+                self.set_view(ComboView::Messages);
+            }
+            (KeyModifiers::NONE, KeyCode::Char('z')) if self.has_collapsible_body() => {
+                self.toggle_display_state();
+            }
+            _ => {}
         }
     }
 
@@ -1052,7 +1049,7 @@ mod tests {
 
         assert!(combo.has_child_output);
         assert!(combo.state.output_chunks.is_empty());
-        assert!(combo.state.preview_lines.is_empty());
+        assert!(combo.preview_lines.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1078,7 +1075,7 @@ mod tests {
 
         assert!(combo.combo_stream_suppressed);
         assert!(combo.state.output_chunks.is_empty());
-        assert!(combo.state.preview_lines.is_empty());
+        assert!(combo.preview_lines.is_empty());
 
         combo.handle_event(&Event::Combo(ComboEvent::RecordEnd {
             name: "demo".to_string(),
@@ -1089,7 +1086,7 @@ mod tests {
 
         assert!(combo.combo_stream_suppressed);
         assert!(combo.state.output_chunks.is_empty());
-        assert!(combo.state.preview_lines.is_empty());
+        assert!(combo.preview_lines.is_empty());
 
         combo.handle_event(&Event::Combo(ComboEvent::Output {
             name: "demo".to_string(),
@@ -1102,6 +1099,6 @@ mod tests {
 
         assert!(!combo.combo_stream_suppressed);
         assert_eq!(combo.state.output_chunks.len(), 1);
-        assert_eq!(combo.state.preview_lines.len(), 1);
+        assert_eq!(combo.preview_lines.len(), 1);
     }
 }

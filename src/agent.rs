@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::Config;
-use crate::{PromptSchema, ProviderKind, Result};
+use crate::{PromptSchema, Result};
 use executor::PermissionControl;
 
 mod bash_executor;
@@ -137,7 +137,7 @@ impl Agent {
     ) -> Result<PromptReply> {
         ensure_whatever!(!schemas.is_empty(), "schemas cannot be empty");
         let reply_tool = build_reply_tool(&schemas)?;
-        let client = self.build_reply_client()?;
+        let (_, client) = self.pick_provider()?;
         let messages = {
             let mut history = self.messages.lock().await;
             let new_message = build_reply_prompt_message(&schemas);
@@ -240,28 +240,6 @@ impl Agent {
             .user_agent(crate::version::user_agent().to_string());
         let client = builder.build().expect("Failed to initialize client");
         Ok((&provider.name, client))
-    }
-
-    fn build_reply_client(&mut self) -> Result<Client> {
-        let Some(provider) = self.config.providers.first_mut() else {
-            whatever!("no provider configured");
-        };
-        ensure_whatever!(
-            matches!(provider.kind, ProviderKind::Anthropic),
-            "only anthropic providers are supported for reply"
-        );
-        let token = provider.api_key.get()?;
-        Client::builder()
-            .base_url(&provider.base_url)
-            .token(token)
-            .model(&provider.name)
-            .user_agent(crate::version::user_agent().to_string())
-            .build()
-            .map_err(|err| {
-                <crate::Error as snafu::FromString>::without_source(format!(
-                    "failed to build reply client: {err}"
-                ))
-            })
     }
 }
 
