@@ -21,6 +21,9 @@ pub use mcp::*;
 pub use text_edit::*;
 
 #[cfg(test)]
+mod test_utils;
+
+#[cfg(test)]
 #[ctor::ctor]
 fn init() {
     use std::io;

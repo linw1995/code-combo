@@ -601,6 +601,7 @@ pub(crate) mod tests {
     use tokio_util::sync::CancellationToken;
     use tracing::{debug, warn};
 
+    use crate::test_utils::preferred_temp_dir;
     use crate::{
         McpServerCommandConfig, McpServerConfig, McpServerConnection, McpServerHttpConfig,
         error::Result,
@@ -899,23 +900,6 @@ pub(crate) mod tests {
                 TestDropAction::SocketServer(server) => server.shutdown().await,
             }
         }
-    }
-
-    fn preferred_temp_dir() -> PathBuf {
-        if let Ok(path) = std::env::var("COCO_TEST_TMPDIR") {
-            let path = PathBuf::from(path);
-            if path.is_dir() {
-                return path;
-            }
-        }
-        let system = std::env::temp_dir();
-        if cfg!(unix) {
-            let short = PathBuf::from("/tmp");
-            if short.is_dir() && short.to_string_lossy().len() < system.to_string_lossy().len() {
-                return short;
-            }
-        }
-        system
     }
 
     fn unique_socket_path() -> Result<(tempfile::TempDir, PathBuf)> {
