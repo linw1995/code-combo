@@ -218,18 +218,29 @@ impl Chat<'static> {
         // read AGENTS.md file
         let workspace_path = global::workspace_dir().join(AGENTS_MD_FILENAME);
         let global_path = global::config().await.config_dir.join(AGENTS_MD_FILENAME);
-        for path in [workspace_path, global_path] {
+        let mut custom_parts = Vec::new();
+        for path in [global_path, workspace_path] {
             match tokio::fs::read_to_string(&path).await {
                 Ok(system_prompt) => {
-                    let combined = Agent::build_system_prompt(Some(&system_prompt));
-                    self.agent.set_system_prompt(&combined);
-                    self.state.write_untracked().system_prompt = system_prompt;
-                    break;
+                    if !system_prompt.trim().is_empty() {
+                        custom_parts.push(system_prompt);
+                    }
                 }
                 Err(err) => {
                     warn!(?path, ?err, "failed to read file");
                 }
             }
+        }
+
+        if custom_parts.is_empty() {
+            self.agent
+                .set_system_prompt(&Agent::build_system_prompt(None));
+            self.state.write_untracked().system_prompt.clear();
+        } else {
+            let combined_custom = custom_parts.join("\n\n");
+            let combined = Agent::build_system_prompt(Some(&combined_custom));
+            self.agent.set_system_prompt(&combined);
+            self.state.write_untracked().system_prompt = combined_custom;
         }
     }
 
