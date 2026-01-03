@@ -408,10 +408,10 @@ mod tests {
         );
         let mut base_value: toml::Value = toml::from_str(&config_str).expect("parse config");
         let override_str = [
+            "allow_tools = [\"bash\"]",
+            "",
             "[ui]",
             "theme = \"nord\"",
-            "",
-            "allow_tools = [\"bash\"]",
             "",
             "[[providers]]",
             "name = \"default\"",
@@ -419,7 +419,7 @@ mod tests {
             "",
             "[[providers]]",
             "name = \"new\"",
-            "kind = \"openai\"",
+            "kind = \"open_a_i\"",
             "api_key = \"test-key\"",
             "base_url = \"https://new.example\"",
             "",
