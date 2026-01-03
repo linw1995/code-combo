@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsString,
     io,
     pin::Pin,
     process::Stdio,
@@ -108,6 +109,7 @@ impl RunningProcess {
 pub struct ExecCommand {
     argv: Vec<String>,
     envs: Vec<(String, String)>,
+    env_remove: Vec<OsString>,
     stdin: Stdio,
 }
 
@@ -116,6 +118,7 @@ impl ExecCommand {
         Self {
             argv,
             envs: Vec::new(),
+            env_remove: Vec::new(),
             stdin: Stdio::null(),
         }
     }
@@ -130,6 +133,11 @@ impl ExecCommand {
             .into_iter()
             .map(|(k, v)| (k.into(), v.into()))
             .collect();
+        self
+    }
+
+    pub fn remove_env_prefix(mut self, prefix: &str) -> Self {
+        self.env_remove.extend(env_keys_with_prefix(prefix));
         self
     }
 
@@ -153,8 +161,11 @@ impl ExecCommand {
         cmd.stdin(self.stdin)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .envs(self.envs.iter().map(|(k, v)| (k, v)));
+            .kill_on_drop(true);
+        for key in &self.env_remove {
+            cmd.env_remove(key);
+        }
+        cmd.envs(self.envs.iter().map(|(k, v)| (k, v)));
 
         let mut child = cmd.spawn()?;
         let _ = child.stdin.take();
@@ -310,6 +321,13 @@ impl ExecCommand {
             handle,
         })
     }
+}
+
+pub fn env_keys_with_prefix(prefix: &str) -> Vec<OsString> {
+    std::env::vars_os()
+        .map(|(key, _)| key)
+        .filter(|key| key.to_string_lossy().starts_with(prefix))
+        .collect()
 }
 
 #[cfg(test)]

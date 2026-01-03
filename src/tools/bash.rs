@@ -118,6 +118,7 @@ where
         }
     };
     let mut proc = ExecCommand::from_argv(argv)
+        .remove_env_prefix("COCO_")
         .envs(envs)
         .spawn_chunked(ChunkConfig {
             interval: Duration::ZERO,

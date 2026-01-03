@@ -273,7 +273,11 @@ impl App {
         let _ = crossterm::execute!(out, Clear(ClearType::All), cursor::MoveTo(0, 0));
         println!("Entering shell. Type 'exit' to return.");
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-        let status = Command::new(&shell)
+        let mut cmd = Command::new(&shell);
+        for key in code_combo::env_keys_with_prefix("COCO_") {
+            cmd.env_remove(key);
+        }
+        let status = cmd
             .envs(envs)
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
