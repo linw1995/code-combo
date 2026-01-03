@@ -5,8 +5,9 @@ use std::{
 };
 
 use crate::{
-    Config, MCP_SOCKET_ENV, McpAction, McpCallToolPayload, McpRequest, McpResponse, McpServerInfo,
+    MCP_SOCKET_ENV, McpAction, McpCallToolPayload, McpRequest, McpResponse, McpServerInfo,
     McpToolInfo, SessionSocketClient, default_config_dir, error::Result,
+    load_config_with_overrides, workspace_config_path,
 };
 use clap::{
     Arg, ArgAction, Command, builder::PossibleValuesParser, error::ErrorKind, value_parser,
@@ -527,9 +528,9 @@ async fn connect_from_default_config() -> Result<Option<SessionSocketClient>> {
     if !config_path.exists() {
         return Ok(None);
     }
-    let mut config = Config::parse_file(config_path.to_string_lossy().as_ref())
+    let workspace_path = workspace_config_path();
+    let config = load_config_with_overrides(&config_path, &config_dir, Some(&workspace_path))
         .whatever_context("failed to parse config file")?;
-    config.config_dir = config_dir;
     let Some(mcp) = config.mcp else {
         return Ok(None);
     };

@@ -1,5 +1,4 @@
 use std::{
-    env,
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     sync::OnceLock,
@@ -75,30 +74,7 @@ pub fn theme() -> &'static FinalizedTheme {
 ///
 /// The result is cached globally after the first call.
 pub fn workspace_dir() -> &'static Path {
-    WORKSPACE_DIR.get_or_init(|| {
-        // Start from current directory
-        let current_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-
-        // Walk up the directory tree to find a .git directory
-        let mut dir = current_dir.clone();
-        loop {
-            let git_dir = dir.join(".git");
-            if git_dir.exists() && git_dir.is_dir() {
-                return dir;
-            }
-
-            // Move to parent directory
-            if let Some(parent) = dir.parent() {
-                dir = parent.to_path_buf();
-            } else {
-                // Reached root, use current directory
-                break;
-            }
-        }
-
-        // Fallback to current directory
-        current_dir
-    })
+    WORKSPACE_DIR.get_or_init(code_combo::workspace_dir)
 }
 
 pub fn workspace_combo_dir() -> PathBuf {

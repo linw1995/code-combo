@@ -1,10 +1,9 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use code_combo::{
-    Config,
     cli::{ClientCommand, handle_client_command, init_client_logging},
-    default_config_dir,
+    default_config_dir, load_config_with_overrides, workspace_config_path,
 };
 use snafu::prelude::*;
 
@@ -155,10 +154,10 @@ async fn main() -> Result<()> {
             .replace(config_dir.join("config.toml").to_string_lossy().to_string());
     }
     let config_path = args.config_path.clone().unwrap();
-    let mut config =
-        Config::parse_file(&config_path).whatever_context("failed to parse config file")?;
-
-    config.config_dir = config_dir;
+    let workspace_path = workspace_config_path();
+    let config =
+        load_config_with_overrides(Path::new(&config_path), &config_dir, Some(&workspace_path))
+            .whatever_context("failed to parse config file")?;
     global::set_config(config.clone()).await;
 
     let mut root_view = Chat::new(config);

@@ -10,8 +10,9 @@ use tracing::warn;
 
 use super::{ExecuteResult, Final, Input, Tool};
 use crate::{
-    Config, MCP_SOCKET_ENV, McpSocketServer, SessionEnv, default_config_dir,
+    MCP_SOCKET_ENV, McpSocketServer, SessionEnv, default_config_dir,
     exec::{ChunkConfig, ExecCommand, OutputChunk, ProcessEvent, StreamKind},
+    load_config_with_overrides, workspace_config_path,
 };
 
 #[derive(Default)]
@@ -237,10 +238,10 @@ pub async fn prepare_mcp_envs() -> Result<Vec<(String, String)>, String> {
         if !config_path.exists() {
             return Ok(Vec::new());
         }
-        let mut config = Config::parse_file(config_path.to_string_lossy().to_string().as_ref())
-            .map_err(|err| format!("Failed to parse config file: {err}"))?;
-        config.config_dir = config_dir;
-        config
+        let workspace_path = workspace_config_path();
+
+        load_config_with_overrides(&config_path, &config_dir, Some(&workspace_path))
+            .map_err(|err| format!("Failed to parse config file: {err}"))?
     };
     if config.config_dir.as_os_str().is_empty() {
         config.config_dir = default_config_dir();
