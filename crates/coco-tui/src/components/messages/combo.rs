@@ -314,6 +314,10 @@ impl Combo {
             self.has_child_output = true;
             return;
         }
+        {
+            let mut state = self.state.write();
+            state.output_chunks.push(chunk.clone());
+        }
         if self.is_recording {
             return;
         }
@@ -322,9 +326,6 @@ impl Combo {
             self.combo_stream_suppressed = false;
         }
         self.has_child_output = false;
-        let mut state = self.state.write();
-        state.output_chunks.push(chunk.clone());
-        drop(state);
         self.preview_lines.push_chunk(chunk);
     }
 
@@ -1071,7 +1072,7 @@ mod tests {
         }));
 
         assert!(combo.combo_stream_suppressed);
-        assert!(combo.state.output_chunks.is_empty());
+        assert_eq!(combo.state.output_chunks.len(), 1);
         assert!(combo.preview_lines.is_empty());
 
         combo.handle_event(&Event::Combo(ComboEvent::RecordEnd {
@@ -1082,7 +1083,7 @@ mod tests {
         }));
 
         assert!(combo.combo_stream_suppressed);
-        assert!(combo.state.output_chunks.is_empty());
+        assert_eq!(combo.state.output_chunks.len(), 1);
         assert!(combo.preview_lines.is_empty());
 
         combo.handle_event(&Event::Combo(ComboEvent::Output {
@@ -1095,7 +1096,7 @@ mod tests {
         }));
 
         assert!(!combo.combo_stream_suppressed);
-        assert_eq!(combo.state.output_chunks.len(), 1);
+        assert_eq!(combo.state.output_chunks.len(), 2);
         assert_eq!(combo.preview_lines.len(), 1);
     }
 }
