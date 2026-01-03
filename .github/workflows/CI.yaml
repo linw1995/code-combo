@@ -15,11 +15,11 @@ jobs:
       - name: Cache pre-commit hooks
         uses: actions/cache@v4
         with:
-          path: ~/.cache/pre-commit
-          key: pre-commit|${{ hashFiles('.pre-commit-config.yaml') }}
+          path: ~/.cache/prek
+          key: prek-v1|${{ runner.os }}|${{ runner.arch }}|${{ hashFiles('**/.pre-commit-config.yaml') }}
 
-      - name: Run pre-commit hooks on all files
-        run: pre-commit run --all-files
+      - name: Run pre commit hooks on all files
+        run: prek run --all-files
 
   nix-build-check:
     needs:
