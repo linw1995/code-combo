@@ -83,6 +83,14 @@
               ];
               useNextest = true;
             };
+          run-test = pkgs.writeShellApplication {
+            name = "run-test";
+            text = builtins.readFile ./scripts/run-test.sh;
+          };
+          run-cov = pkgs.writeShellApplication {
+            name = "run-cov";
+            text = builtins.readFile ./scripts/run-cov.sh;
+          };
         };
         apps = rec {
           default = coco;
@@ -104,13 +112,18 @@
             "llvm-tools"
             "rust-analyzer"
           ];
-          packages = with pkgs; [
-            # Development
-            grcov
-            prek
+          packages = with pkgs;
+            [
+              # Development
+              grcov
+              prek
 
-            cargo-nextest
-          ];
+              cargo-nextest
+            ]
+            ++ (with self.packages.${system}; [
+              run-test
+              run-cov
+            ]);
         in rec {
           default = stable;
           stable = pkgs.mkShell {
