@@ -5,6 +5,7 @@ mod combo;
 mod config;
 mod error;
 pub mod exec;
+pub mod global;
 pub mod logging;
 mod mcp;
 mod text_edit;

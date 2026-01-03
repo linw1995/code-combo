@@ -6,7 +6,9 @@ mod ui;
 use std::path::PathBuf;
 
 pub use env::EnvString;
-pub use mcp::{McpConfig, McpServerConfig};
+pub use mcp::{
+    McpConfig, McpServerCommandConfig, McpServerConfig, McpServerConnection, McpServerHttpConfig,
+};
 pub use provider::{ProviderConfig, ProviderKind};
 pub use ui::{MarkdownRenderEngine, UI};
 
@@ -51,7 +53,7 @@ pub fn default_config_dir() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{Config, McpServerConnection};
 
     fn base_config() -> String {
         [
@@ -103,6 +105,32 @@ mod tests {
         assert_eq!(mcp.idle_ttl_ms, 60_000);
         assert_eq!(mcp.servers.len(), 1);
         assert_eq!(mcp.servers[0].name, "demo");
-        assert_eq!(mcp.servers[0].command, "echo");
+        match &mcp.servers[0].connection {
+            McpServerConnection::Command(command) => {
+                assert_eq!(command.command, "echo");
+            }
+            McpServerConnection::Http(_) => {
+                panic!("expected command server config");
+            }
+        }
+    }
+
+    #[test]
+    fn parse_config_with_mcp_http_server() {
+        let config_str = format!(
+            "[mcp]\n\n[[mcp.servers]]\nname = \"remote\"\nurl = \"http://localhost:8080/mcp\"\n{}\n",
+            base_config()
+        );
+        let config: Config = toml::from_str(&config_str).expect("parse config");
+        let mcp = config.mcp.expect("mcp is present");
+        assert_eq!(mcp.servers.len(), 1);
+        match &mcp.servers[0].connection {
+            McpServerConnection::Http(http) => {
+                assert_eq!(http.url, "http://localhost:8080/mcp");
+            }
+            McpServerConnection::Command(_) => {
+                panic!("expected http server config");
+            }
+        }
     }
 }

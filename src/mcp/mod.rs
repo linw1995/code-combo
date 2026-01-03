@@ -10,7 +10,7 @@ use rmcp::{
     RoleClient,
     model::{CallToolRequestParam, Tool},
     service::{ClientInitializeError, Peer, RunningService, ServiceError, ServiceExt},
-    transport::TokioChildProcess,
+    transport::{StreamableHttpClientTransport, TokioChildProcess},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -268,6 +268,21 @@ impl McpManager {
         &self,
         config: &crate::McpServerConfig,
     ) -> ManagerResult<RunningService<RoleClient, ()>> {
+        match &config.connection {
+            crate::McpServerConnection::Command(command) => {
+                self.spawn_command_service(&config.name, command).await
+            }
+            crate::McpServerConnection::Http(http) => {
+                self.spawn_http_service(&config.name, http).await
+            }
+        }
+    }
+
+    async fn spawn_command_service(
+        &self,
+        name: &str,
+        config: &crate::McpServerCommandConfig,
+    ) -> ManagerResult<RunningService<RoleClient, ()>> {
         let mut cmd = Command::new(&config.command);
         cmd.args(&config.args);
         if let Some(cwd) = &config.cwd {
@@ -277,7 +292,7 @@ impl McpManager {
             for (key, value) in envs {
                 let mut value = value.clone();
                 let value = value.get().context(ResolveEnvSnafu {
-                    name: config.name.clone(),
+                    name: name.to_string(),
                     key: key.clone(),
                 })?;
                 cmd.env(key, value);
@@ -285,10 +300,10 @@ impl McpManager {
         }
         let logs_dir = logs_dir();
         fs::create_dir_all(logs_dir).context(LogSetupSnafu {
-            name: config.name.clone(),
+            name: name.to_string(),
             path: logs_dir.to_path_buf(),
         })?;
-        let file_stem = sanitize_log_stem(&config.name);
+        let file_stem = sanitize_log_stem(name);
         let file_name = if file_stem.is_empty() {
             "mcp.log".to_string()
         } else {
@@ -300,17 +315,28 @@ impl McpManager {
             .append(true)
             .open(&log_path)
             .context(LogSetupSnafu {
-                name: config.name.clone(),
+                name: name.to_string(),
                 path: log_path.clone(),
             })?;
         let (transport, _stderr) = TokioChildProcess::builder(cmd)
             .stderr(Stdio::from(log_file))
             .spawn()
             .context(SpawnSnafu {
-                name: config.name.clone(),
+                name: name.to_string(),
             })?;
         ().serve(transport).await.context(InitializeSnafu {
-            name: config.name.clone(),
+            name: name.to_string(),
+        })
+    }
+
+    async fn spawn_http_service(
+        &self,
+        name: &str,
+        config: &crate::McpServerHttpConfig,
+    ) -> ManagerResult<RunningService<RoleClient, ()>> {
+        let transport = StreamableHttpClientTransport::from_uri(config.url.clone());
+        ().serve(transport).await.context(InitializeSnafu {
+            name: name.to_string(),
         })
     }
 
@@ -563,7 +589,7 @@ pub(crate) mod tests {
         schemars::JsonSchema,
         tool, tool_handler, tool_router,
         transport::{
-            StreamableHttpClientTransport, StreamableHttpServerConfig,
+            StreamableHttpServerConfig,
             streamable_http_server::{
                 session::local::LocalSessionManager, tower::StreamableHttpService,
             },
@@ -575,7 +601,10 @@ pub(crate) mod tests {
     use tokio_util::sync::CancellationToken;
     use tracing::{debug, warn};
 
-    use crate::{McpServerConfig, error::Result};
+    use crate::{
+        McpServerCommandConfig, McpServerConfig, McpServerConnection, McpServerHttpConfig,
+        error::Result,
+    };
 
     use super::*;
 
@@ -703,10 +732,12 @@ pub(crate) mod tests {
             servers: vec![McpServerConfig {
                 name: server_name.to_string(),
                 description: description.map(|value| value.to_string()),
-                command: "unused".to_string(),
-                args: Vec::new(),
-                cwd: None,
-                env: None,
+                connection: McpServerConnection::Command(McpServerCommandConfig {
+                    command: "unused".to_string(),
+                    args: Vec::new(),
+                    cwd: None,
+                    env: None,
+                }),
             }],
         }
     }
@@ -896,18 +927,22 @@ pub(crate) mod tests {
                 McpServerConfig {
                     name: "alpha".to_string(),
                     description: Some("Alpha server".to_string()),
-                    command: "alpha".to_string(),
-                    args: Vec::new(),
-                    cwd: None,
-                    env: None,
+                    connection: McpServerConnection::Command(McpServerCommandConfig {
+                        command: "alpha".to_string(),
+                        args: Vec::new(),
+                        cwd: None,
+                        env: None,
+                    }),
                 },
                 McpServerConfig {
                     name: "beta".to_string(),
                     description: None,
-                    command: "beta".to_string(),
-                    args: Vec::new(),
-                    cwd: None,
-                    env: None,
+                    connection: McpServerConnection::Command(McpServerCommandConfig {
+                        command: "beta".to_string(),
+                        args: Vec::new(),
+                        cwd: None,
+                        env: None,
+                    }),
                 },
             ],
         };
@@ -934,15 +969,19 @@ pub(crate) mod tests {
     async fn list_tools_and_call_tool_over_http() -> Result<()> {
         let server = TestHttpServer::start().await?;
         let server_url = server.base_url().to_string();
-        let config = test_config("test", Some("Test server"));
+        let config = McpConfig {
+            socket_path: PathBuf::from("mcp.sock"),
+            request_timeout_ms: 5_000,
+            idle_ttl_ms: 0,
+            servers: vec![McpServerConfig {
+                name: "test".to_string(),
+                description: Some("Test server".to_string()),
+                connection: McpServerConnection::Http(McpServerHttpConfig { url: server_url }),
+            }],
+        };
         let manager = Arc::new(McpManager::new(config));
         let mut guard = TestDropGuard::new();
         guard.add_http_server(server);
-
-        let transport = StreamableHttpClientTransport::from_uri(server_url);
-        let service = ().serve(transport).await.whatever_context("failed to connect to server")?;
-        install_peer(&manager, "test", service).await;
-        guard.add_peer(manager.clone(), "test");
 
         let tools = manager
             .list_tools("test", None)

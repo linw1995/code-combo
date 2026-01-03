@@ -550,7 +550,10 @@ mod tests {
     use tokio::process::Command;
 
     use crate::mcp::tests::{TestDropGuard, TestHttpServer, TestMcpSocketServer, install_peer};
-    use crate::{McpConfig, McpManager, McpServerConfig, SessionSocketClient};
+    use crate::{
+        McpConfig, McpManager, McpServerCommandConfig, McpServerConfig, McpServerConnection,
+        SessionSocketClient,
+    };
 
     use super::*;
 
@@ -625,18 +628,22 @@ mod tests {
                 McpServerConfig {
                     name: "alpha".to_string(),
                     description: Some("Alpha server".to_string()),
-                    command: "unused".to_string(),
-                    args: Vec::new(),
-                    cwd: None,
-                    env: None,
+                    connection: McpServerConnection::Command(McpServerCommandConfig {
+                        command: "unused".to_string(),
+                        args: Vec::new(),
+                        cwd: None,
+                        env: None,
+                    }),
                 },
                 McpServerConfig {
                     name: "beta".to_string(),
                     description: Some("Beta server".to_string()),
-                    command: "unused".to_string(),
-                    args: Vec::new(),
-                    cwd: None,
-                    env: None,
+                    connection: McpServerConnection::Command(McpServerCommandConfig {
+                        command: "unused".to_string(),
+                        args: Vec::new(),
+                        cwd: None,
+                        env: None,
+                    }),
                 },
             ],
         };
@@ -738,18 +745,22 @@ mod tests {
                 McpServerConfig {
                     name: "alpha".to_string(),
                     description: Some("Alpha server".to_string()),
-                    command: "unused".to_string(),
-                    args: Vec::new(),
-                    cwd: None,
-                    env: None,
+                    connection: McpServerConnection::Command(McpServerCommandConfig {
+                        command: "unused".to_string(),
+                        args: Vec::new(),
+                        cwd: None,
+                        env: None,
+                    }),
                 },
                 McpServerConfig {
                     name: "beta".to_string(),
                     description: Some("Beta server".to_string()),
-                    command: "unused".to_string(),
-                    args: Vec::new(),
-                    cwd: None,
-                    env: None,
+                    connection: McpServerConnection::Command(McpServerCommandConfig {
+                        command: "unused".to_string(),
+                        args: Vec::new(),
+                        cwd: None,
+                        env: None,
+                    }),
                 },
             ],
         };

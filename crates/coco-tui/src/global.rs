@@ -2,11 +2,11 @@ use std::{
     env,
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    sync::OnceLock,
 };
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, mpsc::UnboundedSender};
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     actions::Action,
@@ -50,11 +50,8 @@ pub fn action_tx() -> UnboundedSender<Action> {
         .expect("Action sender must be initialized")
 }
 
-static CONFIG: OnceLock<Arc<Mutex<code_combo::Config>>> = OnceLock::new();
-
 pub async fn config() -> code_combo::Config {
-    let config = CONFIG.get_or_init(Default::default);
-    config.lock().await.to_owned()
+    code_combo::global::config().await.unwrap_or_default()
 }
 
 pub fn config_sync() -> code_combo::Config {
@@ -64,9 +61,7 @@ pub fn config_sync() -> code_combo::Config {
 }
 
 pub async fn set_config(config: code_combo::Config) {
-    let cell = CONFIG.get_or_init(Default::default);
-    let mut cell = cell.lock().await;
-    *cell = config;
+    code_combo::global::set_config(config).await;
 }
 
 pub fn theme() -> &'static FinalizedTheme {

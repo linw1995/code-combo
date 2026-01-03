@@ -155,10 +155,6 @@ async fn main() -> Result<()> {
             .replace(config_dir.join("config.toml").to_string_lossy().to_string());
     }
     let config_path = args.config_path.clone().unwrap();
-    // SAFETY: set_var is unsafe in Rust 2024; we do this before spawning other threads.
-    unsafe {
-        std::env::set_var("COCO_CONFIG_PATH", &config_path);
-    }
     let mut config =
         Config::parse_file(&config_path).whatever_context("failed to parse config file")?;
 

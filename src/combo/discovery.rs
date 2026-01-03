@@ -60,8 +60,16 @@ async fn discover_starter_in(combo_dir: &Path, cancel_token: CancellationToken) 
         let session_env = SessionEnv::builder()
             .build()
             .expect("failed to build session");
+        let mcp_envs = match crate::tools::prepare_mcp_envs().await {
+            Ok(envs) => envs,
+            Err(err) => {
+                warn!(?err, "failed to prepare mcp envs for discovery");
+                Vec::new()
+            }
+        };
         let starter = match StarterCommand::new(path.to_string_lossy())
             .discovery(true)
+            .envs(mcp_envs)
             .session_env(session_env)
             .execute()
             .consume_with_cancel(cancel_token.clone(), |_| {})

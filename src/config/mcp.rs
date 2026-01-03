@@ -46,6 +46,20 @@ pub struct McpServerConfig {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(flatten)]
+    pub connection: McpServerConnection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum McpServerConnection {
+    Command(McpServerCommandConfig),
+    Http(McpServerHttpConfig),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpServerCommandConfig {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
@@ -53,4 +67,10 @@ pub struct McpServerConfig {
     pub cwd: Option<PathBuf>,
     #[serde(default)]
     pub env: Option<BTreeMap<String, EnvString>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpServerHttpConfig {
+    pub url: String,
 }

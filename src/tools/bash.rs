@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::OnceLock, time::Duration};
+use std::{sync::OnceLock, time::Duration};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -228,13 +228,22 @@ pub async fn prepare_mcp_envs() -> Result<Vec<(String, String)>, String> {
         return Ok(existing.envs.clone());
     }
 
-    let (config_dir, config_path) = resolve_config_path();
-    if !config_path.exists() {
-        return Ok(Vec::new());
+    let mut config = if let Some(config) = crate::global::config().await {
+        config
+    } else {
+        let config_dir = default_config_dir();
+        let config_path = config_dir.join("config.toml");
+        if !config_path.exists() {
+            return Ok(Vec::new());
+        }
+        let mut config = Config::parse_file(config_path.to_string_lossy().to_string().as_ref())
+            .map_err(|err| format!("Failed to parse config file: {err}"))?;
+        config.config_dir = config_dir;
+        config
+    };
+    if config.config_dir.as_os_str().is_empty() {
+        config.config_dir = default_config_dir();
     }
-    let mut config = Config::parse_file(config_path.to_string_lossy().to_string().as_ref())
-        .map_err(|err| format!("Failed to parse config file: {err}"))?;
-    config.config_dir = config_dir;
     let Some(mut mcp) = config.mcp else {
         return Ok(Vec::new());
     };
@@ -264,19 +273,6 @@ pub async fn prepare_mcp_envs() -> Result<Vec<(String, String)>, String> {
         envs: envs.clone(),
     });
     Ok(envs)
-}
-
-fn resolve_config_path() -> (PathBuf, PathBuf) {
-    if let Some(path) = std::env::var_os("COCO_CONFIG_PATH") {
-        let path = PathBuf::from(path);
-        let config_dir = path
-            .parent()
-            .map(PathBuf::from)
-            .unwrap_or_else(default_config_dir);
-        return (config_dir, path);
-    }
-    let config_dir = default_config_dir();
-    (config_dir.clone(), config_dir.join("config.toml"))
 }
 
 #[cfg(test)]
