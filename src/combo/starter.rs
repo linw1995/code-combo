@@ -920,16 +920,36 @@ mod tests {
 
     static COCO_BIN_PATH: OnceLock<PathBuf> = OnceLock::new();
 
+    fn resolve_coco_bin_from_env() -> Option<PathBuf> {
+        if let Ok(path) = std::env::var("COCO_TEST_BIN") {
+            return Some(PathBuf::from(path));
+        }
+        if let Ok(path) = std::env::var("CARGO_BIN_EXE_coco") {
+            return Some(PathBuf::from(path));
+        }
+        let target_dir = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from)?;
+        let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+        let mut path = target_dir.join(profile).join("coco");
+        if cfg!(windows) {
+            path.set_extension("exe");
+        }
+        Some(path)
+    }
+
     fn coco_binary() -> PathBuf {
         COCO_BIN_PATH
             .get_or_init(|| {
-                if let Ok(path) = std::env::var("COCO_TEST_BIN") {
-                    return PathBuf::from(path);
+                if let Some(path) = resolve_coco_bin_from_env() {
+                    return path;
                 }
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                     .join("target")
                     .join("debug")
-                    .join("coco")
+                    .join("coco");
+                if cfg!(windows) {
+                    path.set_extension("exe");
+                }
+                path
             })
             .clone()
     }
@@ -940,8 +960,8 @@ mod tests {
             path.exists(),
             indoc! {"
                 coco binary not found at {:?};
-                build `cargo build -p code-combo --bin coco` first
-                or set COCO_TEST_BIN
+                build `cargo build -p coco-tui --bin coco` or `cargo build -p code-combo --bin coco` first
+                or set COCO_TEST_BIN/CARGO_BIN_EXE_coco
             "},
             path
         );
