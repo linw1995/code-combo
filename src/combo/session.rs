@@ -471,13 +471,14 @@ mod tests {
     use tokio::task;
 
     use crate::error::Result;
+    use crate::test_utils::preferred_temp_dir;
 
     use super::*;
 
     fn unique_socket_path() -> Result<(tempfile::TempDir, String)> {
         let dir = tempfile::Builder::new()
             .prefix("coco-")
-            .tempdir_in(std::env::temp_dir())
+            .tempdir_in(preferred_temp_dir())
             .whatever_context("failed to create tempdir")?;
         let path = dir
             .path()

@@ -601,6 +601,7 @@ pub(crate) mod tests {
     use tokio_util::sync::CancellationToken;
     use tracing::{debug, warn};
 
+    use crate::test_utils::preferred_temp_dir;
     use crate::{
         McpServerCommandConfig, McpServerConfig, McpServerConnection, McpServerHttpConfig,
         error::Result,
@@ -904,7 +905,7 @@ pub(crate) mod tests {
     fn unique_socket_path() -> Result<(tempfile::TempDir, PathBuf)> {
         let dir = tempfile::Builder::new()
             .prefix("coco-mcp-")
-            .tempdir_in(std::env::temp_dir())
+            .tempdir_in(preferred_temp_dir())
             .whatever_context("failed to create tempdir")?;
         let path = dir
             .path()
