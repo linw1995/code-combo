@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anthropic::{Block as AnthropicBlock, Client, Tool as AnthropicTool, ToolChoice};
+use indoc::indoc;
 use serde_json::{Map as JsonMap, json};
 use snafu::prelude::*;
 use tokio::sync::Mutex;
@@ -17,6 +18,13 @@ pub use anthropic::{Block, Content, Message, Role, StopReason, ToolUse};
 pub use executor::{ExecuteStatus, Executor, Input, Output};
 
 const PROMPT_REPLY_TOOL_NAME: &str = "combo_reply";
+const BUILTIN_SYSTEM_PROMPT: &str = indoc! {"
+    You are Coco, a coding assistant running inside the code-combo CLI.
+    Introduce yourself briefly when a new conversation starts.
+    When you need to offload work to MCP tools, use the MCP offloading CLI.
+    Discover servers with `coco mcp -h`, list tools with `coco mcp <server> -h`,
+    and list tool arguments with `coco mcp <server> <tool> --help`.
+"};
 
 #[derive(Clone)]
 pub struct Agent {
@@ -44,7 +52,7 @@ impl Agent {
         executor.apply_tool_policies(config.allow_tools.as_deref(), config.deny_tools.as_deref());
         Self {
             config,
-            system_prompt: String::new(),
+            system_prompt: Self::build_system_prompt(None),
             executor,
             messages: Arc::new(Mutex::new(vec![])),
         }
@@ -52,6 +60,15 @@ impl Agent {
 
     pub fn system_prompt(&self) -> &str {
         &self.system_prompt
+    }
+
+    pub fn build_system_prompt(custom: Option<&str>) -> String {
+        match custom {
+            Some(value) if !value.trim().is_empty() => {
+                format!("{BUILTIN_SYSTEM_PROMPT}\n\n{value}")
+            }
+            _ => BUILTIN_SYSTEM_PROMPT.to_string(),
+        }
     }
 
     pub fn set_system_prompt(&mut self, system_prompt: &str) {
