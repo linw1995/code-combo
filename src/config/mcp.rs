@@ -31,6 +31,17 @@ pub struct McpConfig {
     pub servers: Vec<McpServerConfig>,
 }
 
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            socket_path: default_socket_path(),
+            request_timeout_ms: default_request_timeout_ms(),
+            idle_ttl_ms: default_idle_ttl_ms(),
+            servers: Vec::new(),
+        }
+    }
+}
+
 impl McpConfig {
     pub fn resolved_socket_path(&self, config_dir: &Path) -> PathBuf {
         if self.socket_path.is_absolute() {

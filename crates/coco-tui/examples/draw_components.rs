@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use coco_tui::{
@@ -8,7 +8,7 @@ use coco_tui::{
     global,
     session::{self, Session},
 };
-use code_combo::{Config, default_config_dir};
+use code_combo::{default_config_dir, load_config_with_overrides, workspace_config_path};
 use indoc::indoc;
 use snafu::prelude::*;
 
@@ -47,10 +47,11 @@ async fn main() -> Result<()> {
         args.config_path
             .replace(config_dir.join("config.toml").to_string_lossy().to_string());
     }
-    let mut config = Config::parse_file(&args.config_path.take().unwrap())
-        .whatever_context("failed to parse config file")?;
-
-    config.config_dir = config_dir;
+    let config_path = args.config_path.take().unwrap();
+    let workspace_path = workspace_config_path();
+    let config =
+        load_config_with_overrides(Path::new(&config_path), &config_dir, Some(&workspace_path))
+            .whatever_context("failed to parse config file")?;
     global::set_config(config.clone()).await;
 
     let component: Box<dyn Component> = match args.command {
