@@ -34,39 +34,9 @@ impl Display for ComboMode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum Instruction {
-    Text(String),
-    Command { command: String, output: String },
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Combo {
     pub metadata: ComboMetadata,
-    pub instructions: Vec<Instruction>,
-}
-
-impl Combo {
-    pub fn to_markdown(&self) -> String {
-        self.instructions
-            .iter()
-            .map(|instruction| match instruction {
-                Instruction::Text(text) => text.clone(),
-                Instruction::Command { command, output } => [
-                    "I executed this command:\n",
-                    "```",
-                    command.as_str(),
-                    "```\n",
-                    "And it outputs:\n",
-                    "```",
-                    output.as_str(),
-                    "```\n",
-                ]
-                .join("\n"),
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n")
-    }
 }
 
 mod discovery;
@@ -76,10 +46,11 @@ mod starter;
 
 pub use discovery::*;
 pub use session::{
-    ClientMessage, ControlAction, MetadataPayload, MetadataResponse, PromptPayload,
+    ClientMessage, ControlAction, MetadataPayload, MetadataResponse, PromptPayload, PromptSchema,
     RecordChunkPayload, RecordControl, RecordEndPayload, RecordSession, RecordStartPayload,
     ServerConnection, ServerMessage, SessionClientError, SessionServerError, SessionSocketClient,
     SessionSocketServer,
 };
 pub use session_env::{SessionEnv, SessionEnvBuilder, SessionEnvError};
+pub use starter::PromptResponseSender;
 pub use starter::{Starter, StarterCommand, StarterError, StarterEvent, StarterExecution};

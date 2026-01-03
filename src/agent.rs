@@ -1,18 +1,22 @@
 use std::sync::Arc;
 
-use anthropic::Client;
+use anthropic::{Block as AnthropicBlock, Client, Tool as AnthropicTool, ToolChoice};
+use serde_json::{Map as JsonMap, json};
+use snafu::prelude::*;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::Config;
-use crate::Result;
+use crate::{PromptSchema, Result};
 use executor::PermissionControl;
 
 mod bash_executor;
 mod executor;
 pub use anthropic::{Block, Content, Message, Role, StopReason, ToolUse};
 pub use executor::{ExecuteStatus, Executor, Input, Output};
+
+const PROMPT_REPLY_TOOL_NAME: &str = "combo_reply";
 
 #[derive(Clone)]
 pub struct Agent {
@@ -27,6 +31,11 @@ pub struct Agent {
 pub struct ChatResponse {
     pub message: Message,
     pub stop_reason: Option<StopReason>,
+}
+
+pub struct PromptReply {
+    pub tool_use: ToolUse,
+    pub response: String,
 }
 
 impl Agent {
@@ -51,6 +60,10 @@ impl Agent {
 
     pub async fn dump_messages(&self) -> Vec<Message> {
         self.messages.lock().await.clone()
+    }
+
+    pub async fn append_message(&self, message: Message) {
+        self.messages.lock().await.push(message);
     }
 
     pub async fn restore_messages(&mut self, messages: &[Message]) {
@@ -86,6 +99,89 @@ impl Agent {
             message,
             stop_reason: response.stop_reason,
         })
+    }
+
+    pub async fn chat_with_history(&mut self) -> Result<ChatResponse> {
+        let (_, client) = self.pick_provider()?;
+
+        let messages = self.messages.lock().await.clone();
+        let response = client
+            .messages()
+            .system_prompt(&self.system_prompt)
+            .conversations(messages)
+            .tools(self.executor.anthropic_tools())
+            .call()
+            .await
+            .inspect_err(|err| {
+                warn!("send messsages error: {err:?}");
+            })
+            .unwrap();
+
+        let message = if response.content.is_empty() {
+            Message::assistant(Content::Multiple(Vec::default()))
+        } else {
+            let msg = Message::assistant(Content::Multiple(response.content));
+            self.messages.lock().await.push(msg.clone());
+            msg
+        };
+        Ok(ChatResponse {
+            message,
+            stop_reason: response.stop_reason,
+        })
+    }
+
+    pub async fn reply_prompt(
+        &mut self,
+        system_prompt: &str,
+        schemas: Vec<PromptSchema>,
+    ) -> Result<PromptReply> {
+        ensure_whatever!(!schemas.is_empty(), "schemas cannot be empty");
+        let reply_tool = build_reply_tool(&schemas)?;
+        let (_, client) = self.pick_provider()?;
+        let messages = {
+            let mut history = self.messages.lock().await;
+            let new_message = build_reply_prompt_message(&schemas);
+            history.push(new_message);
+            history.clone()
+        };
+        let tool_choice = ToolChoice::tool().name(PROMPT_REPLY_TOOL_NAME).call();
+        let system_prompt = system_prompt.trim();
+        let system_prompt = if system_prompt.is_empty() {
+            None
+        } else {
+            Some(system_prompt)
+        };
+        let response = client
+            .messages_with_tool_choice(system_prompt, messages, vec![reply_tool], tool_choice)
+            .await
+            .map_err(|err| {
+                <crate::Error as snafu::FromString>::without_source(format!(
+                    "failed to request prompt reply: {err}"
+                ))
+            })?;
+        if !response.content.is_empty() {
+            let mut history = self.messages.lock().await;
+            history.push(Message::assistant(Content::Multiple(
+                response.content.clone(),
+            )));
+        }
+        let Some(tool_use) = response.content.into_iter().find_map(|block| match block {
+            AnthropicBlock::ToolUse(tool_use) if tool_use.name == PROMPT_REPLY_TOOL_NAME => {
+                Some(tool_use)
+            }
+            _ => None,
+        }) else {
+            whatever!("reply tool use not found in response");
+        };
+        {
+            let mut history = self.messages.lock().await;
+            history.push(Message::user(Content::Multiple(vec![
+                AnthropicBlock::tool_result(&tool_use.id, None, Content::Text("ok".to_string())),
+            ])));
+        }
+        let response = serde_json::to_string(&tool_use.input)
+            .whatever_context("failed to serialize reply tool input")?;
+        Ok(PromptReply { tool_use, response })
     }
 
     pub fn grant_once(&mut self, id: &str, name: &str) {
@@ -145,4 +241,48 @@ impl Agent {
         let client = builder.build().expect("Failed to initialize client");
         Ok((&provider.name, client))
     }
+}
+
+fn build_reply_prompt_message(schemas: &[PromptSchema]) -> Message {
+    Message::user(Content::Text(build_reply_tool_directive(schemas)))
+}
+
+fn build_reply_tool(schemas: &[PromptSchema]) -> Result<AnthropicTool> {
+    let mut properties = JsonMap::new();
+    let mut required = Vec::new();
+    for schema in schemas {
+        properties.insert(
+            schema.name.clone(),
+            json!({
+                "type": "string",
+                "description": schema.description.as_str(),
+            }),
+        );
+        required.push(schema.name.clone());
+    }
+    ensure_whatever!(!properties.is_empty(), "schemas cannot be empty");
+    let input_schema = json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false,
+    });
+    Ok(AnthropicTool {
+        name: PROMPT_REPLY_TOOL_NAME.to_string(),
+        description: "Return the response using the provided schema.".to_string(),
+        input_schema,
+    })
+}
+
+fn build_reply_tool_directive(schemas: &[PromptSchema]) -> String {
+    let fields = schemas
+        .iter()
+        .map(|schema| schema.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "You must call the tool \"{PROMPT_REPLY_TOOL_NAME}\" exactly once. \
+Do not output plain text. Provide all required fields in the tool input. \
+Required fields: {fields}."
+    )
 }

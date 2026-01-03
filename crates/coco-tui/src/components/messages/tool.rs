@@ -15,7 +15,6 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use snafu::whatever;
 use tracing::{debug, warn};
 
 use crate::{
@@ -96,6 +95,14 @@ impl Tool {
             widget,
             is_focused: false,
         }
+    }
+
+    pub fn mark_completed(&mut self) {
+        self.update_state(ToolState::Completed);
+    }
+
+    pub fn mark_failed(&mut self) {
+        self.update_state(ToolState::Failed);
     }
 
     pub fn tool_use_id(&self) -> &str {
@@ -179,7 +186,7 @@ impl Persistable for Tool {
             READ_TOOL_NAME => Read::load(child)?.into(),
             LIST_TOOL_NAME => List::load(child)?.into(),
             STR_REPLACE_TOOL_NAME => StrReplace::load(child)?.into(),
-            _ => whatever!("Unknown tool {name:?}"),
+            _ => Raw::load(child)?.into(),
         };
         Ok(Self {
             inner: State::new(inner),

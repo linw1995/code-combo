@@ -64,6 +64,29 @@ impl Client {
         )
         .await
     }
+
+    pub async fn messages_with_tool_choice(
+        &self,
+        system_prompt: Option<&str>,
+        conversations: Vec<Message>,
+        tools: Vec<Tool>,
+        tool_choice: ToolChoice,
+    ) -> Result<MessagesResponse> {
+        messages::messages(
+            &self.cli,
+            &self.base_url,
+            MessagesRequest {
+                model: self.model.clone(),
+                messages: conversations,
+                max_tokens: 32000,
+                system: system_prompt.unwrap_or_default().to_string(),
+                temperature: None,
+                tool_choice: Some(tool_choice),
+                tools,
+            },
+        )
+        .await
+    }
 }
 
 #[cfg(test)]

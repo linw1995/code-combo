@@ -118,6 +118,20 @@ pub enum CacheInvalidation {
     Theme,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NavigationKey {
+    Up,
+    Down,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NavigationResult {
+    Forwarded,
+    Moved,
+    Boundary,
+    Ignored,
+}
+
 /// `Component` is a trait that represents a visual and interactive element of the user interface.
 pub trait Component: Persistable + Any + Send {
     /// Get the children components of this component.
@@ -160,6 +174,12 @@ pub trait Component: Persistable + Any + Send {
     /// * `key` - A key event to be processed.
     #[allow(unused_variables)]
     fn handle_key_event(&mut self, key: &KeyEvent) {}
+
+    /// Handle navigation keys (like j/k) with focus-aware semantics.
+    #[allow(unused_variables)]
+    fn handle_navigation(&mut self, key: NavigationKey) -> NavigationResult {
+        NavigationResult::Ignored
+    }
 
     /// Handle mouse events.
     ///

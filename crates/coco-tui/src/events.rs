@@ -60,14 +60,52 @@ impl From<AnswerEvent> for Event {
 #[derive(Debug, Clone)]
 pub enum ComboEvent {
     Discovering,
-    Discovered { starters: Vec<Starter> },
+    Discovered {
+        starters: Vec<Starter>,
+    },
 
-    Executing { name: String },
-    Output { name: String, chunk: OutputChunk },
-    Executed { name: String, starter: Starter },
+    Executing {
+        name: String,
+    },
+    RecordStart {
+        name: String,
+        tool_use: ToolUse,
+    },
+    Output {
+        name: String,
+        chunk: OutputChunk,
+    },
+    RecordOutput {
+        name: String,
+        tool_use_id: String,
+        chunk: OutputChunk,
+    },
+    RecordEnd {
+        name: String,
+        tool_use_id: String,
+        is_error: bool,
+        output: Final,
+    },
+    Prompt {
+        name: String,
+        prompt: String,
+    },
+    Executed {
+        name: String,
+        starter: Starter,
+        exit_code: Option<i32>,
+    },
 
-    NotFound { name: String },
-    Cancelled { name: Option<String> },
+    ReplyToolError {
+        message: String,
+    },
+
+    NotFound {
+        name: String,
+    },
+    Cancelled {
+        name: Option<String>,
+    },
 }
 
 impl From<ComboEvent> for Event {
