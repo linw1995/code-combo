@@ -218,16 +218,29 @@ impl Chat<'static> {
         // read AGENTS.md file
         let workspace_path = global::workspace_dir().join(AGENTS_MD_FILENAME);
         let global_path = global::config().await.config_dir.join(AGENTS_MD_FILENAME);
-        for path in [workspace_path, global_path] {
+        let mut custom_parts = Vec::new();
+        for path in [global_path, workspace_path] {
             match tokio::fs::read_to_string(&path).await {
                 Ok(system_prompt) => {
-                    self.agent.set_system_prompt(&system_prompt);
-                    break;
+                    if !system_prompt.trim().is_empty() {
+                        custom_parts.push(system_prompt);
+                    }
                 }
                 Err(err) => {
                     warn!(?path, ?err, "failed to read file");
                 }
             }
+        }
+
+        if custom_parts.is_empty() {
+            self.agent
+                .set_system_prompt(&Agent::build_system_prompt(None));
+            self.state.write_untracked().system_prompt.clear();
+        } else {
+            let combined_custom = custom_parts.join("\n\n");
+            let combined = Agent::build_system_prompt(Some(&combined_custom));
+            self.agent.set_system_prompt(&combined);
+            self.state.write_untracked().system_prompt = combined_custom;
         }
     }
 
@@ -267,7 +280,6 @@ impl Chat<'static> {
 
         tokio::spawn(async move {
             // Take a snapshot immediately to avoid persisting later dirty state
-            state.system_prompt = agent.system_prompt().to_string();
             state.messages = agent.dump_messages().await;
 
             let session_dir = std::path::Path::new(".coco/sessions").to_path_buf();
@@ -746,6 +758,7 @@ impl Chat<'static> {
             self.save_now();
         }
 
+        let system_prompt = self.state.system_prompt.clone();
         let auto_accept_edits = self.state.auto_accept_edits;
 
         // 2. Clear messages
@@ -755,6 +768,7 @@ impl Chat<'static> {
         *self.state.write() = Inner {
             focus: Focus::InputBlur,
             auto_accept_edits,
+            system_prompt,
             ..Default::default()
         };
         self.cancellation_guard.reset();
@@ -807,7 +821,8 @@ impl Persistable for Chat<'static> {
                 .block_on(inst.agent.restore_messages(&state.messages));
             state.messages.clear();
         });
-        inst.agent.set_system_prompt(&state.system_prompt);
+        let combined = Agent::build_system_prompt(Some(&state.system_prompt));
+        inst.agent.set_system_prompt(&combined);
         inst.agent.set_auto_accept_edits(auto_accept_edits);
 
         inst.state = State::new(state);
