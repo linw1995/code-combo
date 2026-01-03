@@ -45,7 +45,7 @@ jobs:
       - uses: ./.github/actions/setup-nix
 
       - name: Run integration tests with coverage
-        run: run-cov -- --show-output
+        run: run-cov --all --no-capture
 
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v5
