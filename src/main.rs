@@ -3,6 +3,7 @@ use code_combo::{
     cli::{ClientCommand, handle_client_command, init_client_logging},
     version,
 };
+use snafu::prelude::*;
 
 /// Code Combo client
 #[derive(Debug, Parser)]
@@ -76,5 +77,7 @@ async fn main() -> code_combo::Result<()> {
     };
 
     init_client_logging(&program, &command);
-    handle_client_command(&program, &command_name, command).await
+    handle_client_command(&program, &command_name, command)
+        .await
+        .whatever_context("failed to handle client command")
 }
