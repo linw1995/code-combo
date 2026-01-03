@@ -39,6 +39,7 @@ pub struct SessionEnv {
     temp_dir: TempDir,
     coco_path: PathBuf,
     socket_path: PathBuf,
+    socket_env_name: String,
     envs: Vec<(OsString, OsString)>,
 }
 
@@ -47,6 +48,7 @@ pub struct SessionEnvBuilder {
     binary_path: Option<PathBuf>,
     command_name: String,
     socket_name: String,
+    socket_env_name: String,
 }
 
 impl Default for SessionEnvBuilder {
@@ -55,6 +57,7 @@ impl Default for SessionEnvBuilder {
             binary_path: None,
             command_name: "coco".to_string(),
             socket_name: "coco.sock".to_string(),
+            socket_env_name: "COCO_SESSION_SOCK".to_string(),
         }
     }
 }
@@ -75,10 +78,15 @@ impl SessionEnvBuilder {
         self
     }
 
+    pub fn socket_env_name(mut self, name: impl Into<String>) -> Self {
+        self.socket_env_name = name.into();
+        self
+    }
+
     pub fn build(self) -> Result<SessionEnv> {
         let binary_path = resolve_binary_path(self.binary_path)?;
         let temp_dir = Builder::new()
-            .prefix("coco-session-")
+            .prefix("coco-")
             .tempdir()
             .context(CreateTempDirSnafu)?;
 
@@ -98,7 +106,7 @@ impl SessionEnvBuilder {
         let envs = vec![
             (OsString::from("PATH"), joined_path),
             (
-                OsString::from("COCO_SESSION_SOCK"),
+                OsString::from(self.socket_env_name.clone()),
                 socket_path.clone().into_os_string(),
             ),
         ];
@@ -107,6 +115,7 @@ impl SessionEnvBuilder {
             temp_dir,
             coco_path,
             socket_path,
+            socket_env_name: self.socket_env_name,
             envs,
         })
     }
@@ -123,6 +132,10 @@ impl SessionEnv {
 
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    pub fn socket_env_name(&self) -> &str {
+        &self.socket_env_name
     }
 
     pub fn temp_dir(&self) -> &Path {
@@ -178,6 +191,21 @@ mod tests {
         let first = paths.next().expect("there is at least one path");
         assert_eq!(first, env.temp_dir());
 
+        Ok(())
+    }
+
+    #[test]
+    fn builder_supports_custom_socket_env_name() -> Result<(), Box<dyn std::error::Error>> {
+        let env = SessionEnv::builder()
+            .socket_env_name("CUSTOM_SOCKET_ENV")
+            .build()?;
+        let envs = env.envs();
+        let (_, socket_path) = envs
+            .iter()
+            .find(|(key, _)| key == "CUSTOM_SOCKET_ENV")
+            .expect("custom socket env is set")
+            .clone();
+        assert_eq!(socket_path, env.socket_path().as_os_str());
         Ok(())
     }
 }

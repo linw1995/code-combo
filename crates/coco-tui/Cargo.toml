@@ -16,7 +16,7 @@ coco-macro = { path = "../coco-macro/" }
 anthropic = { path = "../anthropic" }
 
 # CLI
-clap = "4.5.49"
+clap.workspace = true
 
 # Error handling
 snafu = { workspace = true, features = ["backtrace"] }

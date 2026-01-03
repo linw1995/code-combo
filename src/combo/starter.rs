@@ -876,6 +876,12 @@ async fn run_session_server(
                     }
                     first_message = false;
                 }
+                Ok(ClientMessage::Mcp(_)) => {
+                    return Err(InvalidSnafu {
+                        reason: "mcp request is not allowed in combo session".to_string(),
+                    }
+                    .build());
+                }
                 Err(err) => {
                     if !metadata_seen {
                         return Err(InvalidSnafu {

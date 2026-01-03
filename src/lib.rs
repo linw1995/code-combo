@@ -5,7 +5,9 @@ mod combo;
 mod config;
 mod error;
 pub mod exec;
+pub mod global;
 pub mod logging;
+mod mcp;
 mod text_edit;
 pub mod tools;
 pub mod version;
@@ -15,6 +17,7 @@ pub use combo::*;
 pub use config::*;
 pub use error::*;
 pub use exec::*;
+pub use mcp::*;
 pub use text_edit::*;
 
 #[cfg(test)]

@@ -1164,6 +1164,9 @@ impl Component for Chat<'static> {
                     self.update_focus(Focus::InputBlur);
                     self.switch_theme(theme.to_owned());
                 }
+                CommandPaletteAction::Shell => {
+                    self.update_focus(Focus::InputBlur);
+                }
             },
             Action::SubmitPrompt(prompt) => {
                 if self.state.state == ChatState::Ready {
@@ -1316,10 +1319,18 @@ async fn task_combo_execute(
     let session_env = SessionEnv::builder()
         .build()
         .expect("failed to build session");
+    let mcp_envs = match code_combo::tools::prepare_mcp_envs().await {
+        Ok(envs) => envs,
+        Err(err) => {
+            warn!(?err, "failed to prepare mcp envs for combo");
+            Vec::new()
+        }
+    };
     let starter_path = starter.path.clone();
     let mut exit_code: Option<i32> = None;
 
     let mut execution = StarterCommand::new(&starter.path)
+        .envs(mcp_envs)
         .session_env(session_env)
         .execute();
     let mut cancelled = false;
