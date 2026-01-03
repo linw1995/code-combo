@@ -15,7 +15,7 @@ pub async fn handle_metadata(fields: Vec<String>) -> Result<()> {
     };
 
     let MetadataResponse { discovery } = client
-        .send_metadata_with_response(payload)
+        .send_metadata_wait_response(payload)
         .await
         .whatever_context("failed to send metadata to session socket")?;
 

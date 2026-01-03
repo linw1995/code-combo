@@ -1,10 +1,13 @@
+use anthropic::Block as AnthropicBlock;
 use coco_macro::ComponentExt;
+use code_combo::tools::Final;
 use code_combo::{
-    Agent, Block as ChatBlock, Config, Content as ChatContent, Message as ChatMessage, Output,
-    SessionEnv, StarterCommand, StarterError, StarterEvent, StopReason, TextEdit, ToolUse,
-    discover_starters,
+    Agent, Block as ChatBlock, ChatResponse, Config, Content as ChatContent,
+    Message as ChatMessage, Output, SessionEnv, StarterCommand, StarterError, StarterEvent,
+    StopReason, TextEdit, ToolUse, discover_starters,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use futures::StreamExt;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -23,8 +26,9 @@ use tracing::{debug, warn};
 
 use super::{
     Action, AnswerEvent, AskEvent, BotMessage, CacheInvalidation, Combo, ComboAction, ComboEvent,
-    CommandPaletteAction, Component, Event, Input, Message, Messages, Plain, SessionAction,
-    ShortcutHints, ShortcutHintsPanel, Tool, ToolAction, TranscriptMessage,
+    CommandPaletteAction, Component, Event, Input, Message, Messages, NavigationKey,
+    NavigationResult, Plain, SessionAction, ShortcutHints, ShortcutHintsPanel, Tool, ToolAction,
+    TranscriptMessage,
 };
 use crate::{
     components::{CommandPalette, Content, Persistable},
@@ -126,7 +130,6 @@ enum ViewMode {
 }
 
 const CTRL_C_WINDOW: Duration = Duration::from_secs(2);
-
 #[derive(Debug, Default)]
 struct CancellationGuard {
     last_hit: State<Option<Instant>>,
@@ -341,18 +344,30 @@ impl Chat<'static> {
     fn handle_combo_event(&mut self, event: &ComboEvent) {
         debug!(?event, "receive combo event");
         match event {
-            ComboEvent::Discovering | ComboEvent::Executing { .. } | ComboEvent::Output { .. } => {
+            ComboEvent::Discovering
+            | ComboEvent::Executing { .. }
+            | ComboEvent::Output { .. }
+            | ComboEvent::RecordStart { .. }
+            | ComboEvent::RecordOutput { .. }
+            | ComboEvent::RecordEnd { .. }
+            | ComboEvent::Prompt { .. } => {
                 self.set_processing();
             }
             ComboEvent::Executed { starter, .. } => {
-                let combo = starter.combo.as_ref().unwrap();
-                let content = self.build_user_content(ChatContent::Text(combo.to_markdown()));
-                self.spawn_chat_task(content);
+                if let Err(err) = starter.combo.as_ref() {
+                    warn!(?err, "Failed to execute starter");
+                }
+                self.spawn_chat_with_history();
             }
             ComboEvent::Discovered { .. }
             | ComboEvent::NotFound { .. }
             | ComboEvent::Cancelled { .. } => {
                 self.set_ready();
+            }
+            ComboEvent::ReplyToolError { message } => {
+                self.messages
+                    .push(Message::system(Plain::new(message.to_string()).into()));
+                global::trigger_schedule_session_save();
             }
         }
     }
@@ -402,6 +417,11 @@ impl Chat<'static> {
         tokio::task::spawn(task_chat(self.agent.clone(), content, cancel_token));
     }
 
+    fn spawn_chat_with_history(&mut self) {
+        let cancel_token = self.cancellation_guard.start_token();
+        tokio::task::spawn(task_chat_with_history(self.agent.clone(), cancel_token));
+    }
+
     fn spawn_combo_discover(&mut self) {
         let cancel_token = self.cancellation_guard.start_token();
         tokio::task::spawn(task_combo_discover(cancel_token));
@@ -409,7 +429,9 @@ impl Chat<'static> {
 
     fn spawn_combo_execute(&mut self, name: String) {
         let cancel_token = self.cancellation_guard.start_token();
-        tokio::task::spawn(task_combo_execute(name, cancel_token));
+        let system_prompt = self.agent.system_prompt().to_string();
+        let agent = self.agent.clone();
+        tokio::task::spawn(task_combo_execute(name, system_prompt, cancel_token, agent));
     }
 
     fn spawn_tool_use(&mut self, tool_use: &ToolUse) {
@@ -987,10 +1009,12 @@ impl Component for Chat<'static> {
                 }
             }
             (Messages, KM::NONE, Char('k')) => {
-                self.messages.select_prev();
+                let _ = self.messages.handle_navigation(NavigationKey::Up);
             }
             (Messages, KM::NONE, Char('j')) => {
-                if !self.messages.select_next() {
+                if self.messages.handle_navigation(NavigationKey::Down)
+                    == NavigationResult::Boundary
+                {
                     // Move focus to InputBlur when no more messages are available
                     self.messages.blur();
                     self.update_focus(Focus::InputBlur);
@@ -1245,7 +1269,12 @@ async fn task_combo_discover(cancel_token: CancellationToken) {
     .unwrap();
 }
 
-async fn task_combo_execute(name: String, cancel_token: CancellationToken) {
+async fn task_combo_execute(
+    name: String,
+    system_prompt: String,
+    cancel_token: CancellationToken,
+    mut agent: Agent,
+) {
     let tx = global::event_tx();
     let config = global::config().await;
     let combo_dir = config.combo_dir();
@@ -1288,27 +1317,150 @@ async fn task_combo_execute(name: String, cancel_token: CancellationToken) {
         .build()
         .expect("failed to build session");
     let starter_path = starter.path.clone();
+    let mut exit_code: Option<i32> = None;
 
-    let starter = match StarterCommand::new(&starter.path)
+    let mut execution = StarterCommand::new(&starter.path)
         .session_env(session_env)
-        .execute()
-        .consume_with_cancel(cancel_token.clone(), |event| {
-            if let StarterEvent::Output { chunk } = event {
-                tx.send(
-                    ComboEvent::Output {
-                        name: name.clone(),
-                        chunk,
-                    }
-                    .into(),
-                )
-                .unwrap();
+        .execute();
+    let mut cancelled = false;
+    loop {
+        tokio::select! {
+            _ = cancel_token.cancelled(), if !cancelled => {
+                cancelled = true;
+                execution.cancel();
             }
-        })
-        .await
-    {
+            event = execution.next() => {
+                let Some(event) = event else { break };
+                match event {
+                    StarterEvent::Output { chunk } => {
+                        tx.send(
+                            ComboEvent::Output {
+                                name: name.clone(),
+                                chunk,
+                            }
+                            .into(),
+                        )
+                        .unwrap();
+                    }
+                    StarterEvent::RecordOutput { tool_use_id, chunk } => {
+                        tx.send(
+                            ComboEvent::RecordOutput {
+                                name: name.clone(),
+                                tool_use_id,
+                                chunk,
+                            }
+                            .into(),
+                        )
+                        .unwrap();
+                    }
+                    StarterEvent::RecordStart { tool_use } => {
+                        agent
+                            .append_message(build_tool_use_message(&tool_use))
+                            .await;
+                        tx.send(
+                            ComboEvent::RecordStart {
+                                name: name.clone(),
+                                tool_use,
+                            }
+                            .into(),
+                        )
+                        .unwrap();
+                    }
+                    StarterEvent::RecordEnd {
+                        tool_use_id,
+                        is_error,
+                        output,
+                    } => {
+                        agent
+                            .append_message(build_tool_result_message(
+                                &tool_use_id,
+                                is_error,
+                                &output,
+                            ))
+                            .await;
+                        tx.send(
+                            ComboEvent::RecordEnd {
+                                name: name.clone(),
+                                tool_use_id,
+                                is_error,
+                                output,
+                            }
+                            .into(),
+                        )
+                        .unwrap();
+                    }
+                    StarterEvent::Prompt { prompt } => {
+                        agent
+                            .append_message(build_prompt_message(&prompt))
+                            .await;
+                        tx.send(
+                            ComboEvent::Prompt {
+                                name: name.clone(),
+                                prompt,
+                            }
+                            .into(),
+                        )
+                        .unwrap();
+                    }
+                    StarterEvent::PromptRequest {
+                        prompt,
+                        schemas,
+                        responder,
+                    } => {
+                        agent
+                            .append_message(build_prompt_message(&prompt))
+                            .await;
+                        tx.send(
+                            ComboEvent::Prompt {
+                                name: name.clone(),
+                                prompt: prompt.clone(),
+                            }
+                            .into(),
+                        )
+                        .unwrap();
+
+                        let response = if cancel_token.is_cancelled() {
+                            Err("prompt reply cancelled".to_string())
+                        } else {
+                            agent
+                                .reply_prompt(&system_prompt, schemas)
+                                .await
+                                .map(|reply| reply.response)
+                                .map_err(|err| err.to_string())
+                        };
+                        if let Err(err) = &response {
+                            tx.send(
+                                ComboEvent::ReplyToolError {
+                                    message: err.clone(),
+                                }
+                                .into(),
+                            )
+                            .ok();
+                        }
+                        if let Err(err) = responder.send(response) {
+                            tx.send(
+                                ComboEvent::ReplyToolError { message: err }.into(),
+                            )
+                            .ok();
+                        }
+                    }
+                    StarterEvent::Finished { exit_code: code } => {
+                        exit_code = code;
+                    }
+                    _ => (),
+                }
+            }
+        }
+    }
+
+    let starter = match execution.wait().await {
         Ok(starter) => starter,
         Err(err) => {
             warn!(?err, "starter join error");
+            let error_message = format!("Combo execution failed: starter join error: {err}");
+            agent
+                .append_message(ChatMessage::user(ChatContent::Text(error_message)))
+                .await;
             let starter = code_combo::Starter {
                 path: starter_path,
                 combo: Err(StarterError::Invalid {
@@ -1319,6 +1471,7 @@ async fn task_combo_execute(name: String, cancel_token: CancellationToken) {
                 ComboEvent::Executed {
                     name: name.clone(),
                     starter,
+                    exit_code,
                 }
                 .into(),
             )
@@ -1338,14 +1491,57 @@ async fn task_combo_execute(name: String, cancel_token: CancellationToken) {
         return;
     }
 
+    if let Err(err) = starter.combo.as_ref() {
+        let error_message = format!("Combo execution failed: {err}");
+        agent
+            .append_message(ChatMessage::user(ChatContent::Text(error_message)))
+            .await;
+    } else if let Some(code) = exit_code
+        && code != 0
+    {
+        let error_message = format!("Combo execution failed: exit code {code}");
+        agent
+            .append_message(ChatMessage::user(ChatContent::Text(error_message)))
+            .await;
+    }
+
     tx.send(
         ComboEvent::Executed {
             name: name.clone(),
             starter,
+            exit_code,
         }
         .into(),
     )
     .unwrap();
+}
+
+fn build_tool_use_message(tool_use: &ToolUse) -> ChatMessage {
+    ChatMessage::assistant(ChatContent::Multiple(vec![AnthropicBlock::tool_use(
+        &tool_use.id,
+        &tool_use.name,
+        tool_use.input.clone(),
+    )]))
+}
+
+fn build_tool_result_message(tool_use_id: &str, is_error: bool, output: &Final) -> ChatMessage {
+    ChatMessage::user(ChatContent::Multiple(vec![AnthropicBlock::tool_result(
+        tool_use_id,
+        Some(is_error),
+        final_to_content(output),
+    )]))
+}
+
+fn build_prompt_message(prompt: &str) -> ChatMessage {
+    ChatMessage::user(ChatContent::Text(prompt.to_string()))
+}
+
+fn final_to_content(output: &Final) -> ChatContent {
+    let text = match output {
+        Final::Json(value) => serde_json::to_string(value).unwrap_or_else(|_| value.to_string()),
+        Final::Message(message) => message.clone(),
+    };
+    ChatContent::Text(text)
 }
 
 async fn task_chat(mut agent: Agent, content: ChatContent, cancel_token: CancellationToken) {
@@ -1365,11 +1561,37 @@ async fn task_chat(mut agent: Agent, content: ChatContent, cancel_token: Cancell
         chat_resp = agent.chat(msg) => chat_resp.expect("failed to chat with LLM"),
     };
 
+    handle_chat_response(agent, cancel_token, chat_resp).await;
+}
+
+async fn task_chat_with_history(mut agent: Agent, cancel_token: CancellationToken) {
+    let tx = global::event_tx();
+
+    if cancel_token.is_cancelled() {
+        return;
+    }
+    tx.send(Event::Ask(AskEvent::Bot)).unwrap();
+
+    let chat_resp = tokio::select! {
+        _ = cancel_token.cancelled() => {
+            tx.send(AnswerEvent::Cancelled.into()).ok();
+            return;
+        }
+        chat_resp = agent.chat_with_history() => chat_resp.expect("failed to chat with LLM"),
+    };
+
+    handle_chat_response(agent, cancel_token, chat_resp).await;
+}
+
+async fn handle_chat_response(
+    agent: Agent,
+    cancel_token: CancellationToken,
+    chat_resp: ChatResponse,
+) {
+    let tx = global::event_tx();
     let mut to_execute: Vec<code_combo::ToolUse> = vec![];
     let mut bot_messages = match chat_resp.message.content {
-        ChatContent::Text(text) => {
-            vec![BotMessage::Plain(text)]
-        }
+        ChatContent::Text(text) => vec![BotMessage::Plain(text)],
         ChatContent::Multiple(blocks) => {
             to_execute.extend(blocks.iter().filter_map(|b| {
                 if let code_combo::Block::ToolUse(tool_use) = b {

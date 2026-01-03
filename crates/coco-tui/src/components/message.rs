@@ -1,11 +1,11 @@
-use std::any::Any;
+use std::{any::Any, ops::Range};
 
 use coco_macro::ComponentExt;
 use crossterm::event::KeyEvent;
 use ratatui::{Frame, prelude::*, widgets::Paragraph};
 use serde::{Deserialize, Serialize};
 
-use super::{Component, ShortcutHints};
+use super::{Component, NavigationKey, NavigationResult, ShortcutHints};
 use crate::{
     components::{Persistable, Tool},
     error::*,
@@ -24,6 +24,11 @@ pub enum Role {
 pub trait Content {
     /// the height of content rect.
     fn height(&self, width: u16) -> usize;
+
+    /// Provide a focused range (relative to the content area) for auto scrolling.
+    fn focus_range(&self, _width: u16) -> Option<Range<u16>> {
+        None
+    }
 
     /// Check if the content is actionable.
     fn is_actionable(&self) -> bool {
@@ -73,6 +78,12 @@ pub struct Message {
 struct Inner {
     pub role: Role,
     pub content_type_id: String,
+    #[serde(default = "default_show_role_prefix")]
+    pub show_role_prefix: bool,
+}
+
+fn default_show_role_prefix() -> bool {
+    true
 }
 
 impl Message {
@@ -81,6 +92,7 @@ impl Message {
             state: Inner {
                 role: Role::Bot,
                 content_type_id: content.id().to_string(),
+                show_role_prefix: true,
             },
             content,
         }
@@ -91,6 +103,7 @@ impl Message {
             state: Inner {
                 role: Role::User,
                 content_type_id: content.id().to_string(),
+                show_role_prefix: true,
             },
             content,
         }
@@ -101,9 +114,15 @@ impl Message {
             state: Inner {
                 role: Role::System,
                 content_type_id: content.id().to_string(),
+                show_role_prefix: true,
             },
             content,
         }
+    }
+
+    pub fn with_role_prefix(mut self, show_role_prefix: bool) -> Self {
+        self.state.show_role_prefix = show_role_prefix;
+        self
     }
 
     pub fn is_same_tool_id(&self, id: &str) -> bool {
@@ -123,9 +142,24 @@ impl Content for Message {
             Role::Bot => 6,
             Role::System => 2, // margin width for system messages (no role prefix)
         };
+        let role_width = if self.state.show_role_prefix {
+            role_width
+        } else {
+            2
+        };
         let bottom_padding = 1;
         let content_height = self.content.height(width.saturating_sub(role_width));
         content_height + bottom_padding
+    }
+
+    fn focus_range(&self, width: u16) -> Option<Range<u16>> {
+        let role_width = match self.state.role {
+            Role::User => 7,
+            Role::Bot => 6,
+            Role::System => 2,
+        };
+        let content_width = width.saturating_sub(role_width);
+        self.content.focus_range(content_width)
     }
 
     fn is_actionable(&self) -> bool {
@@ -159,27 +193,32 @@ impl Component for Message {
         self.content.handle_key_event(event);
     }
 
+    fn handle_navigation(&mut self, key: NavigationKey) -> NavigationResult {
+        self.content.handle_navigation(key)
+    }
+
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         use Constraint::*;
 
-        let area_content = if !matches!(self.state.role, Role::System) {
-            let [area_role, area_content] = Layout::horizontal([Length(8), Min(1)]).areas(area);
+        let area_content =
+            if self.state.show_role_prefix && !matches!(self.state.role, Role::System) {
+                let [area_role, area_content] = Layout::horizontal([Length(8), Min(1)]).areas(area);
 
-            let theme = global::theme();
-            let paragraph = Paragraph::new(Line::from(match self.state.role {
-                Role::User => Span::styled(" User: ", theme.ui.user_role),
-                Role::Bot => Span::styled(" Bot: ", theme.ui.bot_role),
-                _ => unreachable!(),
-            }));
-            frame.render_widget(paragraph, area_role);
+                let theme = global::theme();
+                let paragraph = Paragraph::new(Line::from(match self.state.role {
+                    Role::User => Span::styled(" User: ", theme.ui.user_role),
+                    Role::Bot => Span::styled(" Bot: ", theme.ui.bot_role),
+                    _ => unreachable!(),
+                }));
+                frame.render_widget(paragraph, area_role);
 
-            area_content
-        } else {
-            area.inner(Margin {
-                horizontal: 1,
-                vertical: 0,
-            })
-        };
+                area_content
+            } else {
+                area.inner(Margin {
+                    horizontal: 1,
+                    vertical: 0,
+                })
+            };
         self.content.draw(frame, area_content)?;
 
         Ok(())

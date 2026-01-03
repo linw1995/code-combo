@@ -20,6 +20,12 @@ enum Commands {
         fields: Vec<String>,
     },
     Ask {
+        /// Ask the model to reply via a tool call
+        #[arg(long, requires = "schemas")]
+        reply: bool,
+        /// Response schemas in field:description format (repeatable)
+        #[arg(long, value_name = "field:description")]
+        schemas: Vec<String>,
         /// Prompt text to send via session socket (or read from stdin when omitted)
         #[arg(trailing_var_arg = true)]
         prompt: Vec<String>,
@@ -41,7 +47,15 @@ async fn main() -> code_combo::Result<()> {
     let args = Args::parse();
     let command = match args.command {
         Commands::Metadata { fields } => ClientCommand::Metadata { fields },
-        Commands::Ask { prompt } => ClientCommand::Ask { prompt },
+        Commands::Ask {
+            prompt,
+            reply,
+            schemas,
+        } => ClientCommand::Ask {
+            prompt,
+            reply,
+            schemas,
+        },
         Commands::Record {
             wrap_result,
             command,
