@@ -275,6 +275,10 @@ impl Chat<'static> {
         if state.focus == Focus::ShortcutHints {
             state.focus = self.prev_focus.clone().unwrap_or_default();
         }
+        if state.state == ChatState::Procesing {
+            // Persist Ready to avoid restoring a stale processing state.
+            state.state = ChatState::Ready;
+        }
         let messages = self.messages.save();
         let agent = self.agent.clone();
 
