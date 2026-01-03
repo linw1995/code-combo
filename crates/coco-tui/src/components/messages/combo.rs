@@ -158,7 +158,7 @@ impl Combo {
         self.state.write().view = ComboView::Messages;
         let executing = tool_use.clone();
         self.messages
-            .push(Message::user(Tool::new(tool_use).into()));
+            .push(Message::user(Tool::new(tool_use).into()).with_role_prefix(false));
         self.messages
             .apply_action_to_last(&Action::Tool(ToolAction::GrantSession(executing)));
         self.has_child_output = false;
@@ -167,7 +167,7 @@ impl Combo {
     fn push_prompt(&mut self, prompt: &str) {
         self.state.write().view = ComboView::Messages;
         self.messages
-            .push(Message::user(Plain::new(prompt.to_string()).into()));
+            .push(Message::user(Plain::new(prompt.to_string()).into()).with_role_prefix(false));
     }
 
     fn forward_output_to_child(&mut self, tool_use_id: &str, chunk: &OutputChunk) -> bool {
@@ -276,8 +276,9 @@ impl Combo {
                     state.display_state.expand();
                     drop(state);
                     if let Some(message) = error_message {
-                        self.messages
-                            .push(Message::system(Plain::new(message).into()));
+                        self.messages.push(
+                            Message::system(Plain::new(message).into()).with_role_prefix(false),
+                        );
                     }
                     self.has_child_output = false;
                 }
