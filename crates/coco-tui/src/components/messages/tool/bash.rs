@@ -52,6 +52,8 @@ pub struct Bash<'a> {
     output_text: Paragraph<'a>,
     output_markers: Option<Paragraph<'a>>,
     theme_dirty: bool,
+    is_focused: bool,
+    defer_auto_collapse: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,6 +179,8 @@ impl<'a> Bash<'a> {
             output_text: Paragraph::new(Vec::new()),
             output_markers: None,
             theme_dirty: false,
+            is_focused: false,
+            defer_auto_collapse: false,
         };
         component.rebuild_output();
         Ok(component)
@@ -470,6 +474,8 @@ impl Persistable for Bash<'static> {
             output_markers: None,
             state: global::State::new(state),
             theme_dirty: false,
+            is_focused: false,
+            defer_auto_collapse: false,
         };
         component.rebuild_output();
         Ok(component)
@@ -503,9 +509,16 @@ impl Component for Bash<'static> {
                 };
                 let display_state =
                     display_state_for_output(self.exec_output(), self.state.display_state);
-                let mut state = self.state.write();
-                state.display_state = display_state;
-                drop(state);
+                {
+                    let mut state = self.state.write();
+                    state.display_state = display_state;
+                }
+                self.defer_auto_collapse = self.is_focused
+                    && matches!(display_state, FoldState::Preview)
+                    && self
+                        .exec_output()
+                        .is_some_and(|output| output.exit_code == 0)
+                    && self.has_output_content();
                 self.set_requiring_confirmation(false);
             }
             _ => (),
@@ -586,25 +599,35 @@ impl Component for Bash<'static> {
     }
 
     fn update(&mut self, action: &Action) {
-        if !matches!(action, Action::Blur) {
-            return;
+        match action {
+            Action::Focus => {
+                self.is_focused = true;
+            }
+            Action::Blur => {
+                self.is_focused = false;
+                if self.defer_auto_collapse {
+                    self.defer_auto_collapse = false;
+                    return;
+                }
+                if self.requiring_confirmation() {
+                    return;
+                }
+                if !self.has_output_content() {
+                    return;
+                }
+                if self.state.display_state != FoldState::Preview {
+                    return;
+                }
+                let Some(output) = self.exec_output() else {
+                    return;
+                };
+                if output.exit_code != 0 {
+                    return;
+                }
+                self.state.write().display_state.collapse();
+            }
+            _ => (),
         }
-        if self.requiring_confirmation() {
-            return;
-        }
-        if !self.has_output_content() {
-            return;
-        }
-        if self.state.display_state != FoldState::Preview {
-            return;
-        }
-        let Some(output) = self.exec_output() else {
-            return;
-        };
-        if output.exit_code != 0 {
-            return;
-        }
-        self.state.write().display_state.collapse();
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
@@ -767,6 +790,28 @@ mod tests {
         assert_eq!(bash.state.display_state, FoldState::Expanded);
         bash.update(&Action::Blur);
         assert_eq!(bash.state.display_state, FoldState::Expanded);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bash_delays_auto_collapse_until_next_blur_when_focused() {
+        let tool_use = tool_use();
+        let mut bash = Bash::try_new().tool_use(&tool_use).call().unwrap();
+        bash.update(&Action::Focus);
+
+        let value = serde_json::to_value(bash_output()).unwrap();
+        bash.handle_event(&Event::Answer(AnswerEvent::ToolResult {
+            id: "tool_1".to_string(),
+            is_error: false,
+            is_user_cancelled: false,
+            output: Final::Json(value),
+        }));
+        assert_eq!(bash.state.display_state, FoldState::Preview);
+
+        bash.update(&Action::Blur);
+        assert_eq!(bash.state.display_state, FoldState::Preview);
+
+        bash.update(&Action::Blur);
+        assert_eq!(bash.state.display_state, FoldState::Collapsed);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
