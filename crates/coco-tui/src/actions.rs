@@ -43,7 +43,7 @@ impl Action {
 #[derive(Debug, Clone)]
 pub enum ComboAction {
     Discover,
-    Execute { name: String },
+    Execute { name: String, args: Vec<String> },
 }
 
 impl From<ComboAction> for Action {
