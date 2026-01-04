@@ -730,7 +730,8 @@ impl Content for Combo {
     fn height(&self, width: u16) -> usize {
         let border_height: usize = 1;
         if self.has_collapsible_body() && self.state.display_state.is_collapsed() {
-            return border_height;
+            let command_height = self.command_height(width) as usize;
+            return border_height.saturating_add(command_height);
         }
         let body_height = match self.state.view {
             ComboView::Messages => self.messages_body_height(width),
@@ -914,6 +915,8 @@ impl Component for Combo {
         frame.render_widget(&block, area);
 
         if self.has_collapsible_body() && self.state.display_state.is_collapsed() {
+            let output_area = block.inner(area);
+            self.draw_command(frame, output_area)?;
             return Ok(());
         }
 
