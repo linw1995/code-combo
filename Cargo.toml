@@ -63,7 +63,7 @@ tokio-util.workspace = true
 async-trait = "0.1.89"
 futures-core.workspace = true
 futures-util.workspace = true
-rmcp = { version = "0.10", features = [
+rmcp = { version = "0.12", features = [
   "client",
   "reqwest",
   "transport-streamable-http-client-reqwest",

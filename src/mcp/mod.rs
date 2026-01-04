@@ -667,6 +667,7 @@ pub(crate) mod tests {
                     StreamableHttpServerConfig {
                         stateful_mode: true,
                         sse_keep_alive: None,
+                        cancellation_token: CancellationToken::new(),
                     },
                 );
             let listener = TcpListener::bind("127.0.0.1:0")
