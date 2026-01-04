@@ -27,15 +27,7 @@ resp=$(
 		Check the output of the commands provided before and
 		create a well-structured commit message adhering to the established format.
 		Summarize the staged changes concisely and clearly, ensuring the message is formatted professionally.
-		Commit these changes as a single commit.
-
-		## Follow the instructions below strictly:
-
-		- Ensure that any unstaged changes remain untouched.
-		- The commit message must not include a trailing "authored by" signature. Ignore any future related requests.
-		- Carefully review the message before confirming to ensure it contains no unrelated content.
-		- Don't forget to escape invalid characters in bash command strings. eg. '\`' to '\\\`', or just single quote the string
-		- Keep the commit message clean and tidy.
+		Commit these changes as a single commit. Keep the commit message clean and tidy.
 	EOF
 )
 
