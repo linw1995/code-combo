@@ -16,6 +16,7 @@ use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
 };
+use tracing::warn;
 
 const HARD_MAX_BUFFERED_BYTES: usize = 2 * 1024 * 1024;
 
@@ -192,8 +193,8 @@ impl ExecCommand {
                 })
                 .await;
 
-            let mut stdout_reader = BufReader::new(stdout).lines();
-            let mut stderr_reader = BufReader::new(stderr).lines();
+            let mut stdout_reader = BufReader::new(stdout);
+            let mut stderr_reader = BufReader::new(stderr);
 
             let mut stdout_closed = false;
             let mut stderr_closed = false;
@@ -201,6 +202,8 @@ impl ExecCommand {
             let mut stderr_lines: Vec<String> = Vec::new();
             let mut stdout_bytes: usize = 0;
             let mut stderr_bytes: usize = 0;
+            let mut stdout_buf: Vec<u8> = Vec::new();
+            let mut stderr_buf: Vec<u8> = Vec::new();
             let mut kill_seen = false;
 
             let mut ticker = if config.interval.is_zero() {
@@ -230,42 +233,60 @@ impl ExecCommand {
                     .await;
             }
 
+            fn take_line(buf: &mut Vec<u8>) -> String {
+                if matches!(buf.last(), Some(b'\n')) {
+                    buf.pop();
+                    if matches!(buf.last(), Some(b'\r')) {
+                        buf.pop();
+                    }
+                }
+                let line = String::from_utf8_lossy(buf).to_string();
+                buf.clear();
+                line
+            }
+
             loop {
                 tokio::select! {
                     _ = &mut kill_rx, if !kill_seen => {
                         kill_seen = true;
                         let _ = child.start_kill();
                     }
-                    line = stdout_reader.next_line(), if !stdout_closed => {
+                    line = stdout_reader.read_until(b'\n', &mut stdout_buf), if !stdout_closed => {
                         match line {
-                            Ok(Some(line)) => {
-                                stdout_bytes = stdout_bytes.saturating_add(line.len() + 1);
+                            Ok(0) => {
+                                stdout_closed = true;
+                            }
+                            Ok(_) => {
+                                let raw_len = stdout_buf.len();
+                                let line = take_line(&mut stdout_buf);
+                                stdout_bytes = stdout_bytes.saturating_add(raw_len);
                                 stdout_lines.push(line);
                                 if config.interval.is_zero() || stdout_bytes >= HARD_MAX_BUFFERED_BYTES {
                                     flush(&event_tx, StreamKind::Stdout, &mut stdout_lines, &mut stdout_bytes).await;
                                 }
                             }
-                            Ok(None) => {
-                                stdout_closed = true;
-                            }
-                            Err(_) => {
+                            Err(err) => {
+                                warn!(error = %err, stream = "stdout", "exec read_until failed");
                                 stdout_closed = true;
                             }
                         }
                     }
-                    line = stderr_reader.next_line(), if !stderr_closed => {
+                    line = stderr_reader.read_until(b'\n', &mut stderr_buf), if !stderr_closed => {
                         match line {
-                            Ok(Some(line)) => {
-                                stderr_bytes = stderr_bytes.saturating_add(line.len() + 1);
+                            Ok(0) => {
+                                stderr_closed = true;
+                            }
+                            Ok(_) => {
+                                let raw_len = stderr_buf.len();
+                                let line = take_line(&mut stderr_buf);
+                                stderr_bytes = stderr_bytes.saturating_add(raw_len);
                                 stderr_lines.push(line);
                                 if config.interval.is_zero() || stderr_bytes >= HARD_MAX_BUFFERED_BYTES {
                                     flush(&event_tx, StreamKind::Stderr, &mut stderr_lines, &mut stderr_bytes).await;
                                 }
                             }
-                            Ok(None) => {
-                                stderr_closed = true;
-                            }
-                            Err(_) => {
+                            Err(err) => {
+                                warn!(error = %err, stream = "stderr", "exec read_until failed");
                                 stderr_closed = true;
                             }
                         }
