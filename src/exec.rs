@@ -16,6 +16,7 @@ use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
 };
+use tracing::warn;
 
 const HARD_MAX_BUFFERED_BYTES: usize = 2 * 1024 * 1024;
 
@@ -264,7 +265,8 @@ impl ExecCommand {
                                     flush(&event_tx, StreamKind::Stdout, &mut stdout_lines, &mut stdout_bytes).await;
                                 }
                             }
-                            Err(_) => {
+                            Err(err) => {
+                                warn!(error = %err, stream = "stdout", "exec read_until failed");
                                 stdout_closed = true;
                             }
                         }
@@ -283,7 +285,8 @@ impl ExecCommand {
                                     flush(&event_tx, StreamKind::Stderr, &mut stderr_lines, &mut stderr_bytes).await;
                                 }
                             }
-                            Err(_) => {
+                            Err(err) => {
+                                warn!(error = %err, stream = "stderr", "exec read_until failed");
                                 stderr_closed = true;
                             }
                         }
