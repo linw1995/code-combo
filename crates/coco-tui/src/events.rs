@@ -66,6 +66,7 @@ pub enum ComboEvent {
 
     Executing {
         name: String,
+        command_line: String,
     },
     RecordStart {
         name: String,

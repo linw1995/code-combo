@@ -78,7 +78,12 @@ enum Commands {
 
 #[derive(Subcommand, Clone)]
 enum ComboCommands {
-    Run { name: String },
+    Run {
+        name: String,
+        /// Arguments passed to the combo starter
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 impl TryFrom<Commands> for ClientCommand {
@@ -168,8 +173,8 @@ async fn main() -> Result<()> {
     }
     match args.command {
         Some(Commands::Combo(combo_cmd)) => match combo_cmd {
-            ComboCommands::Run { name } => {
-                app.send_action(ComboAction::Execute { name }.into());
+            ComboCommands::Run { name, args } => {
+                app.send_action(ComboAction::Execute { name, args }.into());
             }
         },
         Some(

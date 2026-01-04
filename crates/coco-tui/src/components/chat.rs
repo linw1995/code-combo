@@ -443,11 +443,17 @@ impl Chat<'static> {
         tokio::task::spawn(task_combo_discover(cancel_token));
     }
 
-    fn spawn_combo_execute(&mut self, name: String) {
+    fn spawn_combo_execute(&mut self, name: String, args: Vec<String>) {
         let cancel_token = self.cancellation_guard.start_token();
         let system_prompt = self.agent.system_prompt().to_string();
         let agent = self.agent.clone();
-        tokio::task::spawn(task_combo_execute(name, system_prompt, cancel_token, agent));
+        tokio::task::spawn(task_combo_execute(
+            name,
+            args,
+            system_prompt,
+            cancel_token,
+            agent,
+        ));
     }
 
     fn spawn_tool_use(&mut self, tool_use: &ToolUse) {
@@ -1076,10 +1082,10 @@ impl Component for Chat<'static> {
                 ComboAction::Discover => {
                     self.spawn_combo_discover();
                 }
-                ComboAction::Execute { name } => {
+                ComboAction::Execute { name, args } => {
                     let combo = Combo::new(name);
                     self.messages.push(Message::user(combo.into()));
-                    self.spawn_combo_execute(name.clone());
+                    self.spawn_combo_execute(name.clone(), args.clone());
                     debug!("Combo message pushed");
                 }
             },
@@ -1291,8 +1297,33 @@ async fn task_combo_discover(cancel_token: CancellationToken) {
     .unwrap();
 }
 
+fn format_command_line(command: &str, args: &[String]) -> String {
+    let command = resolve_command_display(command);
+    if args.is_empty() {
+        return command;
+    }
+    let mut line = String::with_capacity(command.len() + 1);
+    line.push_str(&command);
+    for arg in args {
+        line.push(' ');
+        line.push_str(arg);
+    }
+    line
+}
+
+fn resolve_command_display(command: &str) -> String {
+    let command_path = std::path::Path::new(command);
+    let workspace_combo_dir = global::workspace_combo_dir();
+    if let Ok(relative) = command_path.strip_prefix(&workspace_combo_dir) {
+        let display_path = std::path::Path::new(".coco/combos").join(relative);
+        return display_path.to_string_lossy().to_string();
+    }
+    command.to_string()
+}
+
 async fn task_combo_execute(
     name: String,
+    args: Vec<String>,
     system_prompt: String,
     cancel_token: CancellationToken,
     mut agent: Agent,
@@ -1331,9 +1362,17 @@ async fn task_combo_execute(
         return;
     };
 
+    let command_line = format_command_line(&starter.path, &args);
+
     // Skip the `ComboEvent::Discovered` event and advance directly to `ComboEvent::Executing`
-    tx.send(ComboEvent::Executing { name: name.clone() }.into())
-        .unwrap();
+    tx.send(
+        ComboEvent::Executing {
+            name: name.clone(),
+            command_line,
+        }
+        .into(),
+    )
+    .unwrap();
 
     let session_env = SessionEnv::builder()
         .build()
@@ -1349,6 +1388,7 @@ async fn task_combo_execute(
     let mut exit_code: Option<i32> = None;
 
     let mut execution = StarterCommand::new(&starter.path)
+        .args(args)
         .envs(mcp_envs)
         .session_env(session_env)
         .execute();

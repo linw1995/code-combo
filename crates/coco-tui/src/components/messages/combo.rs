@@ -14,14 +14,15 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 
 use code_combo::{OutputChunk, StreamKind, ToolUse, tools::Final};
+use code_highlight::Lang;
 
 use super::fold::FoldState;
 use super::streaming::StreamedLines;
 use crate::{
     actions::{Action, ToolAction},
     components::{
-        Component, Content, ContentComponent, Message, Messages, NavigationKey, NavigationResult,
-        Persistable, Plain, ShortcutHints, Tool,
+        CodeHighlight, Component, Content, ContentComponent, Message, Messages, NavigationKey,
+        NavigationResult, Persistable, Plain, ShortcutHints, Tool,
     },
     error::*,
     events::{AnswerEvent, ComboEvent, Event},
@@ -54,6 +55,8 @@ enum ComboView {
 #[derive(Serialize, Deserialize)]
 struct Inner {
     name: String,
+    #[serde(default)]
+    command_line: String,
     is_error: bool,
     starter_state: StarterState,
     #[serde(default = "default_display_state")]
@@ -68,6 +71,7 @@ impl Default for Inner {
     fn default() -> Self {
         Self {
             name: String::new(),
+            command_line: String::new(),
             is_error: false,
             starter_state: StarterState::default(),
             display_state: default_display_state(),
@@ -81,6 +85,7 @@ impl Default for Inner {
 #[component(type_id = "combo")]
 pub struct Combo {
     state: State<Inner>,
+    command: Option<CodeHighlight<'static>>,
     messages: Messages,
     preview_lines: StreamedLines,
     is_focused: bool,
@@ -92,6 +97,9 @@ pub struct Combo {
 
 const LIMIT: usize = 10;
 const STREAM_MARKER: &str = "▐";
+const COMMAND_PROMPT: &str = "$";
+const COMMAND_SPACING: u16 = 1;
+const COMMAND_PADDING: u16 = 1;
 
 fn default_display_state() -> FoldState {
     FoldState::Collapsed
@@ -108,6 +116,7 @@ impl Combo {
                 name: name.to_string(),
                 ..Default::default()
             }),
+            command: None,
             messages: Messages::default(),
             preview_lines: default_preview_lines(),
             is_focused: false,
@@ -150,6 +159,35 @@ impl Combo {
         self.preview_lines = StreamedLines::new(Some(LIMIT));
     }
 
+    fn update_command_line(&mut self, command_line: String) {
+        self.state.write().command_line = command_line.clone();
+        self.command = Self::build_command_highlight(&command_line);
+    }
+
+    fn command_height(&self, width: u16) -> u16 {
+        let Some(command) = self.command.as_ref() else {
+            return 0;
+        };
+        let width = width.max(1);
+        let prompt_width = COMMAND_PROMPT.len().max(1) as u16;
+        let spacing_width = COMMAND_SPACING;
+        if width <= prompt_width + spacing_width {
+            return 1 + COMMAND_PADDING.saturating_mul(2);
+        }
+        let content_width = width.saturating_sub(prompt_width + spacing_width).max(1);
+        let command_height = u16::try_from(command.height(content_width)).unwrap_or(u16::MAX);
+        command_height
+            .max(1)
+            .saturating_add(COMMAND_PADDING.saturating_mul(2))
+    }
+
+    fn build_command_highlight(command_line: &str) -> Option<CodeHighlight<'static>> {
+        if command_line.trim().is_empty() {
+            return None;
+        }
+        Some(CodeHighlight::try_new(command_line, Lang::Bash).expect("failed to new CodeHighlight"))
+    }
+
     fn push_record_tool_use(&mut self, tool_use: ToolUse) {
         self.state.write().view = ComboView::Messages;
         let executing = tool_use.clone();
@@ -187,6 +225,56 @@ impl Combo {
             output,
         });
         self.messages.on_tool_event(&event).is_some()
+    }
+
+    fn draw_command(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        let Some(command) = self.command.as_mut() else {
+            return Ok(());
+        };
+        if area.height == 0 {
+            return Ok(());
+        }
+        if area.height <= COMMAND_PADDING.saturating_mul(2) {
+            return Ok(());
+        }
+        let theme = global::theme();
+        let prompt_width = COMMAND_PROMPT.len().max(1) as u16;
+        let spacing_width = COMMAND_SPACING;
+        let [area_pad_top, area_body, area_pad_bottom] = Layout::vertical([
+            Constraint::Length(COMMAND_PADDING),
+            Constraint::Min(1),
+            Constraint::Length(COMMAND_PADDING),
+        ])
+        .areas(area);
+        frame.render_widget(Paragraph::new(vec![Line::from("")]), area_pad_top);
+        frame.render_widget(Paragraph::new(vec![Line::from("")]), area_pad_bottom);
+
+        if area_body.width <= prompt_width + spacing_width {
+            frame.render_widget(
+                Paragraph::new(vec![Line::from(Span::styled(
+                    COMMAND_PROMPT,
+                    theme.ui.tool_label,
+                ))]),
+                area_body,
+            );
+            return Ok(());
+        }
+        let [area_prompt, area_gap, area_text] = Layout::horizontal([
+            Constraint::Length(prompt_width),
+            Constraint::Length(spacing_width),
+            Constraint::Min(1),
+        ])
+        .areas(area_body);
+        frame.render_widget(
+            Paragraph::new(vec![Line::from(Span::styled(
+                COMMAND_PROMPT,
+                theme.ui.tool_label,
+            ))]),
+            area_prompt,
+        );
+        command.draw(frame, area_text)?;
+        frame.render_widget(Paragraph::new(vec![Line::from(" ")]), area_gap);
+        Ok(())
     }
 
     fn on_combo_event(&mut self, event: &ComboEvent) {
@@ -230,7 +318,7 @@ impl Combo {
                     self.push_prompt(prompt);
                 }
             }
-            ComboEvent::Executing { name } => {
+            ComboEvent::Executing { name, command_line } => {
                 if &self.state.name == name {
                     self.clear_child_focus();
                     self.has_child_output = false;
@@ -243,6 +331,7 @@ impl Combo {
                     state.output_chunks.clear();
                     state.display_state.expand();
                     drop(state);
+                    self.update_command_line(command_line.clone());
                     self.preview_lines = StreamedLines::new(Some(LIMIT));
                     self.messages.clear();
                 }
@@ -333,8 +422,12 @@ impl Combo {
         !self.messages.is_empty()
     }
 
+    fn has_command_content(&self) -> bool {
+        self.command.is_some()
+    }
+
     fn has_body_content(&self) -> bool {
-        self.has_message_content() || self.has_stream_content()
+        self.has_command_content() || self.has_message_content() || self.has_stream_content()
     }
 
     fn has_stream_content(&self) -> bool {
@@ -373,6 +466,7 @@ impl Combo {
     }
 
     fn messages_body_height(&self, width: u16) -> u16 {
+        let command_height = self.command_height(width);
         let messages_height =
             u16::try_from(self.messages.height_for_width(width)).unwrap_or(u16::MAX);
         let preview_height = if matches!(self.state.starter_state, StarterState::Executing)
@@ -388,17 +482,19 @@ impl Combo {
         } else {
             0
         };
-        messages_height
+        command_height
+            .saturating_add(messages_height)
             .saturating_add(spacing)
             .saturating_add(preview_height)
     }
 
-    fn stream_line_count(&self, view: ComboView) -> u16 {
-        if self.has_child_output || self.combo_stream_suppressed {
-            return 0;
-        }
+    fn stream_line_count(&self, width: u16, view: ComboView) -> u16 {
         if matches!(view, ComboView::Messages) {
             return 0;
+        }
+        let command_height = self.command_height(width);
+        if self.has_child_output || self.combo_stream_suppressed {
+            return command_height;
         }
         let total = self
             .state
@@ -407,7 +503,7 @@ impl Combo {
             .filter(|chunk| Self::matches_stream_view(view, chunk.stream))
             .map(|chunk| chunk.lines.len())
             .sum::<usize>();
-        u16::try_from(total).unwrap_or(u16::MAX)
+        command_height.saturating_add(u16::try_from(total).unwrap_or(u16::MAX))
     }
 
     fn matches_stream_view(view: ComboView, stream: StreamKind) -> bool {
@@ -423,6 +519,7 @@ impl Combo {
         if area.height == 0 {
             return Ok(());
         }
+        let command_height = self.command_height(area.width);
         let messages_height =
             u16::try_from(self.messages.height_for_width(area.width)).unwrap_or(u16::MAX);
         let preview_height = if matches!(self.state.starter_state, StarterState::Executing)
@@ -440,6 +537,9 @@ impl Combo {
         };
 
         let mut rows = Vec::new();
+        if command_height > 0 {
+            rows.push(Constraint::Length(command_height));
+        }
         if messages_height > 0 {
             rows.push(Constraint::Length(messages_height));
         }
@@ -456,6 +556,10 @@ impl Combo {
 
         let chunks = Layout::vertical(rows).split(area);
         let mut idx = 0;
+        if command_height > 0 {
+            self.draw_command(frame, chunks[idx])?;
+            idx += 1;
+        }
         if messages_height > 0 {
             self.messages.draw_inline(frame, chunks[idx])?;
             idx += 1;
@@ -475,7 +579,18 @@ impl Combo {
             return Ok(());
         }
         let (output, markers) = self.render_stream_lines(view);
-        self.draw_stream_section(frame, area, &output, markers.as_ref());
+        let command_height = self.command_height(area.width);
+        if command_height == 0 {
+            self.draw_stream_section(frame, area, &output, markers.as_ref());
+            return Ok(());
+        }
+
+        use Constraint::Length;
+        let remaining_height = area.height.saturating_sub(command_height);
+        let [area_command, area_output] =
+            Layout::vertical([Length(command_height), Length(remaining_height)]).areas(area);
+        self.draw_command(frame, area_command)?;
+        self.draw_stream_section(frame, area_output, &output, markers.as_ref());
         Ok(())
     }
 
@@ -613,13 +728,14 @@ impl Combo {
 
 impl Content for Combo {
     fn height(&self, width: u16) -> usize {
-        let border_height = 1;
+        let border_height: usize = 1;
         if self.has_collapsible_body() && self.state.display_state.is_collapsed() {
-            return border_height;
+            let command_height = self.command_height(width) as usize;
+            return border_height.saturating_add(command_height);
         }
         let body_height = match self.state.view {
             ComboView::Messages => self.messages_body_height(width),
-            view => self.stream_line_count(view),
+            view => self.stream_line_count(width, view),
         };
         body_height as usize + border_height
     }
@@ -638,10 +754,12 @@ impl Content for Combo {
         if self.has_collapsible_body() && self.state.display_state.is_collapsed() {
             return None;
         }
-        let border_height = 1;
+        let border_height: u16 = 1;
+        let command_height = self.command_height(width);
         let range = self.messages.focus_range(width, 0)?;
-        let start = range.start.saturating_add(border_height);
-        let end = range.end.saturating_add(border_height);
+        let offset = border_height.saturating_add(command_height);
+        let start = range.start.saturating_add(offset);
+        let end = range.end.saturating_add(offset);
         Some(start..end)
     }
 
@@ -691,9 +809,11 @@ impl Persistable for Combo {
 
     fn load(session: Session) -> Result<Self> {
         let (state, messages): (Inner, Session) = session::load_related(session)?;
+        let command = Self::build_command_highlight(&state.command_line);
         let preview_lines = StreamedLines::from_chunks(&state.output_chunks, Some(LIMIT));
         let combo = Self {
             state: State::new(state),
+            command,
             messages: Messages::load(messages)?,
             preview_lines,
             is_focused: false,
@@ -708,7 +828,12 @@ impl Persistable for Combo {
 
 impl Component for Combo {
     fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
-        Box::new(vec![&mut self.messages as &mut dyn Component].into_iter())
+        let mut children: Vec<&mut dyn Component> = Vec::with_capacity(2);
+        if let Some(command) = self.command.as_mut() {
+            children.push(command);
+        }
+        children.push(&mut self.messages);
+        Box::new(children.into_iter())
     }
 
     fn handle_key_event(&mut self, key: &KeyEvent) {
@@ -790,6 +915,8 @@ impl Component for Combo {
         frame.render_widget(&block, area);
 
         if self.has_collapsible_body() && self.state.display_state.is_collapsed() {
+            let output_area = block.inner(area);
+            self.draw_command(frame, output_area)?;
             return Ok(());
         }
 
@@ -889,6 +1016,7 @@ mod tests {
         let mut combo = Combo::new("demo");
         combo.handle_event(&Event::Combo(ComboEvent::Executing {
             name: "demo".to_string(),
+            command_line: "demo".to_string(),
         }));
         combo.handle_event(&Event::Combo(ComboEvent::Output {
             name: "demo".to_string(),
@@ -899,9 +1027,9 @@ mod tests {
             },
         }));
 
-        assert_eq!(combo.height(80), 3);
+        assert_eq!(combo.height(80), 6);
         combo.handle_key_event(&test_key_z());
-        assert_eq!(combo.height(80), 3);
+        assert_eq!(combo.height(80), 6);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -942,6 +1070,7 @@ mod tests {
         let mut combo = Combo::new("demo");
         combo.handle_event(&Event::Combo(ComboEvent::Executing {
             name: "demo".to_string(),
+            command_line: "demo".to_string(),
         }));
         combo.handle_event(&Event::Combo(ComboEvent::RecordStart {
             name: "demo".to_string(),
@@ -986,6 +1115,7 @@ mod tests {
         let mut combo = Combo::new("demo");
         combo.handle_event(&Event::Combo(ComboEvent::Executing {
             name: "demo".to_string(),
+            command_line: "demo".to_string(),
         }));
         combo.handle_event(&Event::Combo(ComboEvent::RecordStart {
             name: "demo".to_string(),
@@ -1029,6 +1159,7 @@ mod tests {
         let tool_use = make_tool_use("combo_record_demo_0", "echo 1");
         combo.handle_event(&Event::Combo(ComboEvent::Executing {
             name: "demo".to_string(),
+            command_line: "demo".to_string(),
         }));
         combo.handle_event(&Event::Combo(ComboEvent::RecordStart {
             name: "demo".to_string(),
@@ -1056,6 +1187,7 @@ mod tests {
         let tool_use = make_tool_use("combo_record_demo_0", "echo 1");
         combo.handle_event(&Event::Combo(ComboEvent::Executing {
             name: "demo".to_string(),
+            command_line: "demo".to_string(),
         }));
         combo.handle_event(&Event::Combo(ComboEvent::RecordStart {
             name: "demo".to_string(),
