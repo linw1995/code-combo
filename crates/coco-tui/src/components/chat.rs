@@ -1298,12 +1298,23 @@ async fn task_combo_discover(cancel_token: CancellationToken) {
 }
 
 fn format_command_line(command: &str, args: &[String]) -> String {
+    let command = resolve_command_display(command);
     let mut parts = Vec::with_capacity(args.len() + 1);
-    parts.push(shell_escape(command));
+    parts.push(shell_escape(&command));
     for arg in args {
         parts.push(shell_escape(arg));
     }
     parts.join(" ")
+}
+
+fn resolve_command_display(command: &str) -> String {
+    let command_path = std::path::Path::new(command);
+    let workspace_combo_dir = global::workspace_combo_dir();
+    if let Ok(relative) = command_path.strip_prefix(&workspace_combo_dir) {
+        let display_path = std::path::Path::new(".coco/combos").join(relative);
+        return display_path.to_string_lossy().to_string();
+    }
+    command.to_string()
 }
 
 fn shell_escape(value: &str) -> String {

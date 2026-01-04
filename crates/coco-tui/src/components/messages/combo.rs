@@ -97,6 +97,9 @@ pub struct Combo {
 
 const LIMIT: usize = 10;
 const STREAM_MARKER: &str = "▐";
+const COMMAND_PROMPT: &str = "$";
+const COMMAND_SPACING: u16 = 1;
+const COMMAND_PADDING: u16 = 1;
 
 fn default_display_state() -> FoldState {
     FoldState::Collapsed
@@ -166,7 +169,16 @@ impl Combo {
             return 0;
         };
         let width = width.max(1);
-        u16::try_from(command.height(width)).unwrap_or(u16::MAX)
+        let prompt_width = COMMAND_PROMPT.len().max(1) as u16;
+        let spacing_width = COMMAND_SPACING;
+        if width <= prompt_width + spacing_width {
+            return 1 + COMMAND_PADDING.saturating_mul(2);
+        }
+        let content_width = width.saturating_sub(prompt_width + spacing_width).max(1);
+        let command_height = u16::try_from(command.height(content_width)).unwrap_or(u16::MAX);
+        command_height
+            .max(1)
+            .saturating_add(COMMAND_PADDING.saturating_mul(2))
     }
 
     fn build_command_highlight(command_line: &str) -> Option<CodeHighlight<'static>> {
@@ -219,7 +231,50 @@ impl Combo {
         let Some(command) = self.command.as_mut() else {
             return Ok(());
         };
-        command.draw(frame, area)
+        if area.height == 0 {
+            return Ok(());
+        }
+        if area.height <= COMMAND_PADDING.saturating_mul(2) {
+            return Ok(());
+        }
+        let theme = global::theme();
+        let prompt_width = COMMAND_PROMPT.len().max(1) as u16;
+        let spacing_width = COMMAND_SPACING;
+        let [area_pad_top, area_body, area_pad_bottom] = Layout::vertical([
+            Constraint::Length(COMMAND_PADDING),
+            Constraint::Min(1),
+            Constraint::Length(COMMAND_PADDING),
+        ])
+        .areas(area);
+        frame.render_widget(Paragraph::new(vec![Line::from("")]), area_pad_top);
+        frame.render_widget(Paragraph::new(vec![Line::from("")]), area_pad_bottom);
+
+        if area_body.width <= prompt_width + spacing_width {
+            frame.render_widget(
+                Paragraph::new(vec![Line::from(Span::styled(
+                    COMMAND_PROMPT,
+                    theme.ui.tool_label,
+                ))]),
+                area_body,
+            );
+            return Ok(());
+        }
+        let [area_prompt, area_gap, area_text] = Layout::horizontal([
+            Constraint::Length(prompt_width),
+            Constraint::Length(spacing_width),
+            Constraint::Min(1),
+        ])
+        .areas(area_body);
+        frame.render_widget(
+            Paragraph::new(vec![Line::from(Span::styled(
+                COMMAND_PROMPT,
+                theme.ui.tool_label,
+            ))]),
+            area_prompt,
+        );
+        command.draw(frame, area_text)?;
+        frame.render_widget(Paragraph::new(vec![Line::from(" ")]), area_gap);
+        Ok(())
     }
 
     fn on_combo_event(&mut self, event: &ComboEvent) {
@@ -969,9 +1024,9 @@ mod tests {
             },
         }));
 
-        assert_eq!(combo.height(80), 4);
+        assert_eq!(combo.height(80), 6);
         combo.handle_key_event(&test_key_z());
-        assert_eq!(combo.height(80), 4);
+        assert_eq!(combo.height(80), 6);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
