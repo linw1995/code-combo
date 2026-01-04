@@ -35,7 +35,7 @@ tree-sitter-md = { version = "0.3.2" }
 futures-core = "0.3.31"
 futures-util = "0.3.31"
 tokio-util = "0.7.16"
-clap = { version = "4.5.47", features = ["derive", "string"] }
+clap = { version = "4.5.54", features = ["derive", "string"] }
 
 # Core dependencies for CLI and application functionality
 [dependencies]
