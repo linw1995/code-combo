@@ -32,6 +32,9 @@ use crate::{
     widgets::Paragraph,
 };
 
+mod prompt_reply;
+use prompt_reply::PromptReply;
+
 #[derive(Serialize, Deserialize, Default)]
 enum StarterState {
     #[default]
@@ -204,6 +207,13 @@ impl Combo {
             .push(Message::user(Plain::new(prompt.to_string()).into()).with_role_prefix(false));
     }
 
+    fn push_prompt_reply(&mut self, tool_use: &ToolUse) {
+        self.state.write().view = ComboView::Messages;
+        let params = PromptReply::new(tool_use);
+        self.messages
+            .push(Message::bot(params.into()).with_role_prefix(false));
+    }
+
     fn forward_output_to_child(&mut self, tool_use_id: &str, chunk: &OutputChunk) -> bool {
         let event = Event::Answer(AnswerEvent::ToolOutput {
             id: tool_use_id.to_string(),
@@ -316,6 +326,11 @@ impl Combo {
             ComboEvent::Prompt { name, prompt } => {
                 if &self.state.name == name {
                     self.push_prompt(prompt);
+                }
+            }
+            ComboEvent::PromptReply { name, tool_use } => {
+                if &self.state.name == name {
+                    self.push_prompt_reply(tool_use);
                 }
             }
             ComboEvent::Executing { name, command_line } => {
