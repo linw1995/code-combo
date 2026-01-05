@@ -35,7 +35,7 @@ ratatui = { version = "0.29.0", features = [
   "unstable-rendered-line-info",
   "unstable-widget-ref",
 ] }
-code-highlight = { path = "../code-highlight" }
+coco-highlight = { path = "../coco-highlight" }
 ansi-to-tui = "7.0.0"
 tui-textarea = "0.7.0"
 

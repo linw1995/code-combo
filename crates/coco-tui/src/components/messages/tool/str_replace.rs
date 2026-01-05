@@ -163,7 +163,7 @@ fn join_diffs(diffs: &[String]) -> String {
 }
 
 fn build_diff_widget(diff_text: String) -> StrReplaceWidget<'static> {
-    match CodeHighlight::try_new(&diff_text, code_highlight::Lang::Diff) {
+    match CodeHighlight::try_new(&diff_text, coco_highlight::Lang::Diff) {
         Ok(highlight) => StrReplaceWidget::CodeHighlight(highlight),
         Err(_) => StrReplaceWidget::Paragraph(Paragraph::new(diff_text)),
     }

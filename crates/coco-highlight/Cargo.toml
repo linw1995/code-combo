@@ -1,5 +1,5 @@
 [package]
-name = "code-highlight"
+name = "coco-highlight"
 version.workspace = true
 edition.workspace = true
 

@@ -7,8 +7,8 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 
+use coco_highlight::Lang;
 use code_combo::ToolUse;
-use code_highlight::Lang;
 
 use crate::{
     components::{CodeHighlight, Component, Content, ContentComponent, Persistable},

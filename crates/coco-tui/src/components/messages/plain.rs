@@ -60,7 +60,7 @@ impl Plain {
             MarkdownRenderEngine::Native => None,
         };
 
-        let widget = CodeHighlight::try_new(&text, code_highlight::Lang::Markdown)
+        let widget = CodeHighlight::try_new(&text, coco_highlight::Lang::Markdown)
             .map(|x| x.into())
             .unwrap_or_else(|err| {
                 warn!(?err, "failed to new CodeHighlight Component");

@@ -1,10 +1,10 @@
 use bon::bon;
+use coco_highlight::Lang;
 use coco_macro::{ComponentExt, ContentComponentExt};
 use code_combo::{
     OutputChunk, ToolUse,
     tools::{BashInput, BashOutput, Final},
 };
-use code_highlight::Lang;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
