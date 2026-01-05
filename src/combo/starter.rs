@@ -29,8 +29,6 @@ use serde_json::json;
 
 #[derive(Debug, Clone, Snafu)]
 pub enum StarterError {
-    #[snafu(display("Starter timeout after {seconds}s"))]
-    Timeout { seconds: usize },
     #[snafu(display("Combo file is not excutable"))]
     NotExcutable,
     #[snafu(display("Invalid combo: {reason}"))]
