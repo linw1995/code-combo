@@ -1,5 +1,8 @@
-use std::collections::HashMap;
-use std::path::Path;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{OnceLock, RwLock},
+};
 
 use lazy_static::lazy_static;
 use serde::Deserialize;
@@ -7,7 +10,10 @@ use toml as serde_toml;
 use tracing::warn;
 use tree_sitter::{Node, Parser};
 
-use crate::tools::BashInput;
+use crate::{
+    config::{BashConfig, BashConfigLayers, SafeCommandsMode},
+    tools::BashInput,
+};
 
 #[derive(Clone)]
 struct SafeCommandRule {
@@ -83,7 +89,7 @@ enum ParseError {
     UnsupportedNode,
 }
 
-const SAFE_COMMANDS_TOML: &str = include_str!("safe_commands.toml");
+const BUILTIN_SAFE_COMMANDS_TOML: &str = include_str!("safe_commands.toml");
 
 #[derive(Deserialize)]
 struct SafeCommandConfig {
@@ -118,15 +124,45 @@ struct SafeFlagConfig {
 }
 
 lazy_static! {
-    static ref SAFE_COMMAND_RULES: Vec<SafeCommandRule> = load_safe_command_rules();
+    static ref BUILTIN_SAFE_COMMAND_RULES: Vec<SafeCommandRule> = load_builtin_safe_command_rules();
+}
+
+static SAFE_COMMAND_RULES: OnceLock<RwLock<Vec<SafeCommandRule>>> = OnceLock::new();
+
+fn safe_command_rules() -> &'static RwLock<Vec<SafeCommandRule>> {
+    SAFE_COMMAND_RULES.get_or_init(|| RwLock::new(BUILTIN_SAFE_COMMAND_RULES.clone()))
 }
 
 pub fn should_bypass_permission(input: &BashInput) -> bool {
     is_safe_command(&input.command)
 }
 
+pub(super) fn configure_safe_commands(
+    layers: &BashConfigLayers,
+    global_config_dir: &Path,
+    workspace_config_dir: Option<&Path>,
+) {
+    let mut rules = BUILTIN_SAFE_COMMAND_RULES.clone();
+    if let Some(global) = layers.global.as_ref()
+        && let Err(err) = apply_safe_command_layer(&mut rules, global, global_config_dir)
+    {
+        warn!("failed to apply global bash safe commands: {err}");
+    }
+    if let Some(workspace) = layers.workspace.as_ref() {
+        let dir = workspace_config_dir.unwrap_or(global_config_dir);
+        if let Err(err) = apply_safe_command_layer(&mut rules, workspace, dir) {
+            warn!("failed to apply workspace bash safe commands: {err}");
+        }
+    }
+
+    let lock = safe_command_rules();
+    let mut guard = lock.write().expect("safe command lock");
+    *guard = rules;
+}
+
 fn is_safe_command(command: &str) -> bool {
-    is_safe_command_with_rules(command, &SAFE_COMMAND_RULES)
+    let rules = safe_command_rules().read().expect("safe command lock");
+    is_safe_command_with_rules(command, &rules)
 }
 
 fn is_safe_command_with_rules(command: &str, rules: &[SafeCommandRule]) -> bool {
@@ -151,6 +187,33 @@ fn is_safe_command_with_rules(command: &str, rules: &[SafeCommandRule]) -> bool 
         let remaining_args = command.args.get(consumed_args..).unwrap_or_default();
         is_safe_args(remaining_args, &rule.args)
     })
+}
+
+fn resolve_safe_commands_path(path: &str, config_dir: &Path) -> PathBuf {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        config_dir.join(path)
+    }
+}
+
+fn apply_safe_command_layer(
+    rules: &mut Vec<SafeCommandRule>,
+    config: &BashConfig,
+    config_dir: &Path,
+) -> Result<(), String> {
+    let Some(path) = config.safe_commands_path.as_deref() else {
+        return Ok(());
+    };
+    let resolved = resolve_safe_commands_path(path, config_dir);
+    let custom_rules = load_safe_command_rules_from_path(&resolved)
+        .map_err(|err| format!("{}: {err}", resolved.display()))?;
+    match config.safe_commands_mode {
+        SafeCommandsMode::Append => rules.extend(custom_rules),
+        SafeCommandsMode::Override => *rules = custom_rules,
+    }
+    Ok(())
 }
 
 fn is_safe_args(args: &[ParsedArg], policy: &ArgPolicy) -> bool {
@@ -684,15 +747,29 @@ fn is_disallowed_token_kind(kind: &str) -> bool {
     matches!(kind, "&" | ";")
 }
 
-fn load_safe_command_rules() -> Vec<SafeCommandRule> {
-    let config: SafeCommandConfig = match serde_toml::from_str(SAFE_COMMANDS_TOML) {
-        Ok(config) => config,
+fn load_builtin_safe_command_rules() -> Vec<SafeCommandRule> {
+    match parse_safe_command_rules(BUILTIN_SAFE_COMMANDS_TOML) {
+        Ok(rules) => rules,
         Err(err) => {
-            warn!("failed to parse safe_commands.toml: {err}");
-            return Vec::new();
+            warn!("failed to parse builtin safe commands: {err}");
+            Vec::new()
         }
-    };
+    }
+}
 
+fn load_safe_command_rules_from_path(path: &Path) -> Result<Vec<SafeCommandRule>, String> {
+    let content =
+        std::fs::read_to_string(path).map_err(|err| format!("failed to read file: {err}"))?;
+    parse_safe_command_rules(&content)
+}
+
+fn parse_safe_command_rules(source: &str) -> Result<Vec<SafeCommandRule>, String> {
+    let config: SafeCommandConfig =
+        serde_toml::from_str(source).map_err(|err| format!("failed to parse config: {err}"))?;
+    Ok(build_safe_command_rules(config))
+}
+
+fn build_safe_command_rules(config: SafeCommandConfig) -> Vec<SafeCommandRule> {
     config
         .commands
         .into_iter()
@@ -768,6 +845,14 @@ fn load_safe_command_rules() -> Vec<SafeCommandRule> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn write_safe_commands_file(dir: &Path, name: &str, command: &str) -> PathBuf {
+        let path = dir.join(name);
+        let content = format!("[[commands]]\nname = \"{command}\"\nallow_any = true\n");
+        std::fs::write(&path, content).expect("write safe commands file");
+        path
+    }
 
     macro_rules! assert_safe_cmd {
         ($cmd:expr) => {
@@ -1000,5 +1085,64 @@ mod tests {
         assert_unsafe_cmd!("   ");
         assert_unsafe_cmd!("bash -c ls");
         assert_unsafe_cmd!("sudo ls");
+    }
+
+    #[test]
+    fn safe_command_layers_apply_in_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _global_path = write_safe_commands_file(dir.path(), "global.toml", "global_cmd");
+        let _workspace_path =
+            write_safe_commands_file(dir.path(), "workspace.toml", "workspace_cmd");
+
+        let base_rules =
+            parse_safe_command_rules("[[commands]]\nname = \"base_cmd\"\nallow_any = true\n")
+                .expect("parse base rules");
+        let mut rules = base_rules;
+
+        let global = BashConfig {
+            safe_commands_path: Some("global.toml".to_string()),
+            safe_commands_mode: SafeCommandsMode::Append,
+        };
+        apply_safe_command_layer(&mut rules, &global, dir.path()).expect("apply global");
+        assert_safe_cmd_with_rules!("base_cmd", &rules);
+        assert_safe_cmd_with_rules!("global_cmd", &rules);
+
+        let workspace = BashConfig {
+            safe_commands_path: Some("workspace.toml".to_string()),
+            safe_commands_mode: SafeCommandsMode::Override,
+        };
+        apply_safe_command_layer(&mut rules, &workspace, dir.path()).expect("apply workspace");
+        assert_unsafe_cmd_with_rules!("base_cmd", &rules);
+        assert_unsafe_cmd_with_rules!("global_cmd", &rules);
+        assert_safe_cmd_with_rules!("workspace_cmd", &rules);
+    }
+
+    #[test]
+    fn safe_command_layers_override_then_append() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _global_path = write_safe_commands_file(dir.path(), "global.toml", "global_cmd");
+        let _workspace_path =
+            write_safe_commands_file(dir.path(), "workspace.toml", "workspace_cmd");
+
+        let base_rules =
+            parse_safe_command_rules("[[commands]]\nname = \"base_cmd\"\nallow_any = true\n")
+                .expect("parse base rules");
+        let mut rules = base_rules;
+
+        let global = BashConfig {
+            safe_commands_path: Some("global.toml".to_string()),
+            safe_commands_mode: SafeCommandsMode::Override,
+        };
+        apply_safe_command_layer(&mut rules, &global, dir.path()).expect("apply global");
+        assert_unsafe_cmd_with_rules!("base_cmd", &rules);
+        assert_safe_cmd_with_rules!("global_cmd", &rules);
+
+        let workspace = BashConfig {
+            safe_commands_path: Some("workspace.toml".to_string()),
+            safe_commands_mode: SafeCommandsMode::Append,
+        };
+        apply_safe_command_layer(&mut rules, &workspace, dir.path()).expect("apply workspace");
+        assert_safe_cmd_with_rules!("global_cmd", &rules);
+        assert_safe_cmd_with_rules!("workspace_cmd", &rules);
     }
 }

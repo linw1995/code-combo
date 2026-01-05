@@ -50,6 +50,15 @@ impl Agent {
     pub fn new(config: Config) -> Self {
         let mut executor = Executor::default();
         executor.apply_tool_policies(config.allow_tools.as_deref(), config.deny_tools.as_deref());
+        let workspace_dir = config
+            .workspace_config_path
+            .as_deref()
+            .and_then(|path| path.parent());
+        bash_executor::configure_safe_commands(
+            &config.bash_layers,
+            &config.config_dir,
+            workspace_dir,
+        );
         Self {
             config,
             system_prompt: Self::build_system_prompt(None),
