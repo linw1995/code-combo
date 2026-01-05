@@ -1300,16 +1300,12 @@ async fn task_combo_discover(cancel_token: CancellationToken) {
 
 fn format_command_line(command: &str, args: &[String]) -> String {
     let command = resolve_command_display(command);
-    if args.is_empty() {
-        return command;
-    }
-    let mut line = String::with_capacity(command.len() + 1);
-    line.push_str(&command);
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push(shell_escape(&command));
     for arg in args {
-        line.push(' ');
-        line.push_str(arg);
+        parts.push(shell_escape(arg));
     }
-    line
+    parts.join(" ")
 }
 
 fn resolve_command_display(command: &str) -> String {
@@ -1320,6 +1316,39 @@ fn resolve_command_display(command: &str) -> String {
         return display_path.to_string_lossy().to_string();
     }
     command.to_string()
+}
+
+fn shell_escape(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    if value.bytes().all(|byte| {
+        matches!(byte, b'a'..=b'z'
+            | b'A'..=b'Z'
+            | b'0'..=b'9'
+            | b'_'
+            | b'-'
+            | b'.'
+            | b'/'
+            | b':'
+            | b'@'
+            | b'+'
+            | b'='
+            | b','
+            | b'%')
+    }) {
+        return value.to_string();
+    }
+    let mut escaped = String::from("'");
+    for ch in value.chars() {
+        if ch == '\'' {
+            escaped.push_str("'\"'\"'");
+        } else {
+            escaped.push(ch);
+        }
+    }
+    escaped.push('\'');
+    escaped
 }
 
 async fn task_combo_execute(
