@@ -20,9 +20,9 @@ use tracing::{debug, info, warn};
 
 use crate::tools::{BASH_TOOL_NAME, BashInput, BashOutput, Final};
 use crate::{
-    ClientMessage, Combo, ComboMetadata, ComboMode, ControlAction, MetadataPayload,
-    MetadataResponse, PromptSchema, RecordControl, RecordEndPayload, ServerMessage, SessionEnv,
-    SessionSocketServer, StreamKind, ToolUse,
+    ClientMessage, Combo, ComboMetadata, ControlAction, MetadataPayload, MetadataResponse,
+    PromptSchema, RecordControl, RecordEndPayload, ServerMessage, SessionEnv, SessionSocketServer,
+    StreamKind, ToolUse,
     exec::{ChunkConfig, ExecCommand, OutputChunk, ProcessEvent},
 };
 use serde_json::json;
@@ -261,7 +261,6 @@ fn parse_combo(command: &str) -> Combo {
         metadata: ComboMetadata {
             name,
             description: String::new(),
-            mode: ComboMode::Unknown,
         },
     }
 }
@@ -305,7 +304,6 @@ fn build_combo_from_session(
             metadata: ComboMetadata {
                 name: metadata.name,
                 description: metadata.description.unwrap_or_default(),
-                mode: ComboMode::Unknown,
             },
         });
     }
@@ -915,7 +913,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::combo::{RecordStartPayload, SessionSocketClient};
-    use crate::{ComboMode, MetadataPayload, SessionEnv};
+    use crate::{MetadataPayload, SessionEnv};
     use tokio::time::Duration;
 
     static COCO_BIN_PATH: OnceLock<PathBuf> = OnceLock::new();
@@ -1115,7 +1113,6 @@ mod tests {
         let combo = combo.unwrap();
         assert_eq!(combo.metadata.name, "test");
         assert_eq!(combo.metadata.description, "");
-        assert_eq!(combo.metadata.mode, ComboMode::Unknown);
         assert!(saw_output, "expected output event to include Hello world");
         assert!(!saw_prompt, "unexpected prompt event in output-only combo");
 

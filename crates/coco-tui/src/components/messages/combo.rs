@@ -974,7 +974,6 @@ mod tests {
                 metadata: code_combo::ComboMetadata {
                     name: name.to_string(),
                     description: String::new(),
-                    mode: code_combo::ComboMode::Unknown,
                 },
             }),
         }

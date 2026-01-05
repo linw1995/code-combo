@@ -1,5 +1,3 @@
-use std::fmt::Display;
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -8,30 +6,6 @@ pub struct ComboMetadata {
     pub name: String,
     #[serde(default)]
     pub description: String,
-    #[serde(flatten)]
-    pub mode: ComboMode,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "mode", rename_all = "snake_case")]
-pub enum ComboMode {
-    BashXtrace {
-        command_prefix: String,
-    },
-    #[serde(other)]
-    Unknown,
-}
-
-impl Display for ComboMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ComboMode::BashXtrace { command_prefix } => f.write_fmt(format_args!(
-                "bash_xtrace (command_prefix: {})",
-                command_prefix
-            )),
-            ComboMode::Unknown => f.write_str("unknown"),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
