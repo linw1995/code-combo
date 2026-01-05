@@ -1,3 +1,4 @@
+mod bash;
 mod env;
 mod mcp;
 mod provider;
@@ -10,6 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub use bash::{BashConfig, BashConfigLayers, SafeCommandsMode};
 pub use env::EnvString;
 pub use mcp::{
     McpConfig, McpServerCommandConfig, McpServerConfig, McpServerConnection, McpServerHttpConfig,
@@ -44,9 +46,15 @@ pub struct Config {
     pub deny_tools: Option<Vec<String>>,
     #[serde(default)]
     pub mcp: Option<McpConfig>,
+    #[serde(default)]
+    pub bash: Option<BashConfig>,
 
     #[serde(skip)]
     pub config_dir: PathBuf,
+    #[serde(skip)]
+    pub workspace_config_path: Option<PathBuf>,
+    #[serde(skip)]
+    pub bash_layers: BashConfigLayers,
 }
 
 impl Config {
@@ -100,15 +108,25 @@ pub fn load_config_with_overrides(
     workspace_override_path: Option<&Path>,
 ) -> Result<Config, BoxError> {
     let mut base_value = parse_toml_value(config_path)?;
+    let base_bash = extract_bash_config(&base_value)?;
+    let mut workspace_bash = None;
+    let mut workspace_path = None;
     if let Some(path) = workspace_override_path
         && path.exists()
     {
         let override_value = parse_toml_value(path)?;
+        workspace_bash = extract_bash_config(&override_value)?;
         merge_config_values(&mut base_value, override_value)?;
+        workspace_path = Some(path.to_path_buf());
     }
     let merged = toml::to_string(&base_value)?;
     let mut config: Config = toml::from_str(&merged)?;
     config.config_dir = config_dir.to_path_buf();
+    config.workspace_config_path = workspace_path;
+    config.bash_layers = BashConfigLayers {
+        global: base_bash,
+        workspace: workspace_bash,
+    };
     Ok(config)
 }
 
@@ -118,6 +136,20 @@ fn parse_toml_value(path: &Path) -> Result<toml::Value, BoxError> {
         Some("toml") => Ok(toml::from_str(&content)?),
         _ => Err("Unsupported config file format".into()),
     }
+}
+
+fn extract_bash_config(value: &toml::Value) -> Result<Option<BashConfig>, BoxError> {
+    let table = value
+        .as_table()
+        .ok_or_else(|| override_error("config must be a table"))?;
+    let Some(bash_value) = table.get("bash") else {
+        return Ok(None);
+    };
+    let bash: BashConfig = bash_value
+        .clone()
+        .try_into()
+        .map_err(|err| override_error(format!("bash config invalid: {err}")))?;
+    Ok(Some(bash))
 }
 
 fn merge_config_values(
@@ -319,7 +351,9 @@ fn table_name_from_table(table: &toml::value::Table, path: &str) -> Result<Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, MarkdownRenderEngine, McpServerConnection, merge_config_values};
+    use super::{
+        Config, MarkdownRenderEngine, McpServerConnection, SafeCommandsMode, merge_config_values,
+    };
 
     fn base_config() -> String {
         [
@@ -342,6 +376,7 @@ mod tests {
         assert!(config.allow_tools.is_none());
         assert!(config.deny_tools.is_none());
         assert!(config.mcp.is_none());
+        assert!(config.bash.is_none());
     }
 
     #[test]
@@ -356,6 +391,24 @@ mod tests {
         let config_str = format!("deny_tools = []\n{}", base_config());
         let config: Config = toml::from_str(&config_str).expect("parse config");
         assert_eq!(config.deny_tools, Some(Vec::new()));
+    }
+
+    #[test]
+    fn parse_config_with_bash_safe_commands() {
+        let config_str = format!(
+            "[bash]\n\
+safe_commands_path = \"safe_commands.toml\"\n\
+safe_commands_mode = \"override\"\n\
+{}",
+            base_config()
+        );
+        let config: Config = toml::from_str(&config_str).expect("parse config");
+        let bash = config.bash.expect("bash config");
+        assert_eq!(
+            bash.safe_commands_path.as_deref(),
+            Some("safe_commands.toml")
+        );
+        assert_eq!(bash.safe_commands_mode, SafeCommandsMode::Override);
     }
 
     #[test]
