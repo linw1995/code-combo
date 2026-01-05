@@ -90,26 +90,33 @@ impl Agent {
     pub async fn chat(&mut self, message: Message) -> Result<ChatResponse> {
         let (_, client) = self.pick_provider()?;
 
-        let mut messages = self.messages.lock().await;
-        messages.push(message);
+        let messages = {
+            let mut messages = self.messages.lock().await;
+            messages.push(message);
+            messages.clone()
+        };
 
         let response = client
             .messages()
             .system_prompt(&self.system_prompt)
-            .conversations(messages.clone())
+            .conversations(messages)
             .tools(self.executor.anthropic_tools())
             .call()
             .await
             .inspect_err(|err| {
                 warn!("send messsages error: {err:?}");
             })
-            .unwrap();
+            .map_err(|err| {
+                <crate::Error as snafu::FromString>::without_source(format!(
+                    "send messages error: {err}"
+                ))
+            })?;
 
         let message = if response.content.is_empty() {
             Message::assistant(Content::Multiple(Vec::default()))
         } else {
             let msg = Message::assistant(Content::Multiple(response.content));
-            messages.push(msg.clone());
+            self.messages.lock().await.push(msg.clone());
             msg
         };
         Ok(ChatResponse {
@@ -132,7 +139,11 @@ impl Agent {
             .inspect_err(|err| {
                 warn!("send messsages error: {err:?}");
             })
-            .unwrap();
+            .map_err(|err| {
+                <crate::Error as snafu::FromString>::without_source(format!(
+                    "send messages error: {err}"
+                ))
+            })?;
 
         let message = if response.content.is_empty() {
             Message::assistant(Content::Multiple(Vec::default()))

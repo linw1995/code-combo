@@ -18,6 +18,7 @@ use ratatui::{
 };
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::time::Duration;
 use time::OffsetDateTime;
 use tokio::time::Instant;
@@ -927,7 +928,7 @@ impl Component for Chat<'static> {
                     self.messages.blur();
                 }
                 // Add ToolResult message to send execution result to LLM API Server
-                let mut content: code_combo::Content = output.try_into().unwrap();
+                let mut content = final_to_tool_content(output);
                 if *is_user_cancelled {
                     content = content.user_cancel();
                 }
@@ -1633,11 +1634,14 @@ fn build_tool_use_message(tool_use: &ToolUse) -> ChatMessage {
     )]))
 }
 
+const TOOL_RESULT_MAX_BYTES: usize = 80 * 1024;
+const TOOL_RESULT_TRUNCATION_SUFFIX: &str = "\n... (truncated)";
+
 fn build_tool_result_message(tool_use_id: &str, is_error: bool, output: &Final) -> ChatMessage {
     ChatMessage::user(ChatContent::Multiple(vec![AnthropicBlock::tool_result(
         tool_use_id,
         Some(is_error),
-        final_to_content(output),
+        final_to_tool_content(output),
     )]))
 }
 
@@ -1645,12 +1649,141 @@ fn build_prompt_message(prompt: &str) -> ChatMessage {
     ChatMessage::user(ChatContent::Text(prompt.to_string()))
 }
 
-fn final_to_content(output: &Final) -> ChatContent {
+fn final_to_tool_content(output: &Final) -> ChatContent {
     let text = match output {
-        Final::Json(value) => serde_json::to_string(value).unwrap_or_else(|_| value.to_string()),
-        Final::Message(message) => message.clone(),
+        Final::Json(value) => truncate_json_tool_output(value, TOOL_RESULT_MAX_BYTES)
+            .unwrap_or_else(|| {
+                let raw = serde_json::to_string(value).unwrap_or_else(|_| value.to_string());
+                truncate_with_suffix(&raw, TOOL_RESULT_MAX_BYTES, TOOL_RESULT_TRUNCATION_SUFFIX)
+            }),
+        Final::Message(message) => truncate_with_suffix(
+            message,
+            TOOL_RESULT_MAX_BYTES,
+            TOOL_RESULT_TRUNCATION_SUFFIX,
+        ),
     };
     ChatContent::Text(text)
+}
+
+fn truncate_json_tool_output(value: &Value, max_bytes: usize) -> Option<String> {
+    let obj = value.as_object()?;
+    let stdout_value = obj.get("stdout").and_then(|value| value.as_str());
+    let stderr_value = obj.get("stderr").and_then(|value| value.as_str());
+    if stdout_value.is_none() && stderr_value.is_none() {
+        return None;
+    }
+
+    let serialized = serde_json::to_string(value).ok()?;
+    if serialized.len() <= max_bytes {
+        return Some(serialized);
+    }
+
+    let stdout = stdout_value.unwrap_or("");
+    let stderr = stderr_value.unwrap_or("");
+    let stdout_len = stdout.len();
+    let stderr_len = stderr.len();
+
+    let mut base = obj.clone();
+    if stdout_value.is_some() {
+        base.insert("stdout".to_string(), Value::String(String::new()));
+    }
+    if stderr_value.is_some() {
+        base.insert("stderr".to_string(), Value::String(String::new()));
+    }
+    base.insert("_truncated".to_string(), Value::Bool(true));
+    let base_text = serde_json::to_string(&Value::Object(base)).ok()?;
+    if base_text.len() >= max_bytes {
+        return Some(truncate_with_suffix(
+            &base_text,
+            max_bytes,
+            TOOL_RESULT_TRUNCATION_SUFFIX,
+        ));
+    }
+
+    let available = max_bytes - base_text.len();
+    let total_len = stdout_len + stderr_len;
+    let (mut stdout_budget, mut stderr_budget) = if total_len == 0 {
+        (0, 0)
+    } else if stderr_len == 0 {
+        (available, 0)
+    } else if stdout_len == 0 {
+        (0, available)
+    } else {
+        let stdout_budget = available * stdout_len / total_len;
+        let stderr_budget = available.saturating_sub(stdout_budget);
+        (stdout_budget, stderr_budget)
+    };
+
+    let mut last_text = base_text;
+    for _ in 0..5 {
+        let mut out = obj.clone();
+        if stdout_value.is_some() {
+            let truncated = truncate_to_boundary(stdout, stdout_budget);
+            out.insert("stdout".to_string(), Value::String(truncated.to_string()));
+        }
+        if stderr_value.is_some() {
+            let truncated = truncate_to_boundary(stderr, stderr_budget);
+            out.insert("stderr".to_string(), Value::String(truncated.to_string()));
+        }
+        out.insert("_truncated".to_string(), Value::Bool(true));
+        let text = serde_json::to_string(&Value::Object(out)).ok()?;
+        if text.len() <= max_bytes {
+            return Some(text);
+        }
+
+        last_text = text;
+        if stdout_budget == 0 && stderr_budget == 0 {
+            break;
+        }
+        let overshoot = last_text.len().saturating_sub(max_bytes);
+        if stdout_budget >= stderr_budget {
+            stdout_budget = stdout_budget.saturating_sub(overshoot);
+        } else {
+            stderr_budget = stderr_budget.saturating_sub(overshoot);
+        }
+    }
+
+    Some(truncate_with_suffix(
+        &last_text,
+        max_bytes,
+        TOOL_RESULT_TRUNCATION_SUFFIX,
+    ))
+}
+
+fn truncate_with_suffix(text: &str, max_bytes: usize, suffix: &str) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    if max_bytes == 0 {
+        return String::new();
+    }
+
+    let suffix = if max_bytes <= suffix.len() {
+        truncate_to_boundary(suffix, max_bytes)
+    } else {
+        suffix
+    };
+    if max_bytes <= suffix.len() {
+        return suffix.to_string();
+    }
+
+    let keep_len = max_bytes - suffix.len();
+    let prefix = truncate_to_boundary(text, keep_len);
+    let mut out = String::with_capacity(max_bytes);
+    out.push_str(prefix);
+    out.push_str(suffix);
+    out
+}
+
+fn truncate_to_boundary(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 async fn task_chat(mut agent: Agent, content: ChatContent, cancel_token: CancellationToken) {
@@ -1667,7 +1800,22 @@ async fn task_chat(mut agent: Agent, content: ChatContent, cancel_token: Cancell
             tx.send(AnswerEvent::Cancelled.into()).ok();
             return;
         }
-        chat_resp = agent.chat(msg) => chat_resp.expect("failed to chat with LLM"),
+        chat_resp = agent.chat(msg) => chat_resp,
+    };
+
+    let chat_resp = match chat_resp {
+        Ok(resp) => resp,
+        Err(err) => {
+            warn!(?err, "chat request failed");
+            tx.send(
+                AnswerEvent::Bot(vec![BotMessage::System(format!(
+                    "Chat request failed: {err}"
+                ))])
+                .into(),
+            )
+            .ok();
+            return;
+        }
     };
 
     handle_chat_response(agent, cancel_token, chat_resp).await;
@@ -1686,7 +1834,22 @@ async fn task_chat_with_history(mut agent: Agent, cancel_token: CancellationToke
             tx.send(AnswerEvent::Cancelled.into()).ok();
             return;
         }
-        chat_resp = agent.chat_with_history() => chat_resp.expect("failed to chat with LLM"),
+        chat_resp = agent.chat_with_history() => chat_resp,
+    };
+
+    let chat_resp = match chat_resp {
+        Ok(resp) => resp,
+        Err(err) => {
+            warn!(?err, "chat request failed");
+            tx.send(
+                AnswerEvent::Bot(vec![BotMessage::System(format!(
+                    "Chat request failed: {err}"
+                ))])
+                .into(),
+            )
+            .ok();
+            return;
+        }
     };
 
     handle_chat_response(agent, cancel_token, chat_resp).await;
@@ -1885,5 +2048,39 @@ async fn task_apply_text_edit(
             }
         }
         _ => (),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn truncate_with_suffix_appends_marker() {
+        let text = "a".repeat(200);
+        let max_bytes = TOOL_RESULT_TRUNCATION_SUFFIX.len() + 10;
+        let truncated = truncate_with_suffix(&text, max_bytes, TOOL_RESULT_TRUNCATION_SUFFIX);
+        assert!(truncated.len() <= max_bytes);
+        assert!(truncated.ends_with(TOOL_RESULT_TRUNCATION_SUFFIX));
+    }
+
+    #[test]
+    fn truncate_json_tool_output_caps_size() {
+        let value = json!({
+            "exit_code": 0,
+            "stdout": "a".repeat(200),
+            "stderr": "",
+        });
+        let max_bytes = 120;
+        let truncated =
+            truncate_json_tool_output(&value, max_bytes).expect("expected truncated output");
+        assert!(truncated.len() <= max_bytes);
+        let parsed: Value = serde_json::from_str(&truncated).expect("truncated output is JSON");
+        assert_eq!(
+            parsed.get("_truncated").and_then(|value| value.as_bool()),
+            Some(true)
+        );
     }
 }
