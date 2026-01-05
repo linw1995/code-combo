@@ -1,5 +1,5 @@
+use coco_highlight::{Event, Lang, highlight};
 use coco_macro::{ComponentExt, ContentComponentExt};
-use code_highlight::{Event, Lang, highlight};
 use ratatui::{
     Frame,
     prelude::Rect,

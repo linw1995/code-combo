@@ -13,8 +13,8 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 
+use coco_highlight::Lang;
 use code_combo::{OutputChunk, StreamKind, ToolUse, tools::Final};
-use code_highlight::Lang;
 
 use super::fold::FoldState;
 use super::streaming::StreamedLines;

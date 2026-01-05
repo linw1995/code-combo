@@ -691,7 +691,7 @@ fn markdown_component(text: &str) -> Box<dyn ContentComponent> {
     if text.is_empty() {
         return TranscriptPlain::new(String::new()).into();
     }
-    match CodeHighlight::try_new(text, code_highlight::Lang::Markdown) {
+    match CodeHighlight::try_new(text, coco_highlight::Lang::Markdown) {
         Ok(widget) => widget.into(),
         Err(_) => TranscriptPlain::new(text).into(),
     }
@@ -699,7 +699,7 @@ fn markdown_component(text: &str) -> Box<dyn ContentComponent> {
 
 fn json_component(value: &Value) -> Box<dyn ContentComponent> {
     let json = serde_json::to_string_pretty(value).unwrap_or_else(|_| "[Invalid JSON]".into());
-    match CodeHighlight::try_new(&json, code_highlight::Lang::Json) {
+    match CodeHighlight::try_new(&json, coco_highlight::Lang::Json) {
         Ok(widget) => widget.into(),
         Err(_) => TranscriptPlain::new(json).into(),
     }

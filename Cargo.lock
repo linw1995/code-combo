@@ -308,6 +308,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b94f61472cee1439c0b966b47e3aca9ae07e45d070759512cd390ea2bebc6675"
 
 [[package]]
+name = "coco-highlight"
+version = "0.1.0"
+dependencies = [
+ "ctor",
+ "indoc",
+ "serde",
+ "serde_json",
+ "snafu",
+ "tracing",
+ "tracing-subscriber",
+ "tree-sitter",
+ "tree-sitter-bash",
+ "tree-sitter-diff",
+ "tree-sitter-highlight",
+ "tree-sitter-json",
+ "tree-sitter-md",
+]
+
+[[package]]
 name = "coco-macro"
 version = "0.1.0"
 dependencies = [
@@ -324,9 +343,9 @@ dependencies = [
  "bitflags",
  "bon",
  "clap",
+ "coco-highlight",
  "coco-macro",
  "code-combo",
- "code-highlight",
  "crossterm",
  "ctor",
  "futures",
@@ -377,25 +396,6 @@ dependencies = [
  "tree-sitter-bash",
  "uuid",
  "which",
-]
-
-[[package]]
-name = "code-highlight"
-version = "0.1.0"
-dependencies = [
- "ctor",
- "indoc",
- "serde",
- "serde_json",
- "snafu",
- "tracing",
- "tracing-subscriber",
- "tree-sitter",
- "tree-sitter-bash",
- "tree-sitter-diff",
- "tree-sitter-highlight",
- "tree-sitter-json",
- "tree-sitter-md",
 ]
 
 [[package]]

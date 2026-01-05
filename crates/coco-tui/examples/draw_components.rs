@@ -66,7 +66,7 @@ async fn main() -> Result<()> {
             +line 4
         "}
                 .trim(),
-                code_highlight::Lang::Diff,
+                coco_highlight::Lang::Diff,
             )
             .whatever_context("failed to new CodeHighlight")?;
             Box::new(app)
