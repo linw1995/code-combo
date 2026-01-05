@@ -91,6 +91,10 @@ pub enum ComboEvent {
         name: String,
         prompt: String,
     },
+    PromptReply {
+        name: String,
+        tool_use: ToolUse,
+    },
     Executed {
         name: String,
         starter: Starter,

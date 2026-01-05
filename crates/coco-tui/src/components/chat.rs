@@ -366,7 +366,8 @@ impl Chat<'static> {
             | ComboEvent::RecordStart { .. }
             | ComboEvent::RecordOutput { .. }
             | ComboEvent::RecordEnd { .. }
-            | ComboEvent::Prompt { .. } => {
+            | ComboEvent::Prompt { .. }
+            | ComboEvent::PromptReply { .. } => {
                 self.set_processing();
             }
             ComboEvent::Executed { starter, .. } => {
@@ -1488,16 +1489,25 @@ async fn task_combo_execute(
                             .into(),
                         )
                         .unwrap();
-
-                        let response = if cancel_token.is_cancelled() {
+                        let reply = if cancel_token.is_cancelled() {
                             Err("prompt reply cancelled".to_string())
                         } else {
                             agent
                                 .reply_prompt(&system_prompt, schemas)
                                 .await
-                                .map(|reply| reply.response)
                                 .map_err(|err| err.to_string())
                         };
+                        if let Ok(reply) = &reply {
+                            tx.send(
+                                ComboEvent::PromptReply {
+                                    name: name.clone(),
+                                    tool_use: reply.tool_use.clone(),
+                                }
+                                .into(),
+                            )
+                            .ok();
+                        }
+                        let response = reply.map(|reply| reply.response);
                         if let Err(err) = &response {
                             tx.send(
                                 ComboEvent::ReplyToolError {
