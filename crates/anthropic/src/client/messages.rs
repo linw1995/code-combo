@@ -1,5 +1,5 @@
 use bon::bon;
-use reqwest::Url;
+use reqwest::{StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use snafu::{Whatever, prelude::*};
 use tracing::trace;
@@ -190,6 +190,20 @@ pub struct MessagesResponse {
     pub usage: Usage,
 }
 
+#[derive(Debug, Deserialize)]
+struct ErrorResponse {
+    error: ErrorDetail,
+}
+
+#[derive(Debug, Deserialize)]
+struct ErrorDetail {
+    message: String,
+    #[serde(default)]
+    r#type: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+}
+
 pub async fn messages(
     client: &reqwest::Client,
     base_url: &Url,
@@ -211,7 +225,31 @@ pub async fn messages(
     let resp = resp.text().await.whatever_context("read response error")?;
     trace!(req, resp, ?status, "messages API invoked");
 
+    if !status.is_success() {
+        let message = format_error_message(status, &resp);
+        return Err(<Whatever as snafu::FromString>::without_source(message));
+    }
+
     serde_json::from_str(&resp).whatever_context("decode response error")
+}
+
+fn format_error_message(status: StatusCode, body: &str) -> String {
+    match serde_json::from_str::<ErrorResponse>(body) {
+        Ok(parsed) => {
+            let mut message = format!(
+                "request failed with status {status}: {}",
+                parsed.error.message
+            );
+            if let Some(code) = parsed.error.code.as_deref() {
+                message.push_str(&format!(" (code: {code})"));
+            }
+            if let Some(kind) = parsed.error.r#type.as_deref() {
+                message.push_str(&format!(" (type: {kind})"));
+            }
+            message
+        }
+        Err(_) => format!("request failed with status {status}: {body}"),
+    }
 }
 
 #[cfg(test)]
