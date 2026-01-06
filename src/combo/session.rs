@@ -81,7 +81,7 @@ pub struct RecordEndPayload {
     pub ended_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PromptPayload {
     pub prompt: String,
     #[serde(default)]

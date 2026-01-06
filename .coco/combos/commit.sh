@@ -21,7 +21,7 @@ coco record git diff --staged --stat
 coco record git diff --staged
 
 resp=$(
-	coco ask --reply --schemas 'message:git commit message' <<-EOF
+	coco ask --schemas 'message:git commit message' <<-EOF
 		# Apply Git Commit with Proper Message
 
 		Check the output of the commands provided before and

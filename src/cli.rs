@@ -9,8 +9,10 @@ pub enum ClientCommand {
     },
     Ask {
         prompt: Vec<String>,
-        reply: bool,
         schemas: Vec<String>,
+    },
+    Tell {
+        prompt: Vec<String>,
     },
     Record {
         wrap_result: bool,
@@ -25,6 +27,7 @@ pub fn init_client_logging(program: &str, command: &ClientCommand) {
     let sub = match command {
         ClientCommand::Metadata { .. } => "metadata",
         ClientCommand::Ask { .. } => "ask",
+        ClientCommand::Tell { .. } => "tell",
         ClientCommand::Record { .. } => "record",
         ClientCommand::Mcp { .. } => "mcp",
     };
@@ -41,13 +44,12 @@ pub async fn handle_client_command(
         ClientCommand::Metadata { fields } => crate::cmd::handle_metadata(fields)
             .await
             .whatever_context("failed to handle metadata"),
-        ClientCommand::Ask {
-            prompt,
-            reply,
-            schemas,
-        } => crate::cmd::handle_ask(prompt.join(" "), reply, schemas)
+        ClientCommand::Ask { prompt, schemas } => crate::cmd::handle_ask(prompt.join(" "), schemas)
             .await
             .whatever_context("failed to handle ask"),
+        ClientCommand::Tell { prompt } => crate::cmd::handle_tell(prompt.join(" "))
+            .await
+            .whatever_context("failed to handle tell"),
         ClientCommand::Record {
             wrap_result,
             command,

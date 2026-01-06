@@ -49,12 +49,18 @@ enum Commands {
     },
     Ask {
         /// Ask the model to reply via a tool call
-        #[arg(long, requires = "schemas")]
-        reply: bool,
+        ///
+        /// The response is extracted from tool input; when schemas are omitted,
+        /// defaults to a message field and prints the message string.
         /// Response schemas in field:description format (repeatable)
         #[arg(long, value_name = "field:description")]
         schemas: Vec<String>,
         /// Prompt text to send via session socket (or read from stdin when omitted)
+        #[arg(trailing_var_arg = true)]
+        prompt: Vec<String>,
+    },
+    Tell {
+        /// Send a prompt without waiting for a reply
         #[arg(trailing_var_arg = true)]
         prompt: Vec<String>,
     },
@@ -92,15 +98,8 @@ impl TryFrom<Commands> for ClientCommand {
     fn try_from(value: Commands) -> std::result::Result<Self, Self::Error> {
         match value {
             Commands::Metadata { fields } => Ok(ClientCommand::Metadata { fields }),
-            Commands::Ask {
-                prompt,
-                reply,
-                schemas,
-            } => Ok(ClientCommand::Ask {
-                prompt,
-                reply,
-                schemas,
-            }),
+            Commands::Ask { prompt, schemas } => Ok(ClientCommand::Ask { prompt, schemas }),
+            Commands::Tell { prompt } => Ok(ClientCommand::Tell { prompt }),
             Commands::Record {
                 wrap_result,
                 command,
@@ -180,6 +179,7 @@ async fn main() -> Result<()> {
         Some(
             Commands::Metadata { .. }
             | Commands::Ask { .. }
+            | Commands::Tell { .. }
             | Commands::Record { .. }
             | Commands::Mcp { .. },
         ) => {
