@@ -1186,17 +1186,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_starter_records_coco_ask_prompt() -> Result<(), Box<dyn std::error::Error>> {
+    async fn execute_starter_records_coco_tell_prompt() -> Result<(), Box<dyn std::error::Error>> {
         let bash = find_bash();
         let session_env = session_env_with_coco();
         let (_guard, file_path) = create_temp_combo(
-            "ask.sh",
+            "tell.sh",
             formatdoc! {r#"
             #!{bash}
 
-            coco metadata name=ask || exit 0
+            coco metadata name=tell || exit 0
 
-            coco ask "Please do the thing"
+            coco tell "Please do the thing"
             coco record "echo out"
             "#}
             .as_str(),
@@ -1221,7 +1221,7 @@ mod tests {
         }
         let Starter { combo, .. } = execution.wait().await?;
         let combo = combo?;
-        assert_eq!(combo.metadata.name, "ask");
+        assert_eq!(combo.metadata.name, "tell");
 
         assert_eq!(prompt_text.as_deref(), Some("Please do the thing"));
         let output = record_output.expect("expected record end output");
@@ -1235,7 +1235,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_starter_records_coco_ask_prompt_with_reply()
+    async fn execute_starter_records_coco_ask_prompt_with_schemas()
     -> Result<(), Box<dyn std::error::Error>> {
         let bash = find_bash();
         let session_env = session_env_with_coco();
@@ -1246,7 +1246,7 @@ mod tests {
 
             coco metadata name=ask_reply || exit 0
 
-            coco ask --reply --schemas response:message "Please do the thing"
+            coco ask --schemas response:message "Please do the thing"
             "#}
             .as_str(),
         )

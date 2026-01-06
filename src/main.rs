@@ -22,12 +22,17 @@ enum Commands {
     },
     Ask {
         /// Ask the model to reply via a tool call
-        #[arg(long, requires = "schemas")]
-        reply: bool,
-        /// Response schemas in field:description format (repeatable)
+        ///
+        /// The response is extracted from tool input; when schemas are omitted,
+        /// defaults to a message field and prints the message string.
         #[arg(long, value_name = "field:description")]
         schemas: Vec<String>,
         /// Prompt text to send via session socket (or read from stdin when omitted)
+        #[arg(trailing_var_arg = true)]
+        prompt: Vec<String>,
+    },
+    Tell {
+        /// Send a prompt without waiting for a reply
         #[arg(trailing_var_arg = true)]
         prompt: Vec<String>,
     },
@@ -57,15 +62,8 @@ async fn main() -> code_combo::Result<()> {
     let args = Args::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
     let command = match args.command {
         Commands::Metadata { fields } => ClientCommand::Metadata { fields },
-        Commands::Ask {
-            prompt,
-            reply,
-            schemas,
-        } => ClientCommand::Ask {
-            prompt,
-            reply,
-            schemas,
-        },
+        Commands::Ask { prompt, schemas } => ClientCommand::Ask { prompt, schemas },
+        Commands::Tell { prompt } => ClientCommand::Tell { prompt },
         Commands::Record {
             wrap_result,
             command,
