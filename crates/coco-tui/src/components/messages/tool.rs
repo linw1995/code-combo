@@ -118,6 +118,15 @@ impl Tool {
         self.inner.write().state = new_state
     }
 
+    fn title_case_snake_case(s: &str) -> String {
+        s.split('_')
+            .map(Self::capitalize_first_ascii)
+            .fold(String::new(), |part, mut all| {
+                all.push_str(&part);
+                all
+            })
+    }
+
     fn capitalize_first_ascii(s: &str) -> String {
         let mut bytes = s.as_bytes().to_vec();
         if let Some(b) = bytes.first_mut() {
@@ -154,7 +163,7 @@ impl Tool {
             Span::styled(
                 format!(
                     " {} ",
-                    Self::capitalize_first_ascii(&self.inner.tool_use.name)
+                    Self::title_case_snake_case(&self.inner.tool_use.name)
                 ),
                 apply_dim(theme.ui.tool_title_name),
             ),
