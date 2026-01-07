@@ -1,3 +1,4 @@
+mod agent;
 mod bash;
 mod env;
 mod mcp;
@@ -11,6 +12,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub use agent::{AgentPathConfig, AgentPathLayers};
 pub use bash::{BashConfig, BashConfigLayers, SafeCommandsMode};
 pub use env::EnvString;
 pub use mcp::{
@@ -48,6 +50,8 @@ pub struct Config {
     pub mcp: Option<McpConfig>,
     #[serde(default)]
     pub bash: Option<BashConfig>,
+    #[serde(default)]
+    pub agent: Option<AgentPathConfig>,
 
     #[serde(skip)]
     pub config_dir: PathBuf,
@@ -55,6 +59,8 @@ pub struct Config {
     pub workspace_config_path: Option<PathBuf>,
     #[serde(skip)]
     pub bash_layers: BashConfigLayers,
+    #[serde(skip)]
+    pub agent_path_layers: AgentPathLayers,
 }
 
 impl Config {
@@ -109,13 +115,16 @@ pub fn load_config_with_overrides(
 ) -> Result<Config, BoxError> {
     let mut base_value = parse_toml_value(config_path)?;
     let base_bash = extract_bash_config(&base_value)?;
+    let base_agent = extract_agent_path_config(&base_value)?;
     let mut workspace_bash = None;
+    let mut workspace_agent = None;
     let mut workspace_path = None;
     if let Some(path) = workspace_override_path
         && path.exists()
     {
         let override_value = parse_toml_value(path)?;
         workspace_bash = extract_bash_config(&override_value)?;
+        workspace_agent = extract_agent_path_config(&override_value)?;
         merge_config_values(&mut base_value, override_value)?;
         workspace_path = Some(path.to_path_buf());
     }
@@ -126,6 +135,10 @@ pub fn load_config_with_overrides(
     config.bash_layers = BashConfigLayers {
         global: base_bash,
         workspace: workspace_bash,
+    };
+    config.agent_path_layers = AgentPathLayers {
+        global: base_agent,
+        workspace: workspace_agent,
     };
     Ok(config)
 }
@@ -150,6 +163,20 @@ fn extract_bash_config(value: &toml::Value) -> Result<Option<BashConfig>, BoxErr
         .try_into()
         .map_err(|err| override_error(format!("bash config invalid: {err}")))?;
     Ok(Some(bash))
+}
+
+fn extract_agent_path_config(value: &toml::Value) -> Result<Option<AgentPathConfig>, BoxError> {
+    let table = value
+        .as_table()
+        .ok_or_else(|| override_error("config must be a table"))?;
+    let Some(agent_value) = table.get("agent") else {
+        return Ok(None);
+    };
+    let agent: AgentPathConfig = agent_value
+        .clone()
+        .try_into()
+        .map_err(|err| override_error(format!("agent config invalid: {err}")))?;
+    Ok(Some(agent))
 }
 
 fn merge_config_values(

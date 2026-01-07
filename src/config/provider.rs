@@ -18,6 +18,11 @@ pub struct ProviderConfig {
     pub base_url: String,
     #[serde(default)]
     pub thinking_budget_tokens: Option<usize>,
+
+    /// Optional list of supported models.
+    /// If None or empty, this provider accepts any model (wildcard).
+    #[serde(default)]
+    pub models: Option<Vec<String>>,
 }
 
 impl std::fmt::Debug for ProviderConfig {
