@@ -13,7 +13,10 @@ use std::{
 };
 
 pub use agent::{AgentPathConfig, AgentPathLayers};
-pub use bash::{BashConfig, BashConfigLayers, SafeCommandsMode};
+pub use bash::{
+    BashConfig, BashConfigLayers, FlagValuePolicy, FlagValueType, SafeCommandEntry,
+    SafeCommandsMode, SafeFlagConfig,
+};
 pub use env::EnvString;
 pub use mcp::{
     McpConfig, McpServerCommandConfig, McpServerConfig, McpServerConnection, McpServerHttpConfig,

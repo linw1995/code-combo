@@ -70,13 +70,6 @@ impl Agent {
             .as_deref()
             .and_then(|path| path.parent());
 
-        // Configure bash safe commands
-        bash_executor::configure_safe_commands(
-            &config.bash_layers,
-            &config.config_dir,
-            workspace_dir,
-        );
-
         let thinking_budget_tokens = config
             .providers
             .first()
@@ -90,6 +83,14 @@ impl Agent {
             workspace_dir.unwrap_or(&config.config_dir),
         )
         .unwrap_or_default();
+
+        // Configure bash safe commands (with agent config as highest priority)
+        bash_executor::configure_safe_commands(
+            &config.bash_layers,
+            &config.config_dir,
+            workspace_dir,
+            Some(&agent_config),
+        );
 
         // Apply agent tools as base
         if let Some(tools) = agent_config.tools.as_deref() {

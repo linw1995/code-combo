@@ -33,6 +33,10 @@ pub struct AgentConfig {
     /// Subagent configurations.
     #[serde(default)]
     pub subagents: Option<Vec<SubagentConfig>>,
+
+    /// Safe commands configuration for bash tool.
+    #[serde(default)]
+    pub safe_commands: Option<SafeCommandsConfig>,
 }
 
 impl AgentConfig {
@@ -84,6 +88,9 @@ impl AgentConfig {
         }
         if other.subagents.is_some() {
             self.subagents = other.subagents;
+        }
+        if other.safe_commands.is_some() {
+            self.safe_commands = other.safe_commands;
         }
     }
 }
@@ -237,6 +244,28 @@ pub struct SubagentConfig {
     /// Subagent description.
     #[serde(default)]
     pub description: Option<String>,
+}
+
+/// Safe commands configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum SafeCommandsConfig {
+    /// Inline safe commands definition.
+    Inline {
+        /// Mode for applying these commands.
+        #[serde(default)]
+        mode: crate::config::SafeCommandsMode,
+        /// List of safe command entries.
+        commands: Vec<crate::config::SafeCommandEntry>,
+    },
+    /// Load safe commands from external file.
+    File {
+        /// Mode for applying these commands.
+        #[serde(default)]
+        mode: crate::config::SafeCommandsMode,
+        /// Path to the safe commands file.
+        path: PathBuf,
+    },
 }
 
 /// Errors that can occur when loading agent configuration.
@@ -516,6 +545,124 @@ tools = ["custom_tool"]
                 assert!(content.contains("You are Coco"));
             }
             _ => panic!("Expected Inline system prompt"),
+        }
+    }
+
+    #[test]
+    fn parse_inline_safe_commands() {
+        let toml = r#"
+[agent]
+name = "test-agent"
+
+[agent.safe_commands]
+mode = "override"
+commands = [
+  { name = "cat", allow_any = true, allow_positional = true, positional_path_from = 0 },
+  { command = ["git", "status"], allow_any = true },
+]
+"#;
+        let config = AgentConfig::from_toml(toml).expect("parse config");
+        match config.safe_commands {
+            Some(SafeCommandsConfig::Inline { mode, commands }) => {
+                assert_eq!(mode, crate::config::SafeCommandsMode::Override);
+                assert_eq!(commands.len(), 2);
+                assert_eq!(commands[0].name, Some("cat".to_string()));
+                assert!(commands[0].allow_any);
+                assert_eq!(commands[0].positional_path_from, Some(0));
+                assert_eq!(
+                    commands[1].command,
+                    Some(vec!["git".to_string(), "status".to_string()])
+                );
+            }
+            _ => panic!("expected inline safe commands"),
+        }
+    }
+
+    #[test]
+    fn parse_file_safe_commands() {
+        let toml = r#"
+[agent]
+name = "test-agent"
+
+[agent.safe_commands]
+mode = "append"
+path = "./custom_safe_commands.toml"
+"#;
+        let config = AgentConfig::from_toml(toml).expect("parse config");
+        match config.safe_commands {
+            Some(SafeCommandsConfig::File { mode, path }) => {
+                assert_eq!(mode, crate::config::SafeCommandsMode::Append);
+                assert_eq!(path, PathBuf::from("./custom_safe_commands.toml"));
+            }
+            _ => panic!("expected file safe commands"),
+        }
+    }
+
+    #[test]
+    fn parse_safe_commands_with_detailed_flags() {
+        let toml = r#"
+[agent]
+name = "test-agent"
+
+[agent.safe_commands]
+commands = [
+  { name = "ls", allow_any = true, flags = [
+    { name = "-l", arg = "none" },
+    { name = "--color", arg = "optional" },
+  ]},
+]
+"#;
+        let config = AgentConfig::from_toml(toml).expect("parse config");
+        match config.safe_commands {
+            Some(SafeCommandsConfig::Inline { mode, commands }) => {
+                assert_eq!(mode, crate::config::SafeCommandsMode::Append); // default
+                assert_eq!(commands.len(), 1);
+                let ls_cmd = &commands[0];
+                assert_eq!(ls_cmd.name, Some("ls".to_string()));
+                assert_eq!(ls_cmd.flags.len(), 2);
+                assert_eq!(ls_cmd.flags[0].name, "-l");
+                assert_eq!(ls_cmd.flags[0].arg, crate::config::FlagValuePolicy::None);
+                assert_eq!(ls_cmd.flags[1].name, "--color");
+                assert_eq!(
+                    ls_cmd.flags[1].arg,
+                    crate::config::FlagValuePolicy::Optional
+                );
+            }
+            _ => panic!("expected inline safe commands"),
+        }
+    }
+
+    #[test]
+    fn merge_safe_commands_config() {
+        let mut base = AgentConfig {
+            name: Some("base".to_string()),
+            safe_commands: Some(SafeCommandsConfig::Inline {
+                mode: crate::config::SafeCommandsMode::Append,
+                commands: vec![crate::config::SafeCommandEntry {
+                    name: Some("cat".to_string()),
+                    allow_any: true,
+                    ..Default::default()
+                }],
+            }),
+            ..Default::default()
+        };
+
+        let override_config = AgentConfig {
+            safe_commands: Some(SafeCommandsConfig::File {
+                mode: crate::config::SafeCommandsMode::Override,
+                path: PathBuf::from("./override.toml"),
+            }),
+            ..Default::default()
+        };
+
+        base.merge(override_config);
+
+        match base.safe_commands {
+            Some(SafeCommandsConfig::File { mode, path }) => {
+                assert_eq!(mode, crate::config::SafeCommandsMode::Override);
+                assert_eq!(path, PathBuf::from("./override.toml"));
+            }
+            _ => panic!("expected file safe commands after merge"),
         }
     }
 }
