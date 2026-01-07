@@ -1,7 +1,10 @@
 use std::{
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use serde::{Deserialize, Serialize};
@@ -16,6 +19,7 @@ use crate::{
 static EVENT_TX: OnceLock<UnboundedSender<Event>> = OnceLock::new();
 static ACTION_TX: OnceLock<UnboundedSender<Action>> = OnceLock::new();
 static WORKSPACE_DIR: OnceLock<PathBuf> = OnceLock::new();
+static IGNORE_WORKSPACE_SCRIPTS: AtomicBool = AtomicBool::new(false);
 /// Initialize the global event and action senders.
 ///
 /// This function can only be called once during the application's lifetime.
@@ -79,6 +83,14 @@ pub fn workspace_dir() -> &'static Path {
 
 pub fn workspace_combo_dir() -> PathBuf {
     workspace_dir().join(".coco/combos")
+}
+
+pub fn set_ignore_workspace_scripts(ignore: bool) {
+    IGNORE_WORKSPACE_SCRIPTS.store(ignore, Ordering::Relaxed);
+}
+
+pub fn ignore_workspace_scripts() -> bool {
+    IGNORE_WORKSPACE_SCRIPTS.load(Ordering::Relaxed)
 }
 
 #[inline]
