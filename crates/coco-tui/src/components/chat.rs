@@ -1284,7 +1284,12 @@ async fn task_combo_discover(cancel_token: CancellationToken) {
     let workspace_combo_dir = global::workspace_combo_dir();
 
     tx.send(ComboEvent::Discovering.into()).unwrap();
-    let result = discover_starters(&[&workspace_combo_dir, &combo_dir], cancel_token).await;
+    let mut combo_dirs = Vec::with_capacity(2);
+    if !global::ignore_workspace_scripts() {
+        combo_dirs.push(workspace_combo_dir.as_path());
+    }
+    combo_dirs.push(combo_dir.as_path());
+    let result = discover_starters(&combo_dirs, cancel_token).await;
     if result.cancelled {
         tx.send(ComboEvent::Cancelled { name: None }.into())
             .unwrap();
@@ -1365,7 +1370,12 @@ async fn task_combo_execute(
     let workspace_combo_dir = global::workspace_combo_dir();
 
     tx.send(ComboEvent::Discovering.into()).unwrap();
-    let result = discover_starters(&[&workspace_combo_dir, &combo_dir], cancel_token.clone()).await;
+    let mut combo_dirs = Vec::with_capacity(2);
+    if !global::ignore_workspace_scripts() {
+        combo_dirs.push(workspace_combo_dir.as_path());
+    }
+    combo_dirs.push(combo_dir.as_path());
+    let result = discover_starters(&combo_dirs, cancel_token.clone()).await;
     if result.cancelled || cancel_token.is_cancelled() {
         tx.send(
             ComboEvent::Cancelled {

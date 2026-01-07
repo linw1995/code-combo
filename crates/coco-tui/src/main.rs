@@ -28,6 +28,10 @@ struct Args {
     #[arg(long, default_value_t = default_config_dir().to_string_lossy().to_string())]
     config_dir: String,
 
+    /// Ignore workspace combo scripts under .coco/combos
+    #[arg(long)]
+    ignore_workspace_scripts: bool,
+
     /// Restore the last session
     #[arg(short = 'r', long)]
     restore: bool,
@@ -121,6 +125,7 @@ async fn main() -> Result<()> {
     let matches = cmd.get_matches();
     let command_name = matches.subcommand_name().unwrap_or("coco").to_string();
     let mut args = Args::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
+    global::set_ignore_workspace_scripts(args.ignore_workspace_scripts);
     if !args.prompt.is_empty() {
         ensure_whatever!(
             args.command.is_none(),
