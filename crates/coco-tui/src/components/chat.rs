@@ -3,8 +3,8 @@ use coco_macro::ComponentExt;
 use code_combo::tools::Final;
 use code_combo::{
     Agent, Block as ChatBlock, ChatResponse, Config, Content as ChatContent,
-    Message as ChatMessage, Output, SessionEnv, StarterCommand, StarterError, StarterEvent,
-    StopReason, TextEdit, ToolUse, discover_starters,
+    Message as ChatMessage, Output, SessionEnv, Starter, StarterCommand, StarterError,
+    StarterEvent, StopReason, TextEdit, ToolUse, discover_starters,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use futures::StreamExt;
@@ -19,7 +19,7 @@ use ratatui::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 use time::OffsetDateTime;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -1277,31 +1277,45 @@ impl Chat<'static> {
     }
 }
 
-async fn task_combo_discover(cancel_token: CancellationToken) {
-    let tx = global::event_tx();
-    let config = global::config().await;
-    let combo_dir = config.combo_dir();
-    let workspace_combo_dir = global::workspace_combo_dir();
-
-    tx.send(ComboEvent::Discovering.into()).unwrap();
+fn combo_discovery_dirs(config: &Config) -> Vec<PathBuf> {
     let mut combo_dirs = Vec::with_capacity(2);
     if !global::ignore_workspace_scripts() {
-        combo_dirs.push(workspace_combo_dir.as_path());
+        combo_dirs.push(global::workspace_combo_dir());
     }
-    combo_dirs.push(combo_dir.as_path());
-    let result = discover_starters(&combo_dirs, cancel_token).await;
-    if result.cancelled {
-        tx.send(ComboEvent::Cancelled { name: None }.into())
-            .unwrap();
+    combo_dirs.push(config.combo_dir());
+    combo_dirs
+}
+
+async fn discover_combo_starters(
+    cancel_token: CancellationToken,
+    name: Option<&str>,
+) -> Option<Vec<Starter>> {
+    let tx = global::event_tx();
+    let config = global::config().await;
+    let combo_dirs = combo_discovery_dirs(&config);
+    let combo_dirs = combo_dirs.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+
+    tx.send(ComboEvent::Discovering.into()).unwrap();
+    let result = discover_starters(&combo_dirs, cancel_token.clone()).await;
+    if result.cancelled || cancel_token.is_cancelled() {
+        tx.send(
+            ComboEvent::Cancelled {
+                name: name.map(str::to_string),
+            }
+            .into(),
+        )
+        .unwrap();
+        return None;
+    }
+    Some(result.starters)
+}
+
+async fn task_combo_discover(cancel_token: CancellationToken) {
+    let tx = global::event_tx();
+    let Some(starters) = discover_combo_starters(cancel_token, None).await else {
         return;
-    }
-    tx.send(
-        ComboEvent::Discovered {
-            starters: result.starters,
-        }
-        .into(),
-    )
-    .unwrap();
+    };
+    tx.send(ComboEvent::Discovered { starters }.into()).unwrap();
 }
 
 fn format_command_line(command: &str, args: &[String]) -> String {
@@ -1365,39 +1379,17 @@ async fn task_combo_execute(
     mut agent: Agent,
 ) {
     let tx = global::event_tx();
-    let config = global::config().await;
-    let combo_dir = config.combo_dir();
-    let workspace_combo_dir = global::workspace_combo_dir();
-
-    tx.send(ComboEvent::Discovering.into()).unwrap();
-    let mut combo_dirs = Vec::with_capacity(2);
-    if !global::ignore_workspace_scripts() {
-        combo_dirs.push(workspace_combo_dir.as_path());
-    }
-    combo_dirs.push(combo_dir.as_path());
-    let result = discover_starters(&combo_dirs, cancel_token.clone()).await;
-    if result.cancelled || cancel_token.is_cancelled() {
-        tx.send(
-            ComboEvent::Cancelled {
-                name: Some(name.clone()),
-            }
-            .into(),
-        )
-        .unwrap();
+    let Some(starters) = discover_combo_starters(cancel_token.clone(), Some(&name)).await else {
         return;
-    }
+    };
 
-    let Some(starter) = result
-        .starters
-        .into_iter()
-        .find(|starter| match &starter.combo {
-            Ok(combo) => combo.metadata.name == name,
-            Err(err) => {
-                warn!(?starter.path, ?err, "Failed to load combo");
-                false
-            }
-        })
-    else {
+    let Some(starter) = starters.into_iter().find(|starter| match &starter.combo {
+        Ok(combo) => combo.metadata.name == name,
+        Err(err) => {
+            warn!(?starter.path, ?err, "Failed to load combo");
+            false
+        }
+    }) else {
         tx.send(ComboEvent::NotFound { name: name.clone() }.into())
             .unwrap();
         return;
