@@ -351,11 +351,15 @@ fn match_command_chain(command: &ParsedCommand, rule: &SafeCommandRule) -> Optio
         return None;
     }
     for (index, token) in rule.command_chain.iter().skip(1).enumerate() {
-        if command.args[index].text != *token {
+        if !command_chain_token_matches(command.args[index].text.as_str(), token.as_str()) {
             return None;
         }
     }
     Some(consumed_args)
+}
+
+fn command_chain_token_matches(arg: &str, token: &str) -> bool {
+    token == ".*" || arg == token
 }
 
 fn consume_long_option(
@@ -1069,6 +1073,28 @@ mod tests {
         assert_safe_cmd_with_rules!("git checkout", &rules);
         assert_safe_cmd_with_rules!("cargo check", &rules);
         assert_unsafe_cmd_with_rules!("cargo build", &rules);
+    }
+
+    #[test]
+    fn safe_command_matches_wildcard_chain_token() {
+        let rules = vec![SafeCommandRule {
+            command_chain: vec![
+                "coco".to_string(),
+                "mcp".to_string(),
+                ".*".to_string(),
+                "--help".to_string(),
+            ],
+            args: ArgPolicy::AllowList {
+                flags: HashMap::new(),
+                allow_positional: false,
+                positional_path_from: None,
+            },
+        }];
+
+        assert_safe_cmd_with_rules!("coco mcp list --help", &rules);
+        assert_safe_cmd_with_rules!("coco mcp server --help", &rules);
+        assert_unsafe_cmd_with_rules!("coco mcp --help", &rules);
+        assert_unsafe_cmd_with_rules!("coco mcp list --help --verbose", &rules);
     }
 
     #[test]
