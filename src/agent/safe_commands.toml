@@ -1,4 +1,16 @@
 [[commands]]
+command = ["coco", "mcp"]
+flags = [{ name = "--help", arg = "none" }, { name = "-h", arg = "none" }]
+
+[[commands]]
+command = ["coco", "mcp", ".*"]
+flags = [{ name = "--help", arg = "none" }, { name = "-h", arg = "none" }]
+
+[[commands]]
+command = ["coco", "mcp", ".*", ".*"]
+flags = [{ name = "--help", arg = "none" }, { name = "-h", arg = "none" }]
+
+[[commands]]
 name = "cat"
 allow_any = true
 allow_positional = true
