@@ -12,6 +12,7 @@ use crate::{
 use clap::{
     Arg, ArgAction, Command, builder::PossibleValuesParser, error::ErrorKind, value_parser,
 };
+use rmcp::model::CallToolResult;
 use serde_json::{Map, Number, Value};
 use snafu::prelude::*;
 
@@ -121,7 +122,7 @@ pub async fn handle_mcp(parent_command: &str, command_name: &str, args: Vec<Stri
         .await
         .whatever_context("failed to send mcp request")?;
     let result = expect_ok(response)?;
-    let output = serde_json::to_string(&result).whatever_context("failed to serialize result")?;
+    let output = render_final_output(&result)?;
     println!("{output}");
     Ok(())
 }
@@ -501,6 +502,30 @@ fn expect_ok(response: McpResponse) -> Result<serde_json::Value> {
     }
 }
 
+fn render_final_output(result: &Value) -> Result<String> {
+    let parsed = serde_json::from_value::<CallToolResult>(result.clone());
+    if let Ok(call_result) = parsed {
+        if let Some(structured) = call_result.structured_content {
+            return serde_json::to_string(&structured)
+                .whatever_context("failed to serialize structured content");
+        }
+        if !call_result.content.is_empty() {
+            let mut parts = Vec::with_capacity(call_result.content.len());
+            for content in call_result.content {
+                if let Some(text) = content.as_text() {
+                    parts.push(text.text.clone());
+                } else {
+                    return serde_json::to_string(result)
+                        .whatever_context("failed to serialize result");
+                }
+            }
+            return Ok(parts.join("\n"));
+        }
+    }
+
+    serde_json::to_string(result).whatever_context("failed to serialize result")
+}
+
 fn detect_target_server(args: &[String], server_names: &[String]) -> Option<String> {
     args.iter()
         .find(|arg| server_names.iter().any(|name| name == *arg))
@@ -546,7 +571,7 @@ mod tests {
     use std::{env, path::PathBuf, sync::Arc};
 
     use indoc::indoc;
-    use rmcp::{service::ServiceExt, transport::StreamableHttpClientTransport};
+    use rmcp::{model::Content, service::ServiceExt, transport::StreamableHttpClientTransport};
     use snafu::prelude::*;
     use tokio::process::Command;
 
@@ -817,19 +842,8 @@ mod tests {
             &["--message", "hello"],
         )
         .await?;
-        let value: serde_json::Value =
-            serde_json::from_str(&output).whatever_context("failed to parse JSON output")?;
-
-        let expected = serde_json::json!({
-            "content": [
-                {
-                    "text": "echo: hello",
-                    "type": "text"
-                }
-            ],
-            "isError": false
-        });
-        assert_eq!(value, expected);
+        let output = output.trim_end_matches(['\n', '\r']);
+        assert_eq!(output, "echo: hello");
 
         guard.shutdown().await;
         Ok(())
@@ -995,5 +1009,21 @@ mod tests {
 
         guard.shutdown().await;
         Ok(())
+    }
+
+    #[test]
+    fn render_mcp_final_outputs_text() {
+        let result = CallToolResult::success(vec![Content::text("ok")]);
+        let value = serde_json::to_value(result).expect("serialize CallToolResult");
+        let output = render_final_output(&value).expect("render output");
+        assert_eq!(output, "ok");
+    }
+
+    #[test]
+    fn render_mcp_final_prefers_structured_content() {
+        let result = CallToolResult::structured(serde_json::json!({"message": "ok"}));
+        let value = serde_json::to_value(result).expect("serialize CallToolResult");
+        let output = render_final_output(&value).expect("render output");
+        assert_eq!(output, "{\"message\":\"ok\"}");
     }
 }
