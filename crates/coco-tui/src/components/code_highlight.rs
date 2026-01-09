@@ -554,8 +554,8 @@ mod tests {
         line
     }
 
-    #[test]
-    fn code_highlight_adds_newline_guides() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn code_highlight_adds_newline_guides() {
         let source = "echo one\necho two";
         let overlay = HighlightOverlay::new(0..source.len(), OverlayLevel::Warning)
             .with_newline_guide("line break");
