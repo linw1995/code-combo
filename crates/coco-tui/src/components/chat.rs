@@ -587,8 +587,9 @@ impl Chat<'static> {
         let mut hints = ShortcutHints::default();
         hints.push_visible(&[("Focus", "CR")]);
         hints.push_visible(&[("Commands", "C-p")]);
-        hints.push_visible(&[("Thinking", "C-r")]);
         hints.push_visible(&[("Up", "k"), ("Down", "j")]);
+        hints.push_hidden(&[("Thinking", "C-r")]);
+        hints.push_hidden(&[("Auto Accept Edits", "S-Tab")]);
         hints
     }
 
@@ -600,6 +601,8 @@ impl Chat<'static> {
         hints.push_visible(&[("Up", "k"), ("Down", "j")]);
         hints.push_hidden(&[("Scroll Up", "C-y"), ("Down", "C-e")]);
         hints.push_hidden(&[("Scroll+ Up", "C-u"), ("Down", "C-d")]);
+        hints.push_hidden(&[("Thinking", "C-r")]);
+        hints.push_hidden(&[("Auto Accept Edits", "S-Tab")]);
         hints
     }
 
