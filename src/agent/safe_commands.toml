@@ -34,6 +34,16 @@ name = "false"
 allow_any = true
 
 [[commands]]
+name = "find"
+allow_positional = true
+positional_path_from = 0
+flags = [
+  { name = "-name", arg = "required" },
+  { name = "-type", arg = "required" },
+  { name = "-maxdepth", arg = "required" },
+]
+
+[[commands]]
 name = "grep"
 allow_any = true
 allow_positional = true

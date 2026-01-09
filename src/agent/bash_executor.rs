@@ -449,6 +449,19 @@ fn unsafe_args_with_mode(
             }
         }
 
+        if !options_ended
+            && is_short_option(text)
+            && let Some(outcome) = check_single_dash_long_option(arg, index, args, flags, mode)
+        {
+            match outcome {
+                OptionOutcome::Safe(consumed) => {
+                    index += consumed;
+                    continue;
+                }
+                OptionOutcome::Unsafe(range, reason) => return vec![(range, reason)],
+            }
+        }
+
         if !options_ended && is_short_option(text) {
             match check_short_options(arg, index, args, flags, mode) {
                 OptionOutcome::Safe(consumed) => {
@@ -530,6 +543,14 @@ fn is_safe_args_with_mode(
             continue;
         }
 
+        if !options_ended
+            && is_short_option(text)
+            && let Some(consumed) = consume_single_dash_long_option(arg, index, args, flags, mode)
+        {
+            index += consumed;
+            continue;
+        }
+
         if !options_ended && is_short_option(text) {
             let consumed = match parse_short_options(arg, index, args, flags, mode) {
                 Some(consumed) => consumed,
@@ -591,6 +612,32 @@ fn split_long_option(arg: &str) -> (&str, Option<&str>) {
         (name, Some(value))
     } else {
         (arg, None)
+    }
+}
+
+fn split_single_dash_option(arg: &str) -> (&str, Option<&str>) {
+    if let Some((name, value)) = arg.split_once('=') {
+        (name, Some(value))
+    } else {
+        (arg, None)
+    }
+}
+
+fn match_single_dash_long_option<'a>(
+    arg: &'a str,
+    flags: &HashMap<String, FlagPolicy>,
+) -> Option<(&'a str, Option<&'a str>)> {
+    if !arg.starts_with('-') || arg.starts_with("--") {
+        return None;
+    }
+    let (name, attached_value) = split_single_dash_option(arg);
+    if name.len() <= 2 {
+        return None;
+    }
+    if flags.contains_key(name) {
+        Some((name, attached_value))
+    } else {
+        None
     }
 }
 
@@ -678,6 +725,64 @@ fn consume_long_option(
     mode: ArgMode,
 ) -> Option<usize> {
     let (name, attached_value) = split_long_option(token.text.as_str());
+    consume_option_with_name(name, attached_value, token, index, args, flags, mode)
+}
+
+enum OptionOutcome {
+    Safe(usize),
+    Unsafe(Range<usize>, String),
+}
+
+fn check_long_option(
+    token: &ParsedArg,
+    index: usize,
+    args: &[ParsedArg],
+    flags: &HashMap<String, FlagPolicy>,
+    mode: ArgMode,
+) -> OptionOutcome {
+    let (name, attached_value) = split_long_option(token.text.as_str());
+    check_option_with_name(name, attached_value, token, index, args, flags, mode)
+}
+
+fn consume_single_dash_long_option(
+    token: &ParsedArg,
+    index: usize,
+    args: &[ParsedArg],
+    flags: &HashMap<String, FlagPolicy>,
+    mode: ArgMode,
+) -> Option<usize> {
+    let (name, attached_value) = match_single_dash_long_option(token.text.as_str(), flags)?;
+    consume_option_with_name(name, attached_value, token, index, args, flags, mode)
+}
+
+fn check_single_dash_long_option(
+    token: &ParsedArg,
+    index: usize,
+    args: &[ParsedArg],
+    flags: &HashMap<String, FlagPolicy>,
+    mode: ArgMode,
+) -> Option<OptionOutcome> {
+    let (name, attached_value) = match_single_dash_long_option(token.text.as_str(), flags)?;
+    Some(check_option_with_name(
+        name,
+        attached_value,
+        token,
+        index,
+        args,
+        flags,
+        mode,
+    ))
+}
+
+fn consume_option_with_name(
+    name: &str,
+    attached_value: Option<&str>,
+    token: &ParsedArg,
+    index: usize,
+    args: &[ParsedArg],
+    flags: &HashMap<String, FlagPolicy>,
+    mode: ArgMode,
+) -> Option<usize> {
     let policy = match flags.get(name) {
         Some(policy) => policy,
         None => {
@@ -754,19 +859,15 @@ fn consume_long_option(
     }
 }
 
-enum OptionOutcome {
-    Safe(usize),
-    Unsafe(Range<usize>, String),
-}
-
-fn check_long_option(
+fn check_option_with_name(
+    name: &str,
+    attached_value: Option<&str>,
     token: &ParsedArg,
     index: usize,
     args: &[ParsedArg],
     flags: &HashMap<String, FlagPolicy>,
     mode: ArgMode,
 ) -> OptionOutcome {
-    let (name, attached_value) = split_long_option(token.text.as_str());
     let policy = match flags.get(name) {
         Some(policy) => policy,
         None => {
@@ -1682,6 +1783,32 @@ mod tests {
 
         assert_safe_cmd_with_rules!("cat -", &rules);
         assert_unsafe_cmd_with_rules!("cat ./file", &rules);
+    }
+
+    #[test]
+    fn safe_command_allows_single_dash_long_option_with_value() {
+        let mut flags = HashMap::new();
+        flags.insert(
+            "-name".to_string(),
+            FlagPolicy {
+                arg: FlagValuePolicy::Required,
+                value_type: FlagValueType::Any,
+            },
+        );
+        let rules = vec![SafeCommandRule {
+            command_chain: vec!["find".to_string()],
+            args: ArgPolicy::AllowList {
+                flags,
+                allow_positional: false,
+                positional_path_from: None,
+                allow_dash: false,
+            },
+        }];
+
+        assert_safe_cmd_with_rules!("find -name main.rs", &rules);
+        assert_safe_cmd_with_rules!("find -name=main.rs", &rules);
+        assert_unsafe_cmd_with_rules!("find -name", &rules);
+        assert_unsafe_cmd_with_rules!("find -na main.rs", &rules);
     }
 
     #[test]
