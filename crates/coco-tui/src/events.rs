@@ -95,6 +95,7 @@ pub enum ComboEvent {
     PromptReply {
         name: String,
         tool_use: ToolUse,
+        thinking: Vec<String>,
     },
     Executed {
         name: String,

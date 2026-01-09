@@ -49,6 +49,7 @@ pub struct ChatResponse {
 pub struct PromptReply {
     pub tool_use: ToolUse,
     pub response: String,
+    pub thinking: Vec<String>,
 }
 
 impl Agent {
@@ -244,12 +245,20 @@ impl Agent {
                 response.content.clone(),
             )));
         }
-        let Some(tool_use) = response.content.into_iter().find_map(|block| match block {
-            AnthropicBlock::ToolUse(tool_use) if tool_use.name == PROMPT_REPLY_TOOL_NAME => {
-                Some(tool_use)
+        let mut thinking = Vec::new();
+        let mut reply_tool = None;
+        for block in response.content.into_iter() {
+            match block {
+                AnthropicBlock::Thinking { thinking: text, .. } => {
+                    thinking.push(text);
+                }
+                AnthropicBlock::ToolUse(tool_use) if tool_use.name == PROMPT_REPLY_TOOL_NAME => {
+                    reply_tool = Some(tool_use);
+                }
+                _ => (),
             }
-            _ => None,
-        }) else {
+        }
+        let Some(tool_use) = reply_tool else {
             whatever!("reply tool use not found in response");
         };
         {
@@ -261,7 +270,11 @@ impl Agent {
         let response = serde_json::to_string(&tool_use.input)
             .whatever_context("failed to serialize reply tool input")?;
         self.mark_thinking_cleanup_pending(stop_reason.as_ref());
-        Ok(PromptReply { tool_use, response })
+        Ok(PromptReply {
+            tool_use,
+            response,
+            thinking,
+        })
     }
 
     pub fn grant_once(&mut self, id: &str, name: &str) {

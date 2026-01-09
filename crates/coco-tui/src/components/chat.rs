@@ -375,15 +375,15 @@ impl Chat<'static> {
                 self.set_processing();
             }
             ComboEvent::Prompt { thinking, .. } => {
-                self.combo_thinking_active = thinking.as_ref().is_some_and(|cfg| cfg.enabled);
+                self.set_combo_thinking_active(thinking.as_ref().is_some_and(|cfg| cfg.enabled));
                 self.set_processing();
             }
             ComboEvent::PromptReply { .. } => {
-                self.combo_thinking_active = false;
+                self.set_combo_thinking_active(false);
                 self.set_processing();
             }
             ComboEvent::Executed { starter, .. } => {
-                self.combo_thinking_active = false;
+                self.set_combo_thinking_active(false);
                 if let Err(err) = starter.combo.as_ref() {
                     warn!(?err, "Failed to execute starter");
                 }
@@ -392,16 +392,24 @@ impl Chat<'static> {
             ComboEvent::Discovered { .. }
             | ComboEvent::NotFound { .. }
             | ComboEvent::Cancelled { .. } => {
-                self.combo_thinking_active = false;
+                self.set_combo_thinking_active(false);
                 self.set_ready();
             }
             ComboEvent::ReplyToolError { message } => {
-                self.combo_thinking_active = false;
+                self.set_combo_thinking_active(false);
                 self.messages
                     .push(Message::system(Plain::new(message.to_string()).into()));
                 global::trigger_schedule_session_save();
             }
         }
+    }
+
+    fn set_combo_thinking_active(&mut self, enabled: bool) {
+        if self.combo_thinking_active == enabled {
+            return;
+        }
+        self.combo_thinking_active = enabled;
+        global::signal_dirty();
     }
 
     fn update_focus(&mut self, new_focus: Focus) {
@@ -828,7 +836,7 @@ impl Chat<'static> {
         let system_prompt = self.state.system_prompt.clone();
         let auto_accept_edits = self.state.auto_accept_edits;
         let thinking_enabled = self.state.thinking_enabled;
-        self.combo_thinking_active = false;
+        self.set_combo_thinking_active(false);
 
         // 2. Clear messages
         self.messages.clear();
@@ -1617,6 +1625,7 @@ async fn task_combo_execute(
                                 ComboEvent::PromptReply {
                                     name: name.clone(),
                                     tool_use: reply.tool_use.clone(),
+                                    thinking: reply.thinking.clone(),
                                 }
                                 .into(),
                             )
