@@ -28,8 +28,8 @@ use tracing::{debug, warn};
 use super::{
     Action, AnswerEvent, AskEvent, BotMessage, CacheInvalidation, Combo, ComboAction, ComboEvent,
     CommandPaletteAction, Component, Event, Input, Message, Messages, NavigationKey,
-    NavigationResult, Plain, SessionAction, ShortcutHints, ShortcutHintsPanel, Tool, ToolAction,
-    TranscriptMessage,
+    NavigationResult, Plain, SessionAction, ShortcutHints, ShortcutHintsPanel, Thinking, Tool,
+    ToolAction, TranscriptMessage,
 };
 use crate::{
     components::{CommandPalette, Content, Persistable},
@@ -516,6 +516,7 @@ impl Chat<'static> {
             return;
         }
         debug!(?value, "submiting");
+        self.messages.collapse_thinking();
         self.messages
             .push(Message::user(Plain::new(value.clone()).into()));
         let content = self.build_user_content(ChatContent::Text(value));
@@ -595,6 +596,9 @@ impl Chat<'static> {
 
     fn chat_messages_shortcut_hints(&self) -> ShortcutHints {
         let mut hints = self.messages.shortcut_hints();
+        if self.messages.has_thinking_toggle_for_focus() {
+            hints.push_visible(&[("Thinking", "r")]);
+        }
         if !self.messages.is_actionable() {
             hints.push_visible(&[("Back", "Esc")]);
         }
@@ -944,7 +948,7 @@ impl Component for Chat<'static> {
                         }
                         BotMessage::System(message) => Message::system(Plain::new(message).into()),
                         BotMessage::Thinking(thinking) => {
-                            Message::system(Plain::new(format!("Thinking:\n{thinking}")).into())
+                            Message::bot(Thinking::new(thinking).into())
                         }
                     }));
                 // Trigger session save after receiving bot response
@@ -1119,6 +1123,9 @@ impl Component for Chat<'static> {
                     self.messages.blur();
                     self.update_focus(Focus::InputBlur);
                 }
+            }
+            (Messages, KM::NONE, Char('r')) => {
+                self.messages.toggle_thinking_for_focus();
             }
             // Scrolling
             (Messages, KM::CONTROL, Char('y')) => {

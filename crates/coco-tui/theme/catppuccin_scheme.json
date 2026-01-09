@@ -13,6 +13,14 @@
             "fg": "blue",
             "add_modifier": "BOLD|ITALIC"
         },
+        "thinking_role": {
+            "fg": "teal",
+            "add_modifier": "BOLD|ITALIC|DIM"
+        },
+        "thinking_text": {
+            "fg": "overlay1",
+            "add_modifier": "DIM"
+        },
         "shortcut": {
             "fg": "blue",
             "add_modifier": "BOLD|ITALIC"
