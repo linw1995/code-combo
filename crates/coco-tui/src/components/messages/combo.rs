@@ -323,7 +323,7 @@ impl Combo {
                     self.clear_combo_stream();
                 }
             }
-            ComboEvent::Prompt { name, prompt } => {
+            ComboEvent::Prompt { name, prompt, .. } => {
                 if &self.state.name == name {
                     self.push_prompt(prompt);
                 }
@@ -1009,6 +1009,7 @@ mod tests {
         combo.handle_event(&Event::Combo(ComboEvent::Prompt {
             name: "demo".to_string(),
             prompt: "line1".to_string(),
+            thinking: None,
         }));
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
             name: "demo".to_string(),
@@ -1052,6 +1053,7 @@ mod tests {
         combo.handle_event(&Event::Combo(ComboEvent::Prompt {
             name: "demo".to_string(),
             prompt: "line1".to_string(),
+            thinking: None,
         }));
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
             name: "demo".to_string(),

@@ -147,6 +147,112 @@ impl Content for TranscriptText {
 impl ContentComponent for TranscriptText {}
 
 #[derive(Serialize, Deserialize)]
+struct TranscriptThinkingState {
+    thinking: String,
+    signature: Option<String>,
+}
+
+#[derive(ComponentExt, ContentComponentExt)]
+#[component(type_id = "transcript_thinking")]
+struct TranscriptThinking {
+    state: TranscriptThinkingState,
+    content: Box<dyn ContentComponent>,
+}
+
+impl TranscriptThinking {
+    fn new(thinking: &str, signature: Option<String>) -> Self {
+        let content = text_component(thinking, false);
+        Self {
+            state: TranscriptThinkingState {
+                thinking: thinking.to_string(),
+                signature,
+            },
+            content,
+        }
+    }
+}
+
+impl Persistable for TranscriptThinking {
+    fn save(&self) -> Session {
+        session::save(&self.state)
+    }
+
+    fn load(session: Session) -> Result<Self> {
+        let state: TranscriptThinkingState = session::load(session)?;
+        Ok(Self::new(&state.thinking, state.signature))
+    }
+}
+
+impl Component for TranscriptThinking {
+    fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
+        Box::new(vec![self.content.as_mut() as &mut dyn Component].into_iter())
+    }
+
+    fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        let header = "- type: thinking";
+        let key = "thinking:";
+        let signature = self
+            .state
+            .signature
+            .as_ref()
+            .map(|value| format!("signature: {value}"));
+
+        let header_height = line_height(header, area.width);
+        let key_height = line_height(key, area.width.saturating_sub(INDENT_STEP));
+        let content_height = child_height(self.content.as_ref(), area.width, INDENT_STEP * 2);
+        let signature_height = signature
+            .as_ref()
+            .map(|value| line_height(value, area.width.saturating_sub(INDENT_STEP)));
+
+        let mut heights = vec![header_height, key_height, content_height];
+        if let Some(height) = signature_height {
+            heights.push(height);
+        }
+        let chunks = vertical_chunks(area, &heights);
+
+        if !chunks.is_empty() {
+            draw_line(frame, chunks[0], header);
+        }
+        if chunks.len() >= 2 {
+            draw_line(frame, indented_area(chunks[1], INDENT_STEP), key);
+        }
+        if chunks.len() >= 3 {
+            draw_child(self.content.as_mut(), frame, chunks[2], INDENT_STEP * 2)?;
+        }
+        if chunks.len() >= 4
+            && let Some(signature) = signature
+        {
+            draw_line(frame, indented_area(chunks[3], INDENT_STEP), &signature);
+        }
+        Ok(())
+    }
+}
+
+impl Content for TranscriptThinking {
+    fn height(&self, width: u16) -> usize {
+        let header = "- type: thinking";
+        let key = "thinking:";
+        let signature = self
+            .state
+            .signature
+            .as_ref()
+            .map(|value| format!("signature: {value}"));
+
+        let header_height = line_height(header, width);
+        let key_height = line_height(key, width.saturating_sub(INDENT_STEP));
+        let content_height = child_height(self.content.as_ref(), width, INDENT_STEP * 2);
+        let signature_height = signature
+            .as_ref()
+            .map(|value| line_height(value, width.saturating_sub(INDENT_STEP)))
+            .unwrap_or(0);
+
+        header_height + key_height + content_height + signature_height
+    }
+}
+
+impl ContentComponent for TranscriptThinking {}
+
+#[derive(Serialize, Deserialize)]
 struct TranscriptToolUseState {
     tool_use: code_combo::ToolUse,
 }
@@ -620,6 +726,10 @@ fn build_block_items(blocks: &[ChatBlock], detect_json: bool) -> Vec<Box<dyn Con
 fn block_component(block: &ChatBlock, detect_json: bool) -> Box<dyn ContentComponent> {
     match block {
         ChatBlock::Text { text } => TranscriptText::new(text, detect_json).into(),
+        ChatBlock::Thinking {
+            thinking,
+            signature,
+        } => TranscriptThinking::new(thinking, signature.clone()).into(),
         ChatBlock::ToolUse(tool_use) => TranscriptToolUse::new(tool_use).into(),
         ChatBlock::ToolResult {
             tool_use_id,

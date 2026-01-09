@@ -24,6 +24,7 @@ pub async fn handle_ask(prompt: String, schemas: Vec<String>) -> Result<()> {
         prompt,
         reply: true,
         schemas,
+        thinking: None,
     };
     let response = client
         .send_prompt_wait_response(payload)
@@ -50,6 +51,7 @@ pub async fn handle_tell(prompt: String) -> Result<()> {
     };
     let payload = PromptPayload {
         prompt,
+        thinking: None,
         ..Default::default()
     };
     client

@@ -25,6 +25,18 @@ pub enum ToolChoice {
     None,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum Thinking {
+    Enabled { budget_tokens: usize },
+}
+
+impl Thinking {
+    pub fn enabled(budget_tokens: usize) -> Self {
+        Self::Enabled { budget_tokens }
+    }
+}
+
 #[bon]
 impl ToolChoice {
     #[builder]
@@ -75,6 +87,9 @@ pub struct MessagesRequest {
     /// How the model should use the provided tools.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoice>,
+    /// Enable thinking mode for the request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<Thinking>,
     /// Definitions of tools that the model may use.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<Tool>,
@@ -88,6 +103,7 @@ impl MessagesRequest {
         system: Option<&str>,
         messages: Vec<Message>,
         #[builder(default)] tools: Vec<Tool>,
+        thinking: Option<Thinking>,
     ) -> Self {
         Self {
             model: model.to_string(),
@@ -96,6 +112,7 @@ impl MessagesRequest {
             max_tokens: 32000,
             temperature: None,
             tool_choice: None,
+            thinking,
             tools,
         }
     }
@@ -305,6 +322,19 @@ mod tests {
             let rv = serde_json::to_value(target.clone()).unwrap();
             assert_eq!(rv, expect, "original target: {target:?}")
         }
+    }
+
+    #[test]
+    fn thinking_serialization() {
+        let thinking = Thinking::enabled(1024);
+        let rv = serde_json::to_value(thinking).unwrap();
+        assert_eq!(
+            rv,
+            json!({
+                "type": "enabled",
+                "budget_tokens": 1024
+            })
+        );
     }
 
     mod networking {

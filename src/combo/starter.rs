@@ -21,8 +21,8 @@ use tracing::{debug, info, warn};
 use crate::tools::{BASH_TOOL_NAME, BashInput, BashOutput, Final};
 use crate::{
     ClientMessage, Combo, ComboMetadata, ControlAction, MetadataPayload, MetadataResponse,
-    PromptSchema, RecordControl, RecordEndPayload, ServerMessage, SessionEnv, SessionSocketServer,
-    StreamKind, ToolUse,
+    PromptPayload, PromptSchema, RecordControl, RecordEndPayload, ServerMessage, SessionEnv,
+    SessionSocketServer, StreamKind, ThinkingConfig, ToolUse,
     exec::{ChunkConfig, ExecCommand, OutputChunk, ProcessEvent},
 };
 use serde_json::json;
@@ -70,6 +70,7 @@ pub enum StarterEvent {
     PromptRequest {
         prompt: String,
         schemas: Vec<PromptSchema>,
+        thinking: Option<ThinkingConfig>,
         responder: PromptResponseSender,
     },
     Finished {
@@ -261,6 +262,27 @@ fn parse_combo(command: &str) -> Combo {
             description: String::new(),
         },
     }
+}
+
+fn resolve_prompt_thinking(
+    metadata: Option<&MetadataPayload>,
+    payload: &PromptPayload,
+) -> Option<ThinkingConfig> {
+    let metadata_thinking = metadata.and_then(|meta| meta.thinking.clone());
+    let metadata_budget = metadata_thinking
+        .as_ref()
+        .and_then(|cfg| if cfg.enabled { cfg.budget_tokens } else { None });
+    let Some(prompt_thinking) = payload.thinking.clone() else {
+        return metadata_thinking;
+    };
+    if !prompt_thinking.enabled {
+        return Some(prompt_thinking);
+    }
+    let budget_tokens = prompt_thinking.budget_tokens.or(metadata_budget);
+    Some(ThinkingConfig {
+        enabled: true,
+        budget_tokens,
+    })
 }
 
 fn record_output(record: &RecordedCommand) -> BashOutput {
@@ -827,10 +849,12 @@ async fn run_session_server(
                         }
                         let (response_tx, response_rx) = oneshot::channel();
                         let responder = PromptResponseSender::new(response_tx);
+                        let thinking = resolve_prompt_thinking(state.metadata.as_ref(), &payload);
                         event_tx
                             .send(StarterEvent::PromptRequest {
                                 prompt: payload.prompt,
                                 schemas: payload.schemas,
+                                thinking,
                                 responder,
                             })
                             .await
@@ -1286,6 +1310,7 @@ mod tests {
                 description: None,
                 model: None,
                 tools: None,
+                thinking: None,
             })
             .await?;
 
@@ -1319,6 +1344,7 @@ mod tests {
                 description: None,
                 model: None,
                 tools: None,
+                thinking: None,
             })
             .await?;
         assert!(response.discovery);
@@ -1329,6 +1355,7 @@ mod tests {
                 description: None,
                 model: None,
                 tools: None,
+                thinking: None,
             })
             .await;
         assert!(matches!(

@@ -11,7 +11,6 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
-use tracing::trace;
 
 use super::{CacheInvalidation, Component, Content, ContentComponent};
 use crate::{
@@ -151,7 +150,6 @@ impl<'a> CodeHighlight<'a> {
             .keys()
             .map(|x| x.as_str())
             .collect::<Vec<_>>();
-        trace!(?names, "highlighting with color scheme");
         let events = highlight(&lang, &names, source).whatever_context("failed to highlight")?;
 
         let mut line = vec![];

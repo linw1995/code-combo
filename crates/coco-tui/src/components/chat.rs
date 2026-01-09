@@ -54,6 +54,7 @@ pub struct Chat<'a> {
     indicator: ThrobberState,
     shortcut_hints: ShortcutHintsPanel,
     prev_focus: Option<Focus>,
+    combo_thinking_active: bool,
 
     token_schedule_session_save: Option<CancellationToken>,
     cancellation_guard: CancellationGuard,
@@ -69,6 +70,8 @@ struct Inner {
     focus: Focus,
     #[serde(default)]
     auto_accept_edits: bool,
+    #[serde(default)]
+    thinking_enabled: bool,
     pending_chats: Vec<ChatBlock>,
     #[serde(with = "time::serde::rfc3339")]
     created_at: time::OffsetDateTime,
@@ -86,6 +89,7 @@ impl Default for Inner {
             state: ChatState::Ready,
             focus: Focus::Input,
             auto_accept_edits: false,
+            thinking_enabled: false,
             pending_chats: Vec::new(),
             created_at: now,
             updated_at: now,
@@ -210,6 +214,7 @@ impl Chat<'static> {
             indicator: ThrobberState::default(),
             shortcut_hints: ShortcutHintsPanel::default(),
             prev_focus: None,
+            combo_thinking_active: false,
             token_schedule_session_save: None,
             cancellation_guard: CancellationGuard::default(),
         }
@@ -366,12 +371,19 @@ impl Chat<'static> {
             | ComboEvent::Output { .. }
             | ComboEvent::RecordStart { .. }
             | ComboEvent::RecordOutput { .. }
-            | ComboEvent::RecordEnd { .. }
-            | ComboEvent::Prompt { .. }
-            | ComboEvent::PromptReply { .. } => {
+            | ComboEvent::RecordEnd { .. } => {
+                self.set_processing();
+            }
+            ComboEvent::Prompt { thinking, .. } => {
+                self.combo_thinking_active = thinking.as_ref().is_some_and(|cfg| cfg.enabled);
+                self.set_processing();
+            }
+            ComboEvent::PromptReply { .. } => {
+                self.combo_thinking_active = false;
                 self.set_processing();
             }
             ComboEvent::Executed { starter, .. } => {
+                self.combo_thinking_active = false;
                 if let Err(err) = starter.combo.as_ref() {
                     warn!(?err, "Failed to execute starter");
                 }
@@ -380,9 +392,11 @@ impl Chat<'static> {
             ComboEvent::Discovered { .. }
             | ComboEvent::NotFound { .. }
             | ComboEvent::Cancelled { .. } => {
+                self.combo_thinking_active = false;
                 self.set_ready();
             }
             ComboEvent::ReplyToolError { message } => {
+                self.combo_thinking_active = false;
                 self.messages
                     .push(Message::system(Plain::new(message.to_string()).into()));
                 global::trigger_schedule_session_save();
@@ -527,6 +541,16 @@ impl Chat<'static> {
         global::trigger_schedule_session_save();
     }
 
+    fn toggle_thinking(&mut self) {
+        let enabled = {
+            let mut state = self.state.write();
+            state.thinking_enabled = !state.thinking_enabled;
+            state.thinking_enabled
+        };
+        self.agent.set_thinking_enabled(enabled);
+        global::trigger_schedule_session_save();
+    }
+
     fn focus_for_shortcut_hints(&self) -> Focus {
         if self.state.focus == Focus::ShortcutHints {
             self.prev_focus.clone().unwrap_or(Focus::InputBlur)
@@ -563,6 +587,7 @@ impl Chat<'static> {
         let mut hints = ShortcutHints::default();
         hints.push_visible(&[("Focus", "CR")]);
         hints.push_visible(&[("Commands", "C-p")]);
+        hints.push_visible(&[("Thinking", "C-r")]);
         hints.push_visible(&[("Up", "k"), ("Down", "j")]);
         hints
     }
@@ -616,7 +641,8 @@ impl Chat<'static> {
         block = block
             .title_bottom(Line::from(""))
             .title_bottom(self.widget_state_indicator())
-            .title_bottom(self.auto_accept_indicator());
+            .title_bottom(self.auto_accept_indicator())
+            .title_bottom(self.thinking_indicator());
         if let Some(line) = self.ctrl_c_reminder_line() {
             block = block.title_bottom(line);
         }
@@ -691,6 +717,28 @@ impl Chat<'static> {
             Span::styled("<S-Tab>", theme.ui.shortcut),
             Span::raw(" "),
         ])
+    }
+
+    fn thinking_indicator(&self) -> Line<'static> {
+        let theme = global::theme();
+        let (status, status_style, origin) = if self.combo_thinking_active {
+            ("on", theme.ui.auto_accept_on, Some("combo"))
+        } else if self.state.thinking_enabled {
+            ("on", theme.ui.auto_accept_on, None)
+        } else {
+            ("off", theme.ui.auto_accept_off, None)
+        };
+        let mut spans = vec![
+            Span::styled(" thinking: ", theme.ui.shortcut_desc),
+            Span::styled(status, status_style),
+            Span::raw(" "),
+        ];
+        if let Some(origin) = origin {
+            spans.push(Span::styled(format!("({origin}) "), theme.ui.shortcut_desc));
+        }
+        spans.push(Span::styled("<C-r>", theme.ui.shortcut));
+        spans.push(Span::raw(" "));
+        Line::from(spans)
     }
 
     fn reject_text_edit(
@@ -772,6 +820,8 @@ impl Chat<'static> {
 
         let system_prompt = self.state.system_prompt.clone();
         let auto_accept_edits = self.state.auto_accept_edits;
+        let thinking_enabled = self.state.thinking_enabled;
+        self.combo_thinking_active = false;
 
         // 2. Clear messages
         self.messages.clear();
@@ -780,11 +830,13 @@ impl Chat<'static> {
         *self.state.write() = Inner {
             focus: Focus::InputBlur,
             auto_accept_edits,
+            thinking_enabled,
             system_prompt,
             ..Default::default()
         };
         self.cancellation_guard.reset();
         self.agent.set_auto_accept_edits(auto_accept_edits);
+        self.agent.set_thinking_enabled(thinking_enabled);
 
         // 4. Reset focus to Input from InputBlur to trigger the input component
         self.update_focus(Focus::Input);
@@ -823,6 +875,7 @@ impl Persistable for Chat<'static> {
         let (mut state, session): (Inner, Session) = session::load_related(session)?;
         let mut inst = Self::new(global::config_sync());
         let auto_accept_edits = state.auto_accept_edits;
+        let thinking_enabled = state.thinking_enabled;
 
         if state.focus == Focus::ShortcutHints {
             state.focus = Focus::InputBlur;
@@ -836,6 +889,7 @@ impl Persistable for Chat<'static> {
         let combined = Agent::build_system_prompt(Some(&state.system_prompt));
         inst.agent.set_system_prompt(&combined);
         inst.agent.set_auto_accept_edits(auto_accept_edits);
+        inst.agent.set_thinking_enabled(thinking_enabled);
 
         inst.state = State::new(state);
         inst.messages = Messages::load(session)?;
@@ -886,6 +940,9 @@ impl Component for Chat<'static> {
                             Message::bot(Tool::new(tool_use.to_owned()).into())
                         }
                         BotMessage::System(message) => Message::system(Plain::new(message).into()),
+                        BotMessage::Thinking(thinking) => {
+                            Message::system(Plain::new(format!("Thinking:\n{thinking}")).into())
+                        }
                     }));
                 // Trigger session save after receiving bot response
                 global::trigger_schedule_session_save();
@@ -975,6 +1032,19 @@ impl Component for Chat<'static> {
             }
         ) {
             self.handle_ctrl_c();
+            return;
+        }
+        if self.view == ViewMode::Chat
+            && matches!(
+                key,
+                KeyEvent {
+                    code: Char('r') | Char('R'),
+                    modifiers: KM::CONTROL,
+                    ..
+                }
+            )
+        {
+            self.toggle_thinking();
             return;
         }
         if self.view == ViewMode::Transcript {
@@ -1500,6 +1570,7 @@ async fn task_combo_execute(
                             ComboEvent::Prompt {
                                 name: name.clone(),
                                 prompt,
+                                thinking: None,
                             }
                             .into(),
                         )
@@ -1508,6 +1579,7 @@ async fn task_combo_execute(
                     StarterEvent::PromptRequest {
                         prompt,
                         schemas,
+                        thinking,
                         responder,
                     } => {
                         agent
@@ -1517,6 +1589,7 @@ async fn task_combo_execute(
                             ComboEvent::Prompt {
                                 name: name.clone(),
                                 prompt: prompt.clone(),
+                                thinking: thinking.clone(),
                             }
                             .into(),
                         )
@@ -1525,7 +1598,7 @@ async fn task_combo_execute(
                             Err("prompt reply cancelled".to_string())
                         } else {
                             agent
-                                .reply_prompt(&system_prompt, schemas)
+                                .reply_prompt_with_thinking(&system_prompt, schemas, thinking)
                                 .await
                                 .map_err(|err| err.to_string())
                         };
@@ -1876,10 +1949,13 @@ async fn handle_chat_response(
             }));
             blocks
                 .into_iter()
-                .map(|m| match m {
-                    code_combo::Block::Text { text } => BotMessage::Plain(text),
-                    code_combo::Block::ToolUse(tool_use) => BotMessage::ToolUse(tool_use),
-                    _ => unreachable!("unknown content type: {:?}", m),
+                .filter_map(|m| match m {
+                    code_combo::Block::Text { text } => Some(BotMessage::Plain(text)),
+                    code_combo::Block::Thinking { thinking, .. } => {
+                        Some(BotMessage::Thinking(thinking))
+                    }
+                    code_combo::Block::ToolUse(tool_use) => Some(BotMessage::ToolUse(tool_use)),
+                    code_combo::Block::ToolResult { .. } => None,
                 })
                 .collect()
         }

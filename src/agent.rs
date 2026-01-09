@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anthropic::{Block as AnthropicBlock, Client, Tool as AnthropicTool, ToolChoice};
+use anthropic::{Block as AnthropicBlock, Client, Thinking, Tool as AnthropicTool, ToolChoice};
 use indoc::indoc;
 use serde_json::{Map as JsonMap, json};
 use snafu::prelude::*;
@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::Config;
-use crate::{PromptSchema, Result};
+use crate::{PromptSchema, Result, ThinkingConfig};
 use executor::PermissionControl;
 
 mod bash_executor;
@@ -19,6 +19,7 @@ pub use bash_executor::{bash_unsafe_ranges, bash_unsafe_reason};
 pub use executor::{ExecuteStatus, Executor, Input, Output};
 
 const PROMPT_REPLY_TOOL_NAME: &str = "combo_reply";
+const DEFAULT_THINKING_BUDGET_TOKENS: usize = 1024;
 const BUILTIN_SYSTEM_PROMPT: &str = indoc! {"
     You are Coco, a coding assistant running inside the code-combo CLI.
     Introduce yourself briefly when a new conversation starts.
@@ -35,6 +36,9 @@ pub struct Agent {
     system_prompt: String,
     /// Shared messages across cloned instances.
     messages: Arc<Mutex<Vec<Message>>>,
+    thinking_enabled: bool,
+    thinking_budget_tokens: usize,
+    thinking_cleanup_pending: bool,
 }
 
 pub struct ChatResponse {
@@ -60,11 +64,19 @@ impl Agent {
             &config.config_dir,
             workspace_dir,
         );
+        let thinking_budget_tokens = config
+            .providers
+            .first()
+            .and_then(|provider| provider.thinking_budget_tokens)
+            .unwrap_or(DEFAULT_THINKING_BUDGET_TOKENS);
         Self {
             config,
             system_prompt: Self::build_system_prompt(None),
             executor,
             messages: Arc::new(Mutex::new(vec![])),
+            thinking_enabled: false,
+            thinking_budget_tokens,
+            thinking_cleanup_pending: false,
         }
     }
 
@@ -99,18 +111,21 @@ impl Agent {
 
     pub async fn chat(&mut self, message: Message) -> Result<ChatResponse> {
         let (_, client) = self.pick_provider()?;
+        let thinking = self.thinking_payload();
 
         let messages = {
             let mut messages = self.messages.lock().await;
             messages.push(message);
             messages.clone()
         };
+        let messages = self.prepare_messages_for_request(messages);
 
         let response = client
             .messages()
             .system_prompt(&self.system_prompt)
             .conversations(messages)
             .tools(self.executor.anthropic_tools())
+            .maybe_thinking(thinking)
             .call()
             .await
             .inspect_err(|err| {
@@ -122,6 +137,7 @@ impl Agent {
                 ))
             })?;
 
+        let stop_reason = response.stop_reason.clone();
         let message = if response.content.is_empty() {
             Message::assistant(Content::Multiple(Vec::default()))
         } else {
@@ -129,21 +145,25 @@ impl Agent {
             self.messages.lock().await.push(msg.clone());
             msg
         };
+        self.mark_thinking_cleanup_pending(stop_reason.as_ref());
         Ok(ChatResponse {
             message,
-            stop_reason: response.stop_reason,
+            stop_reason,
         })
     }
 
     pub async fn chat_with_history(&mut self) -> Result<ChatResponse> {
         let (_, client) = self.pick_provider()?;
+        let thinking = self.thinking_payload();
 
         let messages = self.messages.lock().await.clone();
+        let messages = self.prepare_messages_for_request(messages);
         let response = client
             .messages()
             .system_prompt(&self.system_prompt)
             .conversations(messages)
             .tools(self.executor.anthropic_tools())
+            .maybe_thinking(thinking)
             .call()
             .await
             .inspect_err(|err| {
@@ -155,6 +175,7 @@ impl Agent {
                 ))
             })?;
 
+        let stop_reason = response.stop_reason.clone();
         let message = if response.content.is_empty() {
             Message::assistant(Content::Multiple(Vec::default()))
         } else {
@@ -162,9 +183,10 @@ impl Agent {
             self.messages.lock().await.push(msg.clone());
             msg
         };
+        self.mark_thinking_cleanup_pending(stop_reason.as_ref());
         Ok(ChatResponse {
             message,
-            stop_reason: response.stop_reason,
+            stop_reason,
         })
     }
 
@@ -172,6 +194,16 @@ impl Agent {
         &mut self,
         system_prompt: &str,
         schemas: Vec<PromptSchema>,
+    ) -> Result<PromptReply> {
+        self.reply_prompt_with_thinking(system_prompt, schemas, None)
+            .await
+    }
+
+    pub async fn reply_prompt_with_thinking(
+        &mut self,
+        system_prompt: &str,
+        schemas: Vec<PromptSchema>,
+        thinking: Option<ThinkingConfig>,
     ) -> Result<PromptReply> {
         ensure_whatever!(!schemas.is_empty(), "schemas cannot be empty");
         let reply_tool = build_reply_tool(&schemas)?;
@@ -182,6 +214,7 @@ impl Agent {
             history.push(new_message);
             history.clone()
         };
+        let messages = self.prepare_messages_for_request(messages);
         let tool_choice = ToolChoice::tool().name(PROMPT_REPLY_TOOL_NAME).call();
         let system_prompt = system_prompt.trim();
         let system_prompt = if system_prompt.is_empty() {
@@ -189,14 +222,22 @@ impl Agent {
         } else {
             Some(system_prompt)
         };
+        let thinking = self.thinking_payload_with_override(thinking.as_ref());
         let response = client
-            .messages_with_tool_choice(system_prompt, messages, vec![reply_tool], tool_choice)
+            .messages_with_tool_choice(
+                system_prompt,
+                messages,
+                vec![reply_tool],
+                tool_choice,
+                thinking,
+            )
             .await
             .map_err(|err| {
                 <crate::Error as snafu::FromString>::without_source(format!(
                     "failed to request prompt reply: {err}"
                 ))
             })?;
+        let stop_reason = response.stop_reason.clone();
         if !response.content.is_empty() {
             let mut history = self.messages.lock().await;
             history.push(Message::assistant(Content::Multiple(
@@ -219,6 +260,7 @@ impl Agent {
         }
         let response = serde_json::to_string(&tool_use.input)
             .whatever_context("failed to serialize reply tool input")?;
+        self.mark_thinking_cleanup_pending(stop_reason.as_ref());
         Ok(PromptReply { tool_use, response })
     }
 
@@ -237,6 +279,14 @@ impl Agent {
 
     pub fn auto_accept_edits(&self) -> bool {
         self.executor.auto_accept_edits()
+    }
+
+    pub fn set_thinking_enabled(&mut self, enabled: bool) {
+        self.thinking_enabled = enabled;
+    }
+
+    pub fn thinking_enabled(&self) -> bool {
+        self.thinking_enabled
     }
 
     pub async fn execute<'a>(
@@ -265,6 +315,74 @@ impl Agent {
         self.executor
             .execute_with_output(id, name, input, cancel_token, on_output)
             .await
+    }
+
+    fn thinking_payload(&self) -> Option<Thinking> {
+        if self.thinking_enabled {
+            Some(Thinking::enabled(self.thinking_budget_tokens))
+        } else {
+            None
+        }
+    }
+
+    fn thinking_payload_with_override(
+        &self,
+        thinking: Option<&ThinkingConfig>,
+    ) -> Option<Thinking> {
+        let Some(thinking) = thinking else {
+            return self.thinking_payload();
+        };
+        if !thinking.enabled {
+            return None;
+        }
+        let budget_tokens = thinking
+            .budget_tokens
+            .unwrap_or(self.thinking_budget_tokens);
+        Some(Thinking::enabled(budget_tokens))
+    }
+
+    fn strip_thinking_block(message: &Message) -> Option<Message> {
+        let content = match &message.content {
+            Content::Multiple(blocks) => {
+                let filtered: Vec<Block> = blocks
+                    .iter()
+                    .filter(|block| !matches!(block, Block::Thinking { .. }))
+                    .cloned()
+                    .collect();
+                Content::Multiple(filtered)
+            }
+            Content::Text(_) => message.content.clone(),
+        };
+        if matches!(content, Content::Multiple(ref blocks) if blocks.is_empty()) {
+            None
+        } else {
+            Some(Message {
+                role: message.role.clone(),
+                content,
+            })
+        }
+    }
+
+    fn strip_thinking_blocks(messages: &[Message]) -> Vec<Message> {
+        messages
+            .iter()
+            .filter_map(Self::strip_thinking_block)
+            .collect()
+    }
+
+    fn prepare_messages_for_request(&mut self, messages: Vec<Message>) -> Vec<Message> {
+        if self.thinking_cleanup_pending {
+            self.thinking_cleanup_pending = false;
+            Self::strip_thinking_blocks(&messages)
+        } else {
+            messages
+        }
+    }
+
+    fn mark_thinking_cleanup_pending(&mut self, reason: Option<&StopReason>) {
+        if matches!(reason, Some(StopReason::EndTurn)) {
+            self.thinking_cleanup_pending = true;
+        }
     }
 
     fn pick_provider(&mut self) -> Result<(&str, Client)> {

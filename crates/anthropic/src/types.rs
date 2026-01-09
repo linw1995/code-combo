@@ -14,6 +14,11 @@ pub enum Block {
     Text {
         text: String,
     },
+    Thinking {
+        thinking: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
     ToolUse(ToolUse),
     ToolResult {
         tool_use_id: String,
