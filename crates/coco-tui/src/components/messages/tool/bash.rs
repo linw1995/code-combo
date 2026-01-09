@@ -1,5 +1,3 @@
-use std::ops::Range;
-
 use bon::bon;
 use coco_highlight::Lang;
 use coco_macro::{ComponentExt, ContentComponentExt};
@@ -27,7 +25,7 @@ use super::{Component, Content, ContentComponent};
 use crate::components::CacheInvalidation;
 use crate::{
     actions::{Action, ToolAction},
-    components::{CodeHighlight, Persistable, ShortcutHints},
+    components::{CodeHighlight, HighlightOverlay, OverlayLevel, Persistable, ShortcutHints},
     error::*,
     events::{AnswerEvent, AskEvent, Event},
     global::{self, State},
@@ -143,11 +141,24 @@ fn render_tabs_panel(view: BashOutputView) -> Paragraph<'static> {
 
 const OUTPUT_MARKER: &str = "▐";
 
-fn build_input<'b>(command: &str, unsafe_ranges: &[Range<usize>]) -> CodeHighlight<'b> {
-    if unsafe_ranges.is_empty() {
+fn overlay_level_for_reason(reason: &str) -> OverlayLevel {
+    let reason = reason.to_lowercase();
+    if reason.contains("syntax")
+        || reason.contains("parse")
+        || reason.contains("unsupported")
+        || reason.contains("unavailable")
+    {
+        OverlayLevel::Error
+    } else {
+        OverlayLevel::Warning
+    }
+}
+
+fn build_input<'b>(command: &str, overlays: Vec<HighlightOverlay>) -> CodeHighlight<'b> {
+    if overlays.is_empty() {
         CodeHighlight::try_new(command, Lang::Bash).expect("failed to new CodeHighlight")
     } else {
-        CodeHighlight::try_new_with_ranges(command, Lang::Bash, unsafe_ranges.to_vec())
+        CodeHighlight::try_new_with_overlays(command, Lang::Bash, overlays)
             .expect("failed to new CodeHighlight")
     }
 }
@@ -155,16 +166,19 @@ fn build_input<'b>(command: &str, unsafe_ranges: &[Range<usize>]) -> CodeHighlig
 fn generate_input<'b>(tool_use: &ToolUse, exec_state: &ExecState) -> CodeHighlight<'b> {
     let input: BashInput =
         serde_json::from_value(tool_use.input.clone()).expect("failed to parse BashInput");
-    let unsafe_ranges: Vec<Range<usize>> = match exec_state {
+    let overlays = match exec_state {
         ExecState::Initial {
             requiring_confirmation: true,
         } => bash_unsafe_ranges(&input.command)
             .into_iter()
-            .map(|(range, _)| range)
+            .map(|(range, reason)| {
+                HighlightOverlay::new(range, overlay_level_for_reason(&reason))
+                    .with_newline_guide(reason)
+            })
             .collect(),
         _ => Vec::new(),
     };
-    build_input(&input.command, &unsafe_ranges)
+    build_input(&input.command, overlays)
 }
 
 #[bon]
