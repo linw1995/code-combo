@@ -155,10 +155,13 @@ fn build_input<'b>(command: &str, unsafe_ranges: &[Range<usize>]) -> CodeHighlig
 fn generate_input<'b>(tool_use: &ToolUse, exec_state: &ExecState) -> CodeHighlight<'b> {
     let input: BashInput =
         serde_json::from_value(tool_use.input.clone()).expect("failed to parse BashInput");
-    let unsafe_ranges = match exec_state {
+    let unsafe_ranges: Vec<Range<usize>> = match exec_state {
         ExecState::Initial {
             requiring_confirmation: true,
-        } => bash_unsafe_ranges(&input.command),
+        } => bash_unsafe_ranges(&input.command)
+            .into_iter()
+            .map(|(range, _)| range)
+            .collect(),
         _ => Vec::new(),
     };
     build_input(&input.command, &unsafe_ranges)
