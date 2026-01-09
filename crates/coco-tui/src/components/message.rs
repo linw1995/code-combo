@@ -5,6 +5,7 @@ use crossterm::event::KeyEvent;
 use ratatui::{Frame, prelude::*, widgets::Paragraph};
 use serde::{Deserialize, Serialize};
 
+use super::Thinking;
 use super::{Component, NavigationKey, NavigationResult, ShortcutHints};
 use crate::{
     components::{Persistable, Tool},
@@ -125,6 +126,14 @@ impl Message {
         self
     }
 
+    pub fn role(&self) -> &Role {
+        &self.state.role
+    }
+
+    pub fn is_bot(&self) -> bool {
+        matches!(self.state.role, Role::Bot)
+    }
+
     pub fn is_same_tool_id(&self, id: &str) -> bool {
         self.content
             .as_any()
@@ -132,11 +141,35 @@ impl Message {
             .map(|tool| tool.tool_use_id() == id)
             .unwrap_or_default()
     }
+
+    pub fn thinking_mut(&mut self) -> Option<&mut Thinking> {
+        self.content.as_mut_any().downcast_mut::<Thinking>()
+    }
+
+    pub fn is_thinking(&self) -> bool {
+        self.content.as_any().downcast_ref::<Thinking>().is_some()
+    }
+
+    pub fn is_hidden(&self) -> bool {
+        if let Some(thinking) = self.content.as_any().downcast_ref::<Thinking>() {
+            return thinking.is_collapsed();
+        }
+        false
+    }
+
+    pub fn content_as_mut_any(&mut self) -> &mut dyn Any {
+        self.content.as_mut_any()
+    }
 }
 
 // Delegate Content trait to its inner content.
 impl Content for Message {
     fn height(&self, width: u16) -> usize {
+        if let Some(thinking) = self.content.as_any().downcast_ref::<Thinking>()
+            && thinking.is_collapsed()
+        {
+            return 0;
+        }
         let role_width = match self.state.role {
             Role::User => 7,
             Role::Bot => 6,
@@ -153,6 +186,11 @@ impl Content for Message {
     }
 
     fn focus_range(&self, width: u16) -> Option<Range<u16>> {
+        if let Some(thinking) = self.content.as_any().downcast_ref::<Thinking>()
+            && thinking.is_collapsed()
+        {
+            return None;
+        }
         let role_width = match self.state.role {
             Role::User => 7,
             Role::Bot => 6,
@@ -200,13 +238,21 @@ impl Component for Message {
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         use Constraint::*;
 
+        if let Some(thinking) = self.content.as_any().downcast_ref::<Thinking>()
+            && thinking.is_collapsed()
+        {
+            return Ok(());
+        }
+
         let area_content =
             if self.state.show_role_prefix && !matches!(self.state.role, Role::System) {
                 let [area_role, area_content] = Layout::horizontal([Length(8), Min(1)]).areas(area);
 
                 let theme = global::theme();
+                let is_thinking = self.is_thinking();
                 let paragraph = Paragraph::new(Line::from(match self.state.role {
                     Role::User => Span::styled(" User: ", theme.ui.user_role),
+                    Role::Bot if is_thinking => Span::styled(" Think: ", theme.ui.thinking_role),
                     Role::Bot => Span::styled(" Bot: ", theme.ui.bot_role),
                     _ => unreachable!(),
                 }));

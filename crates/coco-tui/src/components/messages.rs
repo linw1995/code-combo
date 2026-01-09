@@ -22,16 +22,18 @@ use crate::{
 
 use super::{
     Action, AnswerEvent, AskEvent, Component, Content, Event, Message, NavigationKey,
-    NavigationResult,
+    NavigationResult, Role,
 };
 
 mod combo;
 mod fold;
 mod plain;
 mod streaming;
+mod thinking;
 mod tool;
 pub use combo::Combo;
 pub use plain::Plain;
+pub use thinking::Thinking;
 pub use tool::Tool;
 
 #[derive(Default, ComponentExt)]
@@ -75,6 +77,68 @@ impl Messages {
             last.handle_action(&Action::Blur);
         }
         messages.push(message);
+    }
+
+    pub fn collapse_thinking(&mut self) {
+        let messages = self.messages.write_untracked();
+        for message in messages.iter_mut() {
+            if let Some(thinking) = message.content_as_mut_any().downcast_mut::<Thinking>() {
+                thinking.collapse();
+            }
+        }
+    }
+
+    pub fn toggle_thinking_for_focus(&mut self) {
+        let Some(idx) = self.focus.get() else {
+            return;
+        };
+        let messages = self.messages.write_untracked();
+        if idx >= messages.len() {
+            return;
+        }
+        if let Some(thinking) = messages[idx].thinking_mut() {
+            thinking.toggle();
+            global::signal_dirty();
+            return;
+        }
+        if !messages[idx].is_bot() {
+            return;
+        }
+        for prev_idx in (0..idx).rev() {
+            if !matches!(messages[prev_idx].role(), Role::Bot) {
+                break;
+            }
+            if let Some(thinking) = messages[prev_idx].thinking_mut() {
+                thinking.toggle();
+                global::signal_dirty();
+                break;
+            }
+        }
+    }
+
+    pub fn has_thinking_toggle_for_focus(&self) -> bool {
+        let Some(idx) = self.focus.get() else {
+            return false;
+        };
+        let messages = self.messages.read();
+        if idx >= messages.len() {
+            return false;
+        }
+        if messages[idx].is_thinking() {
+            return true;
+        }
+        if !messages[idx].is_bot() {
+            return false;
+        }
+        for prev_idx in (0..idx).rev() {
+            if !matches!(messages[prev_idx].role(), Role::Bot) {
+                break;
+            }
+            if messages[prev_idx].is_thinking() {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn apply_action_to_last(&mut self, action: &Action) {
@@ -214,31 +278,81 @@ impl Messages {
         if self.messages.is_empty() {
             return false;
         }
-        if let Some(idx) = self.focus.get()
-            && idx > 0
-        {
-            self.update_focus(Some(idx - 1));
-            return true;
+        let Some(current) = self.focus.get() else {
+            return false;
+        };
+        if current == 0 {
+            return false;
         }
-        false
+        let target = {
+            let messages = self.messages.read();
+            let mut idx = current - 1;
+            loop {
+                if !messages[idx].is_hidden() {
+                    break Some(idx);
+                }
+                if idx == 0 {
+                    break None;
+                }
+                idx -= 1;
+            }
+        };
+        if let Some(idx) = target {
+            self.update_focus(Some(idx));
+            true
+        } else {
+            false
+        }
     }
 
     pub fn select_next(&mut self) -> bool {
-        if let Some(idx) = self.focus.get()
-            && idx < self.messages.len() - 1
-        {
-            self.update_focus(Some(idx + 1));
-            return true;
+        let Some(current) = self.focus.get() else {
+            return false;
+        };
+        let target = {
+            let messages = self.messages.read();
+            let mut idx = current + 1;
+            let mut found = None;
+            while idx < messages.len() {
+                if !messages[idx].is_hidden() {
+                    found = Some(idx);
+                    break;
+                }
+                idx += 1;
+            }
+            found
+        };
+        if let Some(idx) = target {
+            self.update_focus(Some(idx));
+            true
+        } else {
+            false
         }
-        false
     }
 
     pub fn select_last(&mut self) -> bool {
         if self.messages.is_empty() {
             false
         } else {
-            self.update_focus(Some(self.messages.len() - 1));
-            true
+            let target = {
+                let messages = self.messages.read();
+                let mut idx = messages.len();
+                let mut found = None;
+                while idx > 0 {
+                    idx -= 1;
+                    if !messages[idx].is_hidden() {
+                        found = Some(idx);
+                        break;
+                    }
+                }
+                found
+            };
+            if let Some(idx) = target {
+                self.update_focus(Some(idx));
+                true
+            } else {
+                false
+            }
         }
     }
 

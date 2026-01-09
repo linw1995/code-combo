@@ -22,7 +22,7 @@ use crate::{
     actions::{Action, ToolAction},
     components::{
         CodeHighlight, Component, Content, ContentComponent, Message, Messages, NavigationKey,
-        NavigationResult, Persistable, Plain, ShortcutHints, Tool,
+        NavigationResult, Persistable, Plain, ShortcutHints, Thinking, Tool,
     },
     error::*,
     events::{AnswerEvent, ComboEvent, Event},
@@ -214,6 +214,12 @@ impl Combo {
             .push(Message::bot(params.into()).with_role_prefix(false));
     }
 
+    fn push_prompt_thinking(&mut self, thinking: &str) {
+        self.state.write().view = ComboView::Messages;
+        self.messages
+            .push(Message::bot(Thinking::new(thinking.to_string()).into()));
+    }
+
     fn forward_output_to_child(&mut self, tool_use_id: &str, chunk: &OutputChunk) -> bool {
         let event = Event::Answer(AnswerEvent::ToolOutput {
             id: tool_use_id.to_string(),
@@ -323,13 +329,20 @@ impl Combo {
                     self.clear_combo_stream();
                 }
             }
-            ComboEvent::Prompt { name, prompt } => {
+            ComboEvent::Prompt { name, prompt, .. } => {
                 if &self.state.name == name {
                     self.push_prompt(prompt);
                 }
             }
-            ComboEvent::PromptReply { name, tool_use } => {
+            ComboEvent::PromptReply {
+                name,
+                tool_use,
+                thinking,
+            } => {
                 if &self.state.name == name {
+                    for block in thinking {
+                        self.push_prompt_thinking(block);
+                    }
                     self.push_prompt_reply(tool_use);
                 }
             }
@@ -785,6 +798,9 @@ impl Content for Combo {
         let mut hints = ShortcutHints::default();
         if self.is_child_focused {
             hints.extend(self.messages.shortcut_hints());
+            if self.messages.has_thinking_toggle_for_focus() {
+                hints.push_visible(&[("Thinking", "r")]);
+            }
         }
         if self.can_focus_messages() {
             if self.is_child_focused {
@@ -855,6 +871,9 @@ impl Component for Combo {
         if self.is_child_focused {
             match (key.modifiers, key.code) {
                 (KeyModifiers::NONE, KeyCode::Esc) => self.clear_child_focus(),
+                (KeyModifiers::NONE, KeyCode::Char('r')) => {
+                    self.messages.toggle_thinking_for_focus();
+                }
                 _ => self.messages.handle_key_event(key),
             }
             return;
@@ -1009,6 +1028,7 @@ mod tests {
         combo.handle_event(&Event::Combo(ComboEvent::Prompt {
             name: "demo".to_string(),
             prompt: "line1".to_string(),
+            thinking: None,
         }));
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
             name: "demo".to_string(),
@@ -1052,6 +1072,7 @@ mod tests {
         combo.handle_event(&Event::Combo(ComboEvent::Prompt {
             name: "demo".to_string(),
             prompt: "line1".to_string(),
+            thinking: None,
         }));
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
             name: "demo".to_string(),

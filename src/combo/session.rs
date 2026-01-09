@@ -52,6 +52,8 @@ pub struct MetadataPayload {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -88,12 +90,21 @@ pub struct PromptPayload {
     pub reply: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub schemas: Vec<PromptSchema>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PromptSchema {
     pub name: String,
     pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThinkingConfig {
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<usize>,
 }
 
 #[derive(Debug, Snafu)]
@@ -507,6 +518,7 @@ mod tests {
             description: Some("Git Commit with Proper Message".to_string()),
             model: None,
             tools: None,
+            thinking: None,
         };
         let client = SessionSocketClient::connect(&socket_path)
             .await
@@ -554,6 +566,7 @@ mod tests {
                 name: "message".to_string(),
                 description: "reply message".to_string(),
             }],
+            thinking: None,
         };
         let client = SessionSocketClient::connect(&socket_path)
             .await

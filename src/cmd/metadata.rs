@@ -31,6 +31,8 @@ fn parse_metadata_fields(fields: &[String]) -> Result<MetadataPayload> {
     let mut description = None;
     let mut model = None;
     let mut tools: Vec<String> = Vec::new();
+    let mut thinking_enabled: Option<bool> = None;
+    let mut thinking_budget: Option<usize> = None;
 
     for field in fields {
         let Some((key, value)) = field.split_once('=') else {
@@ -64,6 +66,27 @@ fn parse_metadata_fields(fields: &[String]) -> Result<MetadataPayload> {
                     }
                 }
             }
+            "thinking" => {
+                ensure_whatever!(
+                    thinking_enabled.is_none(),
+                    "duplicate metadata field: thinking"
+                );
+                let value = value.to_ascii_lowercase();
+                let enabled = matches!(value.as_str(), "1" | "true" | "yes" | "on");
+                let disabled = matches!(value.as_str(), "0" | "false" | "no" | "off");
+                ensure_whatever!(enabled || disabled, "invalid thinking value: {value}");
+                thinking_enabled = Some(enabled);
+            }
+            "thinking_budget" => {
+                ensure_whatever!(
+                    thinking_budget.is_none(),
+                    "duplicate metadata field: thinking_budget"
+                );
+                let parsed: usize = value
+                    .parse()
+                    .whatever_context("thinking_budget must be an integer")?;
+                thinking_budget = Some(parsed);
+            }
             other => whatever!("unknown metadata field: {other}"),
         }
     }
@@ -74,11 +97,21 @@ fn parse_metadata_fields(fields: &[String]) -> Result<MetadataPayload> {
 
     let tools = if tools.is_empty() { None } else { Some(tools) };
 
+    let thinking = if thinking_enabled.is_some() || thinking_budget.is_some() {
+        Some(crate::ThinkingConfig {
+            enabled: thinking_enabled.unwrap_or(true),
+            budget_tokens: thinking_budget,
+        })
+    } else {
+        None
+    };
+
     Ok(MetadataPayload {
         name,
         description,
         model,
         tools,
+        thinking,
     })
 }
 
@@ -115,6 +148,19 @@ mod tests {
                 String::from("git commit")
             ])
         );
+    }
+
+    #[test]
+    fn parse_metadata_with_thinking() {
+        let payload = parse_metadata_fields(&[
+            String::from("name=reason"),
+            String::from("thinking=on"),
+            String::from("thinking_budget=2048"),
+        ])
+        .unwrap();
+        let thinking = payload.thinking.expect("thinking config");
+        assert!(thinking.enabled);
+        assert_eq!(thinking.budget_tokens, Some(2048));
     }
 
     #[test]

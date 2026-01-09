@@ -1,4 +1,4 @@
-use code_combo::{OutputChunk, Starter, TextEdit, ToolUse, tools::Final};
+use code_combo::{OutputChunk, Starter, TextEdit, ThinkingConfig, ToolUse, tools::Final};
 use crossterm::event::{KeyEvent, MouseEvent};
 
 #[derive(Debug, Clone)]
@@ -90,10 +90,12 @@ pub enum ComboEvent {
     Prompt {
         name: String,
         prompt: String,
+        thinking: Option<ThinkingConfig>,
     },
     PromptReply {
         name: String,
         tool_use: ToolUse,
+        thinking: Vec<String>,
     },
     Executed {
         name: String,
@@ -124,4 +126,5 @@ pub enum BotMessage {
     Plain(String),
     ToolUse(ToolUse),
     System(String),
+    Thinking(String),
 }

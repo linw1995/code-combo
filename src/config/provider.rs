@@ -16,6 +16,8 @@ pub struct ProviderConfig {
     pub kind: ProviderKind,
     pub api_key: EnvString,
     pub base_url: String,
+    #[serde(default)]
+    pub thinking_budget_tokens: Option<usize>,
 }
 
 impl std::fmt::Debug for ProviderConfig {

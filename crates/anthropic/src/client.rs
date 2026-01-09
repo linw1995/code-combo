@@ -51,6 +51,7 @@ impl Client {
         system_prompt: Option<&str>,
         conversations: Vec<Message>,
         tools: Vec<Tool>,
+        thinking: Option<Thinking>,
     ) -> Result<MessagesResponse> {
         messages::messages(
             &self.cli,
@@ -59,6 +60,7 @@ impl Client {
                 .maybe_system(system_prompt)
                 .messages(conversations)
                 .model(&self.model)
+                .maybe_thinking(thinking)
                 .tools(tools)
                 .build(),
         )
@@ -71,6 +73,7 @@ impl Client {
         conversations: Vec<Message>,
         tools: Vec<Tool>,
         tool_choice: ToolChoice,
+        thinking: Option<Thinking>,
     ) -> Result<MessagesResponse> {
         messages::messages(
             &self.cli,
@@ -82,6 +85,7 @@ impl Client {
                 system: system_prompt.unwrap_or_default().to_string(),
                 temperature: None,
                 tool_choice: Some(tool_choice),
+                thinking,
                 tools,
             },
         )
