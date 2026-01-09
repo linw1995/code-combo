@@ -185,16 +185,6 @@ pub fn bash_unsafe_ranges(command: &str) -> Vec<(Range<usize>, String)> {
             "syntax error".to_string(),
         )];
     }
-    if root.named_child_count() != 1 {
-        return vec![(
-            Range {
-                start: 0,
-                end: command.len(),
-            },
-            "multiple statements".to_string(),
-        )];
-    }
-
     let mut ranges: Vec<(Range<usize>, String)> = Vec::new();
     let mut token_ranges = Vec::new();
     let mut node_ranges = Vec::new();
@@ -212,6 +202,16 @@ pub fn bash_unsafe_ranges(command: &str) -> Vec<(Range<usize>, String)> {
                 .map(|range| (range, "unsupported shell syntax".to_string())),
         );
         return ranges;
+    }
+
+    if root.named_child_count() != 1 {
+        return vec![(
+            Range {
+                start: 0,
+                end: command.len(),
+            },
+            "multiple statements".to_string(),
+        )];
     }
 
     let mut commands = Vec::new();
