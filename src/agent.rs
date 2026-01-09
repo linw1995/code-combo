@@ -15,6 +15,7 @@ use executor::PermissionControl;
 mod bash_executor;
 mod executor;
 pub use anthropic::{Block, Content, Message, Role, StopReason, ToolUse};
+pub use bash_executor::bash_unsafe_ranges;
 pub use executor::{ExecuteStatus, Executor, Input, Output};
 
 const PROMPT_REPLY_TOOL_NAME: &str = "combo_reply";

@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    ops::Range,
     path::{Path, PathBuf},
     sync::{OnceLock, RwLock},
 };
@@ -71,12 +72,14 @@ struct FlagPolicy {
 struct ParsedArg {
     text: String,
     has_expansion: bool,
+    byte_range: Range<usize>,
 }
 
 #[derive(Debug)]
 struct ParsedCommand {
     name: String,
     args: Vec<ParsedArg>,
+    name_range: Range<usize>,
 }
 
 #[derive(Debug)]
@@ -135,6 +138,69 @@ fn safe_command_rules() -> &'static RwLock<Vec<SafeCommandRule>> {
 
 pub fn should_bypass_permission(input: &BashInput) -> bool {
     is_safe_command(&input.command)
+}
+
+pub fn bash_unsafe_ranges(command: &str) -> Vec<Range<usize>> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    if command.contains('\n') || command.contains('\r') {
+        return normalize_ranges(line_break_ranges(command), command.len());
+    }
+
+    let mut parser = Parser::new();
+    if parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .is_err()
+    {
+        return full_command_range(command.len());
+    }
+    let Some(tree) = parser.parse(command, None) else {
+        return full_command_range(command.len());
+    };
+    let root = tree.root_node();
+    if root.has_error() || root.is_missing() {
+        return full_command_range(command.len());
+    }
+    if root.named_child_count() != 1 {
+        return full_command_range(command.len());
+    }
+
+    let mut ranges = Vec::new();
+    collect_disallowed_token_ranges(root, &mut ranges);
+    collect_disallowed_node_ranges(root, &mut ranges);
+    if !ranges.is_empty() {
+        return normalize_ranges(ranges, command.len());
+    }
+
+    let mut commands = Vec::new();
+    if collect_commands(root, command, &mut commands).is_err() {
+        return full_command_range(command.len());
+    }
+
+    let rules = safe_command_rules().read().expect("safe command lock");
+    for command in &commands {
+        if let Some((rule, consumed_args)) = find_best_rule(command, &rules) {
+            let remaining_args = command.args.get(consumed_args..).unwrap_or_default();
+            ranges.extend(unsafe_args(remaining_args, &rule.args));
+            continue;
+        }
+
+        if let Some(range) = find_chain_mismatch_range(command, &rules) {
+            ranges.push(range);
+            continue;
+        }
+
+        ranges.push(command.name_range.clone());
+    }
+
+    normalize_ranges(ranges, command.len())
+}
+
+fn full_command_range(len: usize) -> Vec<Range<usize>> {
+    vec![Range { start: 0, end: len }]
 }
 
 pub(super) fn configure_safe_commands(
@@ -242,6 +308,93 @@ fn is_safe_args(args: &[ParsedArg], policy: &ArgPolicy) -> bool {
             ArgMode::AllowList,
         ),
     }
+}
+
+fn unsafe_args(args: &[ParsedArg], policy: &ArgPolicy) -> Vec<Range<usize>> {
+    match policy {
+        ArgPolicy::Any {
+            flags,
+            allow_positional,
+            positional_path_from,
+        } => unsafe_args_with_mode(
+            args,
+            flags,
+            *allow_positional,
+            *positional_path_from,
+            ArgMode::AllowAny,
+        ),
+        ArgPolicy::Deny => args.iter().map(|arg| arg.byte_range.clone()).collect(),
+        ArgPolicy::AllowList {
+            flags,
+            allow_positional,
+            positional_path_from,
+        } => unsafe_args_with_mode(
+            args,
+            flags,
+            *allow_positional,
+            *positional_path_from,
+            ArgMode::AllowList,
+        ),
+    }
+}
+
+fn unsafe_args_with_mode(
+    args: &[ParsedArg],
+    flags: &HashMap<String, FlagPolicy>,
+    allow_positional: bool,
+    positional_path_from: Option<usize>,
+    mode: ArgMode,
+) -> Vec<Range<usize>> {
+    let mut index = 0;
+    let mut positional_index = 0;
+    let mut options_ended = false;
+    while index < args.len() {
+        let arg = &args[index];
+        let text = arg.text.as_str();
+
+        if !options_ended && text == "--" {
+            if !allow_positional {
+                return vec![arg.byte_range.clone()];
+            }
+            options_ended = true;
+            index += 1;
+            continue;
+        }
+
+        if !options_ended && is_long_option(text) {
+            match check_long_option(arg, index, args, flags, mode) {
+                OptionOutcome::Safe(consumed) => {
+                    index += consumed;
+                    continue;
+                }
+                OptionOutcome::Unsafe(range) => return vec![range],
+            }
+        }
+
+        if !options_ended && is_short_option(text) {
+            match check_short_options(arg, index, args, flags, mode) {
+                OptionOutcome::Safe(consumed) => {
+                    index += consumed;
+                    continue;
+                }
+                OptionOutcome::Unsafe(range) => return vec![range],
+            }
+        }
+
+        if !allow_positional {
+            return vec![arg.byte_range.clone()];
+        }
+        if positional_path_from
+            .map(|from| positional_index >= from)
+            .unwrap_or(false)
+            && !is_relative_path_arg(arg)
+        {
+            return vec![arg.byte_range.clone()];
+        }
+        positional_index += 1;
+        index += 1;
+    }
+    Vec::new()
 }
 
 fn is_safe_args_with_mode(
@@ -358,6 +511,41 @@ fn match_command_chain(command: &ParsedCommand, rule: &SafeCommandRule) -> Optio
     Some(consumed_args)
 }
 
+fn find_chain_mismatch_range(
+    command: &ParsedCommand,
+    rules: &[SafeCommandRule],
+) -> Option<Range<usize>> {
+    let mut best: Option<(Range<usize>, usize)> = None;
+    for rule in rules {
+        if rule.command_chain.is_empty() || rule.command_chain[0] != command.name {
+            continue;
+        }
+        let mut matched = 0;
+        let mut mismatch = None;
+        for (index, token) in rule.command_chain.iter().skip(1).enumerate() {
+            let Some(arg) = command.args.get(index) else {
+                mismatch = None;
+                matched = index;
+                break;
+            };
+            if !command_chain_token_matches(arg.text.as_str(), token.as_str()) {
+                mismatch = Some(arg.byte_range.clone());
+                matched = index;
+                break;
+            }
+            matched = index + 1;
+        }
+        if let Some(range) = mismatch
+            && best
+                .as_ref()
+                .is_none_or(|(_, best_len)| matched > *best_len)
+        {
+            best = Some((range, matched));
+        }
+    }
+    best.map(|(range, _)| range)
+}
+
 fn command_chain_token_matches(arg: &str, token: &str) -> bool {
     token == ".*" || arg == token
 }
@@ -442,6 +630,95 @@ fn consume_long_option(
                 return Some(2);
             }
             Some(1)
+        }
+    }
+}
+
+enum OptionOutcome {
+    Safe(usize),
+    Unsafe(Range<usize>),
+}
+
+fn check_long_option(
+    token: &ParsedArg,
+    index: usize,
+    args: &[ParsedArg],
+    flags: &HashMap<String, FlagPolicy>,
+    mode: ArgMode,
+) -> OptionOutcome {
+    let (name, attached_value) = split_long_option(token.text.as_str());
+    let policy = match flags.get(name) {
+        Some(policy) => policy,
+        None => {
+            return if mode == ArgMode::AllowAny {
+                OptionOutcome::Safe(1)
+            } else {
+                OptionOutcome::Unsafe(token.byte_range.clone())
+            };
+        }
+    };
+    match policy.arg {
+        FlagValuePolicy::None => {
+            if let Some(value) = attached_value {
+                if mode == ArgMode::AllowAny {
+                    if policy.value_type == FlagValueType::Path
+                        && !is_relative_path_value(value, token)
+                    {
+                        return OptionOutcome::Unsafe(token.byte_range.clone());
+                    }
+                    return OptionOutcome::Safe(1);
+                }
+                return OptionOutcome::Unsafe(token.byte_range.clone());
+            }
+            OptionOutcome::Safe(1)
+        }
+        FlagValuePolicy::Required => {
+            if let Some(value) = attached_value {
+                if value.is_empty() {
+                    return OptionOutcome::Unsafe(token.byte_range.clone());
+                }
+                if policy.value_type == FlagValueType::Path && !is_relative_path_value(value, token)
+                {
+                    return OptionOutcome::Unsafe(token.byte_range.clone());
+                }
+                return OptionOutcome::Safe(1);
+            }
+            if index + 1 < args.len()
+                && (mode == ArgMode::AllowList || !is_flag_like(args[index + 1].text.as_str()))
+            {
+                if policy.value_type == FlagValueType::Path
+                    && !is_relative_path_arg(&args[index + 1])
+                {
+                    return OptionOutcome::Unsafe(args[index + 1].byte_range.clone());
+                }
+                return OptionOutcome::Safe(2);
+            }
+            if mode == ArgMode::AllowAny {
+                OptionOutcome::Safe(1)
+            } else {
+                OptionOutcome::Unsafe(token.byte_range.clone())
+            }
+        }
+        FlagValuePolicy::Optional => {
+            if let Some(value) = attached_value {
+                if value.is_empty() {
+                    return OptionOutcome::Unsafe(token.byte_range.clone());
+                }
+                if policy.value_type == FlagValueType::Path && !is_relative_path_value(value, token)
+                {
+                    return OptionOutcome::Unsafe(token.byte_range.clone());
+                }
+                return OptionOutcome::Safe(1);
+            }
+            if index + 1 < args.len() && !is_flag_like(args[index + 1].text.as_str()) {
+                if policy.value_type == FlagValueType::Path
+                    && !is_relative_path_arg(&args[index + 1])
+                {
+                    return OptionOutcome::Unsafe(args[index + 1].byte_range.clone());
+                }
+                return OptionOutcome::Safe(2);
+            }
+            OptionOutcome::Safe(1)
         }
     }
 }
@@ -559,6 +836,123 @@ fn parse_short_options(
     Some(1)
 }
 
+fn check_short_options(
+    token: &ParsedArg,
+    index: usize,
+    args: &[ParsedArg],
+    flags: &HashMap<String, FlagPolicy>,
+    mode: ArgMode,
+) -> OptionOutcome {
+    let Some(body) = token.text.strip_prefix('-') else {
+        return OptionOutcome::Unsafe(token.byte_range.clone());
+    };
+    let mut offset = 0;
+    while offset < body.len() {
+        let mut iter = body[offset..].chars();
+        let Some(ch) = iter.next() else {
+            return OptionOutcome::Unsafe(token.byte_range.clone());
+        };
+        let ch_len = ch.len_utf8();
+        let name = format!("-{ch}");
+        let remainder = &body[offset + ch_len..];
+        let policy = match flags.get(&name) {
+            Some(policy) => policy,
+            None => {
+                if mode == ArgMode::AllowAny {
+                    if remainder.starts_with('=') {
+                        return OptionOutcome::Safe(1);
+                    }
+                    offset += ch_len;
+                    continue;
+                }
+                return OptionOutcome::Unsafe(token.byte_range.clone());
+            }
+        };
+        match policy.arg {
+            FlagValuePolicy::None => {
+                if let Some(value) = remainder.strip_prefix('=') {
+                    if mode == ArgMode::AllowAny {
+                        if policy.value_type == FlagValueType::Path
+                            && !is_relative_path_value(value, token)
+                        {
+                            return OptionOutcome::Unsafe(token.byte_range.clone());
+                        }
+                        return OptionOutcome::Safe(1);
+                    }
+                    return OptionOutcome::Unsafe(token.byte_range.clone());
+                }
+                offset += ch_len;
+            }
+            FlagValuePolicy::Required => {
+                if let Some(value) = remainder.strip_prefix('=') {
+                    if value.is_empty() {
+                        return OptionOutcome::Unsafe(token.byte_range.clone());
+                    }
+                    if policy.value_type == FlagValueType::Path
+                        && !is_relative_path_value(value, token)
+                    {
+                        return OptionOutcome::Unsafe(token.byte_range.clone());
+                    }
+                    return OptionOutcome::Safe(1);
+                }
+                if !remainder.is_empty() {
+                    if policy.value_type == FlagValueType::Path
+                        && !is_relative_path_value(remainder, token)
+                    {
+                        return OptionOutcome::Unsafe(token.byte_range.clone());
+                    }
+                    return OptionOutcome::Safe(1);
+                }
+                if index + 1 < args.len()
+                    && (mode == ArgMode::AllowList || !is_flag_like(args[index + 1].text.as_str()))
+                {
+                    if policy.value_type == FlagValueType::Path
+                        && !is_relative_path_arg(&args[index + 1])
+                    {
+                        return OptionOutcome::Unsafe(args[index + 1].byte_range.clone());
+                    }
+                    return OptionOutcome::Safe(2);
+                }
+                if mode == ArgMode::AllowAny {
+                    return OptionOutcome::Safe(1);
+                }
+                return OptionOutcome::Unsafe(token.byte_range.clone());
+            }
+            FlagValuePolicy::Optional => {
+                if let Some(value) = remainder.strip_prefix('=') {
+                    if value.is_empty() {
+                        return OptionOutcome::Unsafe(token.byte_range.clone());
+                    }
+                    if policy.value_type == FlagValueType::Path
+                        && !is_relative_path_value(value, token)
+                    {
+                        return OptionOutcome::Unsafe(token.byte_range.clone());
+                    }
+                    return OptionOutcome::Safe(1);
+                }
+                if !remainder.is_empty() {
+                    if policy.value_type == FlagValueType::Path
+                        && !is_relative_path_value(remainder, token)
+                    {
+                        return OptionOutcome::Unsafe(token.byte_range.clone());
+                    }
+                    return OptionOutcome::Safe(1);
+                }
+                if index + 1 < args.len() && !is_flag_like(args[index + 1].text.as_str()) {
+                    if policy.value_type == FlagValueType::Path
+                        && !is_relative_path_arg(&args[index + 1])
+                    {
+                        return OptionOutcome::Unsafe(args[index + 1].byte_range.clone());
+                    }
+                    return OptionOutcome::Safe(2);
+                }
+                return OptionOutcome::Safe(1);
+            }
+        }
+    }
+    OptionOutcome::Safe(1)
+}
+
 fn is_relative_path_arg(arg: &ParsedArg) -> bool {
     if arg.has_expansion {
         return false;
@@ -655,6 +1049,7 @@ fn parse_command_node(node: Node<'_>, source: &str) -> Result<ParsedCommand, Par
     let Some(name) = node_text(name_node, source) else {
         return Err(ParseError::MissingCommandName);
     };
+    let name_range = name_node.byte_range();
 
     let mut args = Vec::new();
     let mut cursor = node.walk();
@@ -664,11 +1059,16 @@ fn parse_command_node(node: Node<'_>, source: &str) -> Result<ParsedCommand, Par
             args.push(ParsedArg {
                 text: arg,
                 has_expansion,
+                byte_range: arg_node.byte_range(),
             });
         }
     }
 
-    Ok(ParsedCommand { name, args })
+    Ok(ParsedCommand {
+        name,
+        args,
+        name_range,
+    })
 }
 
 fn node_text(node: Node<'_>, source: &str) -> Option<String> {
@@ -749,6 +1149,68 @@ fn contains_disallowed_tokens(node: Node<'_>) -> bool {
 
 fn is_disallowed_token_kind(kind: &str) -> bool {
     matches!(kind, "&" | ";")
+}
+
+fn collect_disallowed_token_ranges(node: Node<'_>, ranges: &mut Vec<Range<usize>>) {
+    if is_disallowed_token_kind(node.kind()) {
+        ranges.push(node.byte_range());
+    }
+    let mut index = 0;
+    let count = node.child_count();
+    while index < count {
+        if let Some(child) = node.child(index) {
+            collect_disallowed_token_ranges(child, ranges);
+        }
+        index += 1;
+    }
+}
+
+fn collect_disallowed_node_ranges(node: Node<'_>, ranges: &mut Vec<Range<usize>>) {
+    if is_disallowed_node_kind(node.kind()) {
+        ranges.push(node.byte_range());
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_disallowed_node_ranges(child, ranges);
+    }
+}
+
+fn line_break_ranges(command: &str) -> Vec<Range<usize>> {
+    command
+        .char_indices()
+        .filter_map(|(idx, ch)| {
+            if ch == '\n' || ch == '\r' {
+                Some(idx..idx + ch.len_utf8())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn normalize_ranges(ranges: Vec<Range<usize>>, source_len: usize) -> Vec<Range<usize>> {
+    let mut normalized = ranges
+        .into_iter()
+        .filter_map(|range| {
+            let start = range.start.min(source_len);
+            let end = range.end.min(source_len);
+            if start < end { Some(start..end) } else { None }
+        })
+        .collect::<Vec<_>>();
+    normalized.sort_by_key(|range| range.start);
+
+    let mut merged: Vec<Range<usize>> = Vec::new();
+    for range in normalized {
+        if let Some(last) = merged.last_mut()
+            && range.start <= last.end
+        {
+            last.end = last.end.max(range.end);
+            continue;
+        }
+        merged.push(range);
+    }
+    merged
 }
 
 fn load_builtin_safe_command_rules() -> Vec<SafeCommandRule> {
@@ -1170,5 +1632,43 @@ mod tests {
         apply_safe_command_layer(&mut rules, &workspace, dir.path()).expect("apply workspace");
         assert_safe_cmd_with_rules!("global_cmd", &rules);
         assert_safe_cmd_with_rules!("workspace_cmd", &rules);
+    }
+
+    fn assert_unsafe_range_contains(command: &str, needle: &str) {
+        let ranges = bash_unsafe_ranges(command);
+        assert!(
+            ranges
+                .iter()
+                .any(|range| command[range.clone()].contains(needle)),
+            "expected unsafe range containing {needle:?}, got {ranges:?}"
+        );
+    }
+
+    #[test]
+    fn bash_unsafe_ranges_empty_for_safe_command() {
+        let command = "ls -la";
+        let ranges = bash_unsafe_ranges(command);
+        assert!(
+            ranges.is_empty(),
+            "expected no unsafe ranges for {command:?}, got {ranges:?}"
+        );
+    }
+
+    #[test]
+    fn bash_unsafe_ranges_marks_absolute_path() {
+        let command = "cat /etc/passwd";
+        assert_unsafe_range_contains(command, "/etc/passwd");
+    }
+
+    #[test]
+    fn bash_unsafe_ranges_marks_disallowed_token() {
+        let command = "ls; rm -rf /";
+        assert_unsafe_range_contains(command, ";");
+    }
+
+    #[test]
+    fn bash_unsafe_ranges_marks_unknown_command() {
+        let command = "rm -rf /";
+        assert_unsafe_range_contains(command, "rm");
     }
 }
