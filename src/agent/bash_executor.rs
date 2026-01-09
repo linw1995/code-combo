@@ -28,11 +28,13 @@ enum ArgPolicy {
         flags: HashMap<String, FlagPolicy>,
         allow_positional: bool,
         positional_path_from: Option<usize>,
+        allow_dash: bool,
     },
     AllowList {
         flags: HashMap<String, FlagPolicy>,
         allow_positional: bool,
         positional_path_from: Option<usize>,
+        allow_dash: bool,
     },
     Deny,
 }
@@ -111,6 +113,8 @@ struct SafeCommandConfigEntry {
     allowed_flags: Vec<String>,
     #[serde(default)]
     allow_positional: bool,
+    #[serde(default)]
+    allow_dash: bool,
     #[serde(default)]
     flags: Vec<SafeFlagConfig>,
     #[serde(default)]
@@ -347,11 +351,13 @@ fn is_safe_args(args: &[ParsedArg], policy: &ArgPolicy) -> bool {
             flags,
             allow_positional,
             positional_path_from,
+            allow_dash,
         } => is_safe_args_with_mode(
             args,
             flags,
             *allow_positional,
             *positional_path_from,
+            *allow_dash,
             ArgMode::AllowAny,
         ),
         ArgPolicy::Deny => args.is_empty(),
@@ -359,11 +365,13 @@ fn is_safe_args(args: &[ParsedArg], policy: &ArgPolicy) -> bool {
             flags,
             allow_positional,
             positional_path_from,
+            allow_dash,
         } => is_safe_args_with_mode(
             args,
             flags,
             *allow_positional,
             *positional_path_from,
+            *allow_dash,
             ArgMode::AllowList,
         ),
     }
@@ -375,11 +383,13 @@ fn unsafe_args(args: &[ParsedArg], policy: &ArgPolicy) -> Vec<(Range<usize>, Str
             flags,
             allow_positional,
             positional_path_from,
+            allow_dash,
         } => unsafe_args_with_mode(
             args,
             flags,
             *allow_positional,
             *positional_path_from,
+            *allow_dash,
             ArgMode::AllowAny,
         ),
         ArgPolicy::Deny => args
@@ -390,11 +400,13 @@ fn unsafe_args(args: &[ParsedArg], policy: &ArgPolicy) -> Vec<(Range<usize>, Str
             flags,
             allow_positional,
             positional_path_from,
+            allow_dash,
         } => unsafe_args_with_mode(
             args,
             flags,
             *allow_positional,
             *positional_path_from,
+            *allow_dash,
             ArgMode::AllowList,
         ),
     }
@@ -405,6 +417,7 @@ fn unsafe_args_with_mode(
     flags: &HashMap<String, FlagPolicy>,
     allow_positional: bool,
     positional_path_from: Option<usize>,
+    allow_dash: bool,
     mode: ArgMode,
 ) -> Vec<(Range<usize>, String)> {
     let mut index = 0;
@@ -446,6 +459,25 @@ fn unsafe_args_with_mode(
             }
         }
 
+        if text == "-" {
+            if allow_positional {
+                if positional_path_from
+                    .map(|from| positional_index >= from)
+                    .unwrap_or(false)
+                    && !is_relative_path_arg(arg)
+                {
+                    return vec![(arg.byte_range.clone(), "path must be relative".to_string())];
+                }
+                positional_index += 1;
+                index += 1;
+                continue;
+            }
+            if allow_dash {
+                index += 1;
+                continue;
+            }
+        }
+
         if !allow_positional {
             return vec![(
                 arg.byte_range.clone(),
@@ -470,6 +502,7 @@ fn is_safe_args_with_mode(
     flags: &HashMap<String, FlagPolicy>,
     allow_positional: bool,
     positional_path_from: Option<usize>,
+    allow_dash: bool,
     mode: ArgMode,
 ) -> bool {
     let mut index = 0;
@@ -504,6 +537,25 @@ fn is_safe_args_with_mode(
             };
             index += consumed;
             continue;
+        }
+
+        if text == "-" {
+            if allow_positional {
+                if positional_path_from
+                    .map(|from| positional_index >= from)
+                    .unwrap_or(false)
+                    && !is_relative_path_arg(arg)
+                {
+                    return false;
+                }
+                positional_index += 1;
+                index += 1;
+                continue;
+            }
+            if allow_dash {
+                index += 1;
+                continue;
+            }
         }
 
         if !allow_positional {
@@ -1387,7 +1439,8 @@ fn build_safe_command_rules(config: SafeCommandConfig) -> Vec<SafeCommandRule> {
                 };
             }
             let allow_positional = entry.allow_positional || entry.allow_any;
-            if flags.is_empty() && !allow_positional {
+            let allow_dash = entry.allow_dash;
+            if flags.is_empty() && !allow_positional && !allow_dash {
                 return SafeCommandRule {
                     command_chain,
                     args: ArgPolicy::Deny,
@@ -1400,6 +1453,7 @@ fn build_safe_command_rules(config: SafeCommandConfig) -> Vec<SafeCommandRule> {
                         flags,
                         allow_positional,
                         positional_path_from: entry.positional_path_from,
+                        allow_dash,
                     },
                 };
             }
@@ -1409,6 +1463,7 @@ fn build_safe_command_rules(config: SafeCommandConfig) -> Vec<SafeCommandRule> {
                     flags,
                     allow_positional,
                     positional_path_from: entry.positional_path_from,
+                    allow_dash,
                 },
             }
         })
@@ -1521,6 +1576,7 @@ mod tests {
                     flags: ls_flags,
                     allow_positional: false,
                     positional_path_from: None,
+                    allow_dash: false,
                 },
             },
             SafeCommandRule {
@@ -1529,6 +1585,7 @@ mod tests {
                     flags: head_flags,
                     allow_positional: false,
                     positional_path_from: None,
+                    allow_dash: false,
                 },
             },
         ];
@@ -1561,6 +1618,7 @@ mod tests {
                     flags: HashMap::new(),
                     allow_positional: true,
                     positional_path_from: Some(0),
+                    allow_dash: false,
                 },
             },
             SafeCommandRule {
@@ -1569,6 +1627,7 @@ mod tests {
                     flags: grep_flags,
                     allow_positional: true,
                     positional_path_from: Some(1),
+                    allow_dash: false,
                 },
             },
         ];
@@ -1599,6 +1658,7 @@ mod tests {
                 flags,
                 allow_positional: true,
                 positional_path_from: Some(0),
+                allow_dash: false,
             },
         }];
 
@@ -1606,6 +1666,22 @@ mod tests {
         assert_safe_cmd_with_rules!("cat ./etc/passwd", &rules);
         assert_safe_cmd_with_rules!("cat --file ./etc/passwd", &rules);
         assert_unsafe_cmd_with_rules!("cat --file /etc/passwd", &rules);
+    }
+
+    #[test]
+    fn safe_command_allows_single_dash_argument_when_configured() {
+        let rules = vec![SafeCommandRule {
+            command_chain: vec!["cat".to_string()],
+            args: ArgPolicy::AllowList {
+                flags: HashMap::new(),
+                allow_positional: false,
+                positional_path_from: None,
+                allow_dash: true,
+            },
+        }];
+
+        assert_safe_cmd_with_rules!("cat -", &rules);
+        assert_unsafe_cmd_with_rules!("cat ./file", &rules);
     }
 
     #[test]
@@ -1617,6 +1693,7 @@ mod tests {
                     flags: HashMap::new(),
                     allow_positional: true,
                     positional_path_from: None,
+                    allow_dash: false,
                 },
             },
             SafeCommandRule {
@@ -1625,6 +1702,7 @@ mod tests {
                     flags: HashMap::new(),
                     allow_positional: true,
                     positional_path_from: None,
+                    allow_dash: false,
                 },
             },
             SafeCommandRule {
@@ -1633,6 +1711,7 @@ mod tests {
                     flags: HashMap::new(),
                     allow_positional: true,
                     positional_path_from: None,
+                    allow_dash: false,
                 },
             },
         ];
@@ -1657,6 +1736,7 @@ mod tests {
                 flags: HashMap::new(),
                 allow_positional: false,
                 positional_path_from: None,
+                allow_dash: false,
             },
         }];
 
