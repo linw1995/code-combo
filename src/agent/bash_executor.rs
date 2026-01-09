@@ -28,11 +28,13 @@ enum ArgPolicy {
         flags: HashMap<String, FlagPolicy>,
         allow_positional: bool,
         positional_path_from: Option<usize>,
+        allow_dash: bool,
     },
     AllowList {
         flags: HashMap<String, FlagPolicy>,
         allow_positional: bool,
         positional_path_from: Option<usize>,
+        allow_dash: bool,
     },
     Deny,
 }
@@ -111,6 +113,8 @@ struct SafeCommandConfigEntry {
     allowed_flags: Vec<String>,
     #[serde(default)]
     allow_positional: bool,
+    #[serde(default)]
+    allow_dash: bool,
     #[serde(default)]
     flags: Vec<SafeFlagConfig>,
     #[serde(default)]
@@ -347,11 +351,13 @@ fn is_safe_args(args: &[ParsedArg], policy: &ArgPolicy) -> bool {
             flags,
             allow_positional,
             positional_path_from,
+            allow_dash,
         } => is_safe_args_with_mode(
             args,
             flags,
             *allow_positional,
             *positional_path_from,
+            *allow_dash,
             ArgMode::AllowAny,
         ),
         ArgPolicy::Deny => args.is_empty(),
@@ -359,11 +365,13 @@ fn is_safe_args(args: &[ParsedArg], policy: &ArgPolicy) -> bool {
             flags,
             allow_positional,
             positional_path_from,
+            allow_dash,
         } => is_safe_args_with_mode(
             args,
             flags,
             *allow_positional,
             *positional_path_from,
+            *allow_dash,
             ArgMode::AllowList,
         ),
     }
@@ -375,11 +383,13 @@ fn unsafe_args(args: &[ParsedArg], policy: &ArgPolicy) -> Vec<(Range<usize>, Str
             flags,
             allow_positional,
             positional_path_from,
+            allow_dash,
         } => unsafe_args_with_mode(
             args,
             flags,
             *allow_positional,
             *positional_path_from,
+            *allow_dash,
             ArgMode::AllowAny,
         ),
         ArgPolicy::Deny => args
@@ -390,11 +400,13 @@ fn unsafe_args(args: &[ParsedArg], policy: &ArgPolicy) -> Vec<(Range<usize>, Str
             flags,
             allow_positional,
             positional_path_from,
+            allow_dash,
         } => unsafe_args_with_mode(
             args,
             flags,
             *allow_positional,
             *positional_path_from,
+            *allow_dash,
             ArgMode::AllowList,
         ),
     }
@@ -405,6 +417,7 @@ fn unsafe_args_with_mode(
     flags: &HashMap<String, FlagPolicy>,
     allow_positional: bool,
     positional_path_from: Option<usize>,
+    allow_dash: bool,
     mode: ArgMode,
 ) -> Vec<(Range<usize>, String)> {
     let mut index = 0;
@@ -436,6 +449,19 @@ fn unsafe_args_with_mode(
             }
         }
 
+        if !options_ended
+            && is_short_option(text)
+            && let Some(outcome) = check_single_dash_long_option(arg, index, args, flags, mode)
+        {
+            match outcome {
+                OptionOutcome::Safe(consumed) => {
+                    index += consumed;
+                    continue;
+                }
+                OptionOutcome::Unsafe(range, reason) => return vec![(range, reason)],
+            }
+        }
+
         if !options_ended && is_short_option(text) {
             match check_short_options(arg, index, args, flags, mode) {
                 OptionOutcome::Safe(consumed) => {
@@ -443,6 +469,25 @@ fn unsafe_args_with_mode(
                     continue;
                 }
                 OptionOutcome::Unsafe(range, reason) => return vec![(range, reason)],
+            }
+        }
+
+        if text == "-" {
+            if allow_positional {
+                if positional_path_from
+                    .map(|from| positional_index >= from)
+                    .unwrap_or(false)
+                    && !is_relative_path_arg(arg)
+                {
+                    return vec![(arg.byte_range.clone(), "path must be relative".to_string())];
+                }
+                positional_index += 1;
+                index += 1;
+                continue;
+            }
+            if allow_dash {
+                index += 1;
+                continue;
             }
         }
 
@@ -470,6 +515,7 @@ fn is_safe_args_with_mode(
     flags: &HashMap<String, FlagPolicy>,
     allow_positional: bool,
     positional_path_from: Option<usize>,
+    allow_dash: bool,
     mode: ArgMode,
 ) -> bool {
     let mut index = 0;
@@ -497,6 +543,14 @@ fn is_safe_args_with_mode(
             continue;
         }
 
+        if !options_ended
+            && is_short_option(text)
+            && let Some(consumed) = consume_single_dash_long_option(arg, index, args, flags, mode)
+        {
+            index += consumed;
+            continue;
+        }
+
         if !options_ended && is_short_option(text) {
             let consumed = match parse_short_options(arg, index, args, flags, mode) {
                 Some(consumed) => consumed,
@@ -504,6 +558,25 @@ fn is_safe_args_with_mode(
             };
             index += consumed;
             continue;
+        }
+
+        if text == "-" {
+            if allow_positional {
+                if positional_path_from
+                    .map(|from| positional_index >= from)
+                    .unwrap_or(false)
+                    && !is_relative_path_arg(arg)
+                {
+                    return false;
+                }
+                positional_index += 1;
+                index += 1;
+                continue;
+            }
+            if allow_dash {
+                index += 1;
+                continue;
+            }
         }
 
         if !allow_positional {
@@ -539,6 +612,32 @@ fn split_long_option(arg: &str) -> (&str, Option<&str>) {
         (name, Some(value))
     } else {
         (arg, None)
+    }
+}
+
+fn split_single_dash_option(arg: &str) -> (&str, Option<&str>) {
+    if let Some((name, value)) = arg.split_once('=') {
+        (name, Some(value))
+    } else {
+        (arg, None)
+    }
+}
+
+fn match_single_dash_long_option<'a>(
+    arg: &'a str,
+    flags: &HashMap<String, FlagPolicy>,
+) -> Option<(&'a str, Option<&'a str>)> {
+    if !arg.starts_with('-') || arg.starts_with("--") {
+        return None;
+    }
+    let (name, attached_value) = split_single_dash_option(arg);
+    if name.len() <= 2 {
+        return None;
+    }
+    if flags.contains_key(name) {
+        Some((name, attached_value))
+    } else {
+        None
     }
 }
 
@@ -626,6 +725,64 @@ fn consume_long_option(
     mode: ArgMode,
 ) -> Option<usize> {
     let (name, attached_value) = split_long_option(token.text.as_str());
+    consume_option_with_name(name, attached_value, token, index, args, flags, mode)
+}
+
+enum OptionOutcome {
+    Safe(usize),
+    Unsafe(Range<usize>, String),
+}
+
+fn check_long_option(
+    token: &ParsedArg,
+    index: usize,
+    args: &[ParsedArg],
+    flags: &HashMap<String, FlagPolicy>,
+    mode: ArgMode,
+) -> OptionOutcome {
+    let (name, attached_value) = split_long_option(token.text.as_str());
+    check_option_with_name(name, attached_value, token, index, args, flags, mode)
+}
+
+fn consume_single_dash_long_option(
+    token: &ParsedArg,
+    index: usize,
+    args: &[ParsedArg],
+    flags: &HashMap<String, FlagPolicy>,
+    mode: ArgMode,
+) -> Option<usize> {
+    let (name, attached_value) = match_single_dash_long_option(token.text.as_str(), flags)?;
+    consume_option_with_name(name, attached_value, token, index, args, flags, mode)
+}
+
+fn check_single_dash_long_option(
+    token: &ParsedArg,
+    index: usize,
+    args: &[ParsedArg],
+    flags: &HashMap<String, FlagPolicy>,
+    mode: ArgMode,
+) -> Option<OptionOutcome> {
+    let (name, attached_value) = match_single_dash_long_option(token.text.as_str(), flags)?;
+    Some(check_option_with_name(
+        name,
+        attached_value,
+        token,
+        index,
+        args,
+        flags,
+        mode,
+    ))
+}
+
+fn consume_option_with_name(
+    name: &str,
+    attached_value: Option<&str>,
+    token: &ParsedArg,
+    index: usize,
+    args: &[ParsedArg],
+    flags: &HashMap<String, FlagPolicy>,
+    mode: ArgMode,
+) -> Option<usize> {
     let policy = match flags.get(name) {
         Some(policy) => policy,
         None => {
@@ -702,19 +859,15 @@ fn consume_long_option(
     }
 }
 
-enum OptionOutcome {
-    Safe(usize),
-    Unsafe(Range<usize>, String),
-}
-
-fn check_long_option(
+fn check_option_with_name(
+    name: &str,
+    attached_value: Option<&str>,
     token: &ParsedArg,
     index: usize,
     args: &[ParsedArg],
     flags: &HashMap<String, FlagPolicy>,
     mode: ArgMode,
 ) -> OptionOutcome {
-    let (name, attached_value) = split_long_option(token.text.as_str());
     let policy = match flags.get(name) {
         Some(policy) => policy,
         None => {
@@ -1387,7 +1540,8 @@ fn build_safe_command_rules(config: SafeCommandConfig) -> Vec<SafeCommandRule> {
                 };
             }
             let allow_positional = entry.allow_positional || entry.allow_any;
-            if flags.is_empty() && !allow_positional {
+            let allow_dash = entry.allow_dash;
+            if flags.is_empty() && !allow_positional && !allow_dash {
                 return SafeCommandRule {
                     command_chain,
                     args: ArgPolicy::Deny,
@@ -1400,6 +1554,7 @@ fn build_safe_command_rules(config: SafeCommandConfig) -> Vec<SafeCommandRule> {
                         flags,
                         allow_positional,
                         positional_path_from: entry.positional_path_from,
+                        allow_dash,
                     },
                 };
             }
@@ -1409,6 +1564,7 @@ fn build_safe_command_rules(config: SafeCommandConfig) -> Vec<SafeCommandRule> {
                     flags,
                     allow_positional,
                     positional_path_from: entry.positional_path_from,
+                    allow_dash,
                 },
             }
         })
@@ -1521,6 +1677,7 @@ mod tests {
                     flags: ls_flags,
                     allow_positional: false,
                     positional_path_from: None,
+                    allow_dash: false,
                 },
             },
             SafeCommandRule {
@@ -1529,6 +1686,7 @@ mod tests {
                     flags: head_flags,
                     allow_positional: false,
                     positional_path_from: None,
+                    allow_dash: false,
                 },
             },
         ];
@@ -1561,6 +1719,7 @@ mod tests {
                     flags: HashMap::new(),
                     allow_positional: true,
                     positional_path_from: Some(0),
+                    allow_dash: false,
                 },
             },
             SafeCommandRule {
@@ -1569,6 +1728,7 @@ mod tests {
                     flags: grep_flags,
                     allow_positional: true,
                     positional_path_from: Some(1),
+                    allow_dash: false,
                 },
             },
         ];
@@ -1599,6 +1759,7 @@ mod tests {
                 flags,
                 allow_positional: true,
                 positional_path_from: Some(0),
+                allow_dash: false,
             },
         }];
 
@@ -1606,6 +1767,48 @@ mod tests {
         assert_safe_cmd_with_rules!("cat ./etc/passwd", &rules);
         assert_safe_cmd_with_rules!("cat --file ./etc/passwd", &rules);
         assert_unsafe_cmd_with_rules!("cat --file /etc/passwd", &rules);
+    }
+
+    #[test]
+    fn safe_command_allows_single_dash_argument_when_configured() {
+        let rules = vec![SafeCommandRule {
+            command_chain: vec!["cat".to_string()],
+            args: ArgPolicy::AllowList {
+                flags: HashMap::new(),
+                allow_positional: false,
+                positional_path_from: None,
+                allow_dash: true,
+            },
+        }];
+
+        assert_safe_cmd_with_rules!("cat -", &rules);
+        assert_unsafe_cmd_with_rules!("cat ./file", &rules);
+    }
+
+    #[test]
+    fn safe_command_allows_single_dash_long_option_with_value() {
+        let mut flags = HashMap::new();
+        flags.insert(
+            "-name".to_string(),
+            FlagPolicy {
+                arg: FlagValuePolicy::Required,
+                value_type: FlagValueType::Any,
+            },
+        );
+        let rules = vec![SafeCommandRule {
+            command_chain: vec!["find".to_string()],
+            args: ArgPolicy::AllowList {
+                flags,
+                allow_positional: false,
+                positional_path_from: None,
+                allow_dash: false,
+            },
+        }];
+
+        assert_safe_cmd_with_rules!("find -name main.rs", &rules);
+        assert_safe_cmd_with_rules!("find -name=main.rs", &rules);
+        assert_unsafe_cmd_with_rules!("find -name", &rules);
+        assert_unsafe_cmd_with_rules!("find -na main.rs", &rules);
     }
 
     #[test]
@@ -1617,6 +1820,7 @@ mod tests {
                     flags: HashMap::new(),
                     allow_positional: true,
                     positional_path_from: None,
+                    allow_dash: false,
                 },
             },
             SafeCommandRule {
@@ -1625,6 +1829,7 @@ mod tests {
                     flags: HashMap::new(),
                     allow_positional: true,
                     positional_path_from: None,
+                    allow_dash: false,
                 },
             },
             SafeCommandRule {
@@ -1633,6 +1838,7 @@ mod tests {
                     flags: HashMap::new(),
                     allow_positional: true,
                     positional_path_from: None,
+                    allow_dash: false,
                 },
             },
         ];
@@ -1657,6 +1863,7 @@ mod tests {
                 flags: HashMap::new(),
                 allow_positional: false,
                 positional_path_from: None,
+                allow_dash: false,
             },
         }];
 
