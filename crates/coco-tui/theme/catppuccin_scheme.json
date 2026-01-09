@@ -97,6 +97,9 @@
         },
         "bash_stdout_marker": "blue",
         "bash_stderr_marker": "red",
+        "code_overlay_info": "blue",
+        "code_overlay_warning": "yellow",
+        "code_overlay_error": "red",
         "tab_spaces": "overlay0"
     },
     "tree_sitter": {

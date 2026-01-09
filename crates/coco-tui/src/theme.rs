@@ -117,6 +117,9 @@ build_theme_type!(FinalizedUiTheme {
     bash_tab_active,
     bash_stdout_marker,
     bash_stderr_marker,
+    code_overlay_info,
+    code_overlay_warning,
+    code_overlay_error,
     tab_spaces,
 });
 
@@ -185,6 +188,9 @@ impl Theme {
                     bash_tab_active,
                     bash_stdout_marker,
                     bash_stderr_marker,
+                    code_overlay_info,
+                    code_overlay_warning,
+                    code_overlay_error,
                     tab_spaces,
                 }
             )?,

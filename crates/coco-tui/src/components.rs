@@ -57,7 +57,7 @@ mod shortcut_hints;
 mod transcript;
 
 pub use chat::Chat;
-pub use code_highlight::CodeHighlight;
+pub use code_highlight::{CodeHighlight, HighlightOverlay, OverlayLevel};
 pub use command_palette::*;
 pub use input::Input;
 pub use message::*;

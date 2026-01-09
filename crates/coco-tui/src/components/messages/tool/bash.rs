@@ -2,7 +2,7 @@ use bon::bon;
 use coco_highlight::Lang;
 use coco_macro::{ComponentExt, ContentComponentExt};
 use code_combo::{
-    OutputChunk, ToolUse,
+    OutputChunk, ToolUse, bash_unsafe_ranges,
     tools::{BashInput, BashOutput, Final},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -25,7 +25,7 @@ use super::{Component, Content, ContentComponent};
 use crate::components::CacheInvalidation;
 use crate::{
     actions::{Action, ToolAction},
-    components::{CodeHighlight, Persistable, ShortcutHints},
+    components::{CodeHighlight, HighlightOverlay, OverlayLevel, Persistable, ShortcutHints},
     error::*,
     events::{AnswerEvent, AskEvent, Event},
     global::{self, State},
@@ -141,17 +141,50 @@ fn render_tabs_panel(view: BashOutputView) -> Paragraph<'static> {
 
 const OUTPUT_MARKER: &str = "▐";
 
-fn generate_input<'b>(tool_use: &ToolUse) -> CodeHighlight<'b> {
+fn overlay_level_for_reason(reason: &str) -> OverlayLevel {
+    let reason = reason.to_lowercase();
+    if reason.contains("syntax")
+        || reason.contains("parse")
+        || reason.contains("unsupported")
+        || reason.contains("unavailable")
+    {
+        OverlayLevel::Error
+    } else {
+        OverlayLevel::Warning
+    }
+}
+
+fn build_input<'b>(command: &str, overlays: Vec<HighlightOverlay>) -> CodeHighlight<'b> {
+    if overlays.is_empty() {
+        CodeHighlight::try_new(command, Lang::Bash).expect("failed to new CodeHighlight")
+    } else {
+        CodeHighlight::try_new_with_overlays(command, Lang::Bash, overlays)
+            .expect("failed to new CodeHighlight")
+    }
+}
+
+fn generate_input<'b>(tool_use: &ToolUse, exec_state: &ExecState) -> CodeHighlight<'b> {
     let input: BashInput =
         serde_json::from_value(tool_use.input.clone()).expect("failed to parse BashInput");
-    CodeHighlight::try_new(&input.command, Lang::Bash).expect("failed to new CodeHighlight")
+    let overlays = match exec_state {
+        ExecState::Initial {
+            requiring_confirmation: true,
+        } => bash_unsafe_ranges(&input.command)
+            .into_iter()
+            .map(|(range, reason)| {
+                HighlightOverlay::new(range, overlay_level_for_reason(&reason))
+                    .with_newline_guide(reason)
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    build_input(&input.command, overlays)
 }
 
 #[bon]
 impl<'a> Bash<'a> {
     #[builder]
     pub fn try_new(tool_use: &ToolUse, output: Option<Value>) -> Result<Self> {
-        let input = generate_input(tool_use);
         let output: Option<BashOutput> = output
             .map(serde_json::from_value)
             .transpose()
@@ -167,6 +200,7 @@ impl<'a> Bash<'a> {
                 requiring_confirmation: false,
             },
         };
+        let input = generate_input(tool_use, &exec_state);
         let preview_lines = StreamedLines::new(Some(OUTPUT_PREVIEW_LINES));
         let mut component = Self {
             state: State::new(Inner {
@@ -258,6 +292,11 @@ impl<'a> Bash<'a> {
         self.theme_dirty = false;
     }
 
+    fn rebuild_input(&mut self) {
+        let state = self.state.read();
+        self.input = generate_input(&state.tool_use, &state.exec_state);
+    }
+
     fn exec_output(&self) -> Option<&BashOutput> {
         match &self.state.exec_state {
             ExecState::Finished { output, .. } => Some(output),
@@ -298,13 +337,16 @@ impl<'a> Bash<'a> {
     }
 
     fn set_requiring_confirmation(&mut self, value: bool) {
-        let mut state = self.state.write();
-        if let ExecState::Initial {
-            requiring_confirmation,
-        } = &mut state.exec_state
         {
-            *requiring_confirmation = value;
+            let mut state = self.state.write();
+            if let ExecState::Initial {
+                requiring_confirmation,
+            } = &mut state.exec_state
+            {
+                *requiring_confirmation = value;
+            }
         }
+        self.rebuild_input();
     }
 
     fn push_chunk(&mut self, chunk: OutputChunk) {
@@ -468,7 +510,7 @@ impl Persistable for Bash<'static> {
             ExecState::Initial { .. } => StreamedLines::new(Some(OUTPUT_PREVIEW_LINES)),
         };
         let mut component = Self {
-            input: generate_input(&state.tool_use),
+            input: generate_input(&state.tool_use, &state.exec_state),
             preview_lines: streamed_preview_lines,
             output_text: Paragraph::new(Vec::new()),
             output_markers: None,
