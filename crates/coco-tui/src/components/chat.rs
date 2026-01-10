@@ -62,10 +62,6 @@ pub struct Chat<'a> {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Inner {
-    // Placeholder field for serialization
-    system_prompt: String,
-    messages: Vec<code_combo::Message>,
-
     state: ChatState,
     focus: Focus,
     #[serde(default)]
@@ -78,13 +74,18 @@ struct Inner {
     #[serde(with = "time::serde::rfc3339")]
     updated_at: time::OffsetDateTime,
     name: String,
+
+    // Placehold for session persistence
+    #[serde(default)]
+    system_prompt: Option<String>,
+    messages: Vec<code_combo::Message>,
 }
 
 impl Default for Inner {
     fn default() -> Self {
         let now = time::OffsetDateTime::now_utc();
         Self {
-            system_prompt: String::new(),
+            system_prompt: None,
             messages: vec![],
             state: ChatState::Ready,
             focus: Focus::Input,
@@ -197,8 +198,6 @@ impl CancellationGuard {
     }
 }
 
-const AGENTS_MD_FILENAME: &str = "AGENTS.md";
-
 impl Chat<'static> {
     pub fn new(config: Config) -> Self {
         let agent = Agent::new(config);
@@ -221,33 +220,13 @@ impl Chat<'static> {
     }
 
     pub async fn setup(&mut self) {
-        // read AGENTS.md file
-        let workspace_path = global::workspace_dir().join(AGENTS_MD_FILENAME);
-        let global_path = global::config().await.config_dir.join(AGENTS_MD_FILENAME);
-        let mut custom_parts = Vec::new();
-        for path in [global_path, workspace_path] {
-            match tokio::fs::read_to_string(&path).await {
-                Ok(system_prompt) => {
-                    if !system_prompt.trim().is_empty() {
-                        custom_parts.push(system_prompt);
-                    }
-                }
-                Err(err) => {
-                    warn!(?path, ?err, "failed to read file");
-                }
-            }
-        }
+        let config = global::config().await;
+        let config_dir = &config.config_dir;
+        let workspace_dir = global::workspace_dir();
 
-        if custom_parts.is_empty() {
-            self.agent
-                .set_system_prompt(&Agent::build_system_prompt(None));
-            self.state.write_untracked().system_prompt.clear();
-        } else {
-            let combined_custom = custom_parts.join("\n\n");
-            let combined = Agent::build_system_prompt(Some(&combined_custom));
-            self.agent.set_system_prompt(&combined);
-            self.state.write_untracked().system_prompt = combined_custom;
-        }
+        self.agent
+            .setup_system_prompt_async(config_dir, workspace_dir)
+            .await;
     }
 
     fn restore_session_by_metadata(&self, metadata: session::PersistentSessionMetadata) {
@@ -291,6 +270,7 @@ impl Chat<'static> {
         tokio::spawn(async move {
             // Take a snapshot immediately to avoid persisting later dirty state
             state.messages = agent.dump_messages().await;
+            state.system_prompt = Some(agent.system_prompt().to_string());
 
             let session_dir = std::path::Path::new(".coco/sessions").to_path_buf();
             if let Err(e) = tokio::fs::create_dir_all(&session_dir).await {
@@ -833,30 +813,16 @@ impl Chat<'static> {
             self.save_now();
         }
 
-        let system_prompt = self.state.system_prompt.clone();
-        let auto_accept_edits = self.state.auto_accept_edits;
-        let thinking_enabled = self.state.thinking_enabled;
         self.set_combo_thinking_active(false);
 
         // 2. Clear messages
         self.messages.clear();
 
         // 3. Reset state
-        *self.state.write() = Inner {
-            focus: Focus::InputBlur,
-            auto_accept_edits,
-            thinking_enabled,
-            system_prompt,
-            ..Default::default()
-        };
+        *self.state.write() = Inner::default();
         self.cancellation_guard.reset();
-        self.agent.set_auto_accept_edits(auto_accept_edits);
-        self.agent.set_thinking_enabled(thinking_enabled);
 
-        // 4. Reset focus to Input from InputBlur to trigger the input component
-        self.update_focus(Focus::Input);
-
-        // 5. Cancel any pending save timer
+        // 4. Cancel any pending save timer
         if let Some(token) = self.token_schedule_session_save.take() {
             token.cancel();
         }
@@ -901,8 +867,12 @@ impl Persistable for Chat<'static> {
                 .block_on(inst.agent.restore_messages(&state.messages));
             state.messages.clear();
         });
-        let combined = Agent::build_system_prompt(Some(&state.system_prompt));
-        inst.agent.set_system_prompt(&combined);
+
+        // Restore system prompt from persisted value if available
+        if let Some(saved_prompt) = state.system_prompt.take() {
+            inst.agent.set_system_prompt(&saved_prompt);
+        }
+
         inst.agent.set_auto_accept_edits(auto_accept_edits);
         inst.agent.set_thinking_enabled(thinking_enabled);
 

@@ -6,68 +6,22 @@ use std::{
 };
 
 use lazy_static::lazy_static;
-use serde::Deserialize;
-use toml as serde_toml;
 use tracing::warn;
 use tree_sitter::{Node, Parser};
 
 use crate::{
-    config::{BashConfig, BashConfigLayers, SafeCommandsMode},
+    config::{
+        ArgPolicy, BashConfig, BashConfigLayers, FlagPolicy, FlagValuePolicy, FlagValueType,
+        SafeCommandRule, SafeCommandsMode, build_safe_command_rules_from_entries,
+        load_safe_command_rules_from_path, parse_safe_command_rules,
+    },
     tools::BashInput,
 };
-
-#[derive(Clone)]
-struct SafeCommandRule {
-    command_chain: Vec<String>,
-    args: ArgPolicy,
-}
-
-#[derive(Clone)]
-enum ArgPolicy {
-    Any {
-        flags: HashMap<String, FlagPolicy>,
-        allow_positional: bool,
-        positional_path_from: Option<usize>,
-        allow_dash: bool,
-    },
-    AllowList {
-        flags: HashMap<String, FlagPolicy>,
-        allow_positional: bool,
-        positional_path_from: Option<usize>,
-        allow_dash: bool,
-    },
-    Deny,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ArgMode {
     AllowList,
     AllowAny,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-#[derive(Default)]
-enum FlagValuePolicy {
-    #[default]
-    None,
-    Optional,
-    Required,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-#[derive(Default)]
-enum FlagValueType {
-    #[default]
-    Any,
-    Path,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct FlagPolicy {
-    arg: FlagValuePolicy,
-    value_type: FlagValueType,
 }
 
 #[derive(Debug)]
@@ -95,40 +49,6 @@ enum ParseError {
 }
 
 const BUILTIN_SAFE_COMMANDS_TOML: &str = include_str!("safe_commands.toml");
-
-#[derive(Deserialize)]
-struct SafeCommandConfig {
-    commands: Vec<SafeCommandConfigEntry>,
-}
-
-#[derive(Deserialize)]
-struct SafeCommandConfigEntry {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    command: Option<Vec<String>>,
-    #[serde(default)]
-    allow_any: bool,
-    #[serde(default)]
-    allowed_flags: Vec<String>,
-    #[serde(default)]
-    allow_positional: bool,
-    #[serde(default)]
-    allow_dash: bool,
-    #[serde(default)]
-    flags: Vec<SafeFlagConfig>,
-    #[serde(default)]
-    positional_path_from: Option<usize>,
-}
-
-#[derive(Deserialize)]
-struct SafeFlagConfig {
-    name: String,
-    #[serde(default)]
-    arg: FlagValuePolicy,
-    #[serde(default)]
-    value: FlagValueType,
-}
 
 lazy_static! {
     static ref BUILTIN_SAFE_COMMAND_RULES: Vec<SafeCommandRule> = load_builtin_safe_command_rules();
@@ -270,6 +190,7 @@ pub(super) fn configure_safe_commands(
     layers: &BashConfigLayers,
     global_config_dir: &Path,
     workspace_config_dir: Option<&Path>,
+    agent_config: Option<&crate::agent::config::AgentConfig>,
 ) {
     let mut rules = BUILTIN_SAFE_COMMAND_RULES.clone();
     if let Some(global) = layers.global.as_ref()
@@ -281,6 +202,16 @@ pub(super) fn configure_safe_commands(
         let dir = workspace_config_dir.unwrap_or(global_config_dir);
         if let Err(err) = apply_safe_command_layer(&mut rules, workspace, dir) {
             warn!("failed to apply workspace bash safe commands: {err}");
+        }
+    }
+
+    // Apply agent config safe commands (highest priority)
+    if let Some(agent_cfg) = agent_config
+        && let Some(safe_cmds) = agent_cfg.safe_commands.as_ref()
+    {
+        let dir = workspace_config_dir.unwrap_or(global_config_dir);
+        if let Err(err) = apply_agent_safe_commands_layer(&mut rules, safe_cmds, dir) {
+            warn!("failed to apply agent safe commands: {err}");
         }
     }
 
@@ -341,6 +272,34 @@ fn apply_safe_command_layer(
     match config.safe_commands_mode {
         SafeCommandsMode::Append => rules.extend(custom_rules),
         SafeCommandsMode::Override => *rules = custom_rules,
+    }
+    Ok(())
+}
+
+fn apply_agent_safe_commands_layer(
+    rules: &mut Vec<SafeCommandRule>,
+    config: &crate::agent::config::SafeCommandsConfig,
+    config_dir: &Path,
+) -> Result<(), String> {
+    use crate::agent::config::SafeCommandsConfig;
+
+    let (mode, custom_rules) = match config {
+        SafeCommandsConfig::Inline { mode, commands } => {
+            let parsed_rules = build_safe_command_rules_from_entries(commands.clone());
+            (*mode, parsed_rules)
+        }
+        SafeCommandsConfig::File { mode, path } => {
+            let resolved =
+                resolve_safe_commands_path(path.to_str().ok_or("invalid path")?, config_dir);
+            let loaded_rules = load_safe_command_rules_from_path(&resolved)
+                .map_err(|err| format!("{}: {err}", resolved.display()))?;
+            (*mode, loaded_rules)
+        }
+    };
+
+    match mode {
+        crate::config::SafeCommandsMode::Append => rules.extend(custom_rules),
+        crate::config::SafeCommandsMode::Override => *rules = custom_rules,
     }
     Ok(())
 }
@@ -1483,94 +1442,6 @@ fn load_builtin_safe_command_rules() -> Vec<SafeCommandRule> {
     }
 }
 
-fn load_safe_command_rules_from_path(path: &Path) -> Result<Vec<SafeCommandRule>, String> {
-    let content =
-        std::fs::read_to_string(path).map_err(|err| format!("failed to read file: {err}"))?;
-    parse_safe_command_rules(&content)
-}
-
-fn parse_safe_command_rules(source: &str) -> Result<Vec<SafeCommandRule>, String> {
-    let config: SafeCommandConfig =
-        serde_toml::from_str(source).map_err(|err| format!("failed to parse config: {err}"))?;
-    Ok(build_safe_command_rules(config))
-}
-
-fn build_safe_command_rules(config: SafeCommandConfig) -> Vec<SafeCommandRule> {
-    config
-        .commands
-        .into_iter()
-        .map(|entry| {
-            let mut flags: HashMap<String, FlagPolicy> = HashMap::new();
-            for flag in entry.allowed_flags {
-                flags.insert(
-                    flag,
-                    FlagPolicy {
-                        arg: FlagValuePolicy::None,
-                        value_type: FlagValueType::Any,
-                    },
-                );
-            }
-            for flag in entry.flags {
-                flags.insert(
-                    flag.name,
-                    FlagPolicy {
-                        arg: flag.arg,
-                        value_type: flag.value,
-                    },
-                );
-            }
-            let command_chain = match entry.command {
-                Some(command) => command,
-                None => match entry.name {
-                    Some(name) => vec![name],
-                    None => {
-                        warn!("safe command entry missing name or command");
-                        return SafeCommandRule {
-                            command_chain: Vec::new(),
-                            args: ArgPolicy::Deny,
-                        };
-                    }
-                },
-            };
-            if command_chain.is_empty() || command_chain.iter().any(|item| item.trim().is_empty()) {
-                warn!("safe command entry has empty command chain");
-                return SafeCommandRule {
-                    command_chain: Vec::new(),
-                    args: ArgPolicy::Deny,
-                };
-            }
-            let allow_positional = entry.allow_positional || entry.allow_any;
-            let allow_dash = entry.allow_dash;
-            if flags.is_empty() && !allow_positional && !allow_dash {
-                return SafeCommandRule {
-                    command_chain,
-                    args: ArgPolicy::Deny,
-                };
-            }
-            if entry.allow_any {
-                return SafeCommandRule {
-                    command_chain,
-                    args: ArgPolicy::Any {
-                        flags,
-                        allow_positional,
-                        positional_path_from: entry.positional_path_from,
-                        allow_dash,
-                    },
-                };
-            }
-            SafeCommandRule {
-                command_chain,
-                args: ArgPolicy::AllowList {
-                    flags,
-                    allow_positional,
-                    positional_path_from: entry.positional_path_from,
-                    allow_dash,
-                },
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1995,5 +1866,103 @@ mod tests {
             reason.contains("command not allowlisted"),
             "unexpected reason: {reason:?}"
         );
+    }
+
+    #[test]
+    fn agent_config_inline_safe_commands_override() {
+        use crate::agent::config::SafeCommandsConfig;
+        use crate::config::{SafeCommandEntry, SafeCommandsMode};
+
+        let mut rules = BUILTIN_SAFE_COMMAND_RULES.clone();
+
+        // Create agent config with inline safe commands that override builtin
+        let agent_config = crate::agent::config::AgentConfig {
+            safe_commands: Some(SafeCommandsConfig::Inline {
+                mode: SafeCommandsMode::Override,
+                commands: vec![SafeCommandEntry {
+                    name: Some("custom_cmd".to_string()),
+                    allow_any: true,
+                    ..Default::default()
+                }],
+            }),
+            ..Default::default()
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        apply_agent_safe_commands_layer(
+            &mut rules,
+            agent_config.safe_commands.as_ref().unwrap(),
+            dir.path(),
+        )
+        .expect("apply agent safe commands");
+
+        // Only custom_cmd should be safe (override mode)
+        assert_safe_cmd_with_rules!("custom_cmd", &rules);
+        assert_unsafe_cmd_with_rules!("ls", &rules); // builtin command should be gone
+    }
+
+    #[test]
+    fn agent_config_inline_safe_commands_append() {
+        use crate::agent::config::SafeCommandsConfig;
+        use crate::config::{SafeCommandEntry, SafeCommandsMode};
+
+        let mut rules = BUILTIN_SAFE_COMMAND_RULES.clone();
+
+        // Create agent config with inline safe commands that append to builtin
+        let agent_config = crate::agent::config::AgentConfig {
+            safe_commands: Some(SafeCommandsConfig::Inline {
+                mode: SafeCommandsMode::Append,
+                commands: vec![SafeCommandEntry {
+                    name: Some("custom_cmd".to_string()),
+                    allow_any: true,
+                    ..Default::default()
+                }],
+            }),
+            ..Default::default()
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        apply_agent_safe_commands_layer(
+            &mut rules,
+            agent_config.safe_commands.as_ref().unwrap(),
+            dir.path(),
+        )
+        .expect("apply agent safe commands");
+
+        // Both custom_cmd and builtin commands should be safe
+        assert_safe_cmd_with_rules!("custom_cmd", &rules);
+        assert_safe_cmd_with_rules!("ls", &rules); // builtin command should still exist
+    }
+
+    #[test]
+    fn agent_config_file_safe_commands() {
+        use crate::agent::config::SafeCommandsConfig;
+        use crate::config::SafeCommandsMode;
+        use std::path::PathBuf;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _safe_file_path = write_safe_commands_file(dir.path(), "agent_safe.toml", "agent_cmd");
+
+        let mut rules = BUILTIN_SAFE_COMMAND_RULES.clone();
+
+        // Create agent config with file-based safe commands
+        let agent_config = crate::agent::config::AgentConfig {
+            safe_commands: Some(SafeCommandsConfig::File {
+                mode: SafeCommandsMode::Append,
+                path: PathBuf::from("agent_safe.toml"),
+            }),
+            ..Default::default()
+        };
+
+        apply_agent_safe_commands_layer(
+            &mut rules,
+            agent_config.safe_commands.as_ref().unwrap(),
+            dir.path(),
+        )
+        .expect("apply agent safe commands");
+
+        // agent_cmd from file should be added
+        assert_safe_cmd_with_rules!("agent_cmd", &rules);
+        assert_safe_cmd_with_rules!("ls", &rules); // builtin should still exist
     }
 }
