@@ -6,52 +6,22 @@ use std::{
 };
 
 use lazy_static::lazy_static;
-use serde::Deserialize;
-use toml as serde_toml;
 use tracing::warn;
 use tree_sitter::{Node, Parser};
 
 use crate::{
     config::{
-        BashConfig, BashConfigLayers, FlagValuePolicy, FlagValueType, SafeCommandEntry,
-        SafeCommandsMode,
+        ArgPolicy, BashConfig, BashConfigLayers, FlagPolicy, FlagValuePolicy, FlagValueType,
+        SafeCommandRule, SafeCommandsMode, build_safe_command_rules_from_entries,
+        load_safe_command_rules_from_path, parse_safe_command_rules,
     },
     tools::BashInput,
 };
-
-#[derive(Clone)]
-struct SafeCommandRule {
-    command_chain: Vec<String>,
-    args: ArgPolicy,
-}
-
-#[derive(Clone)]
-enum ArgPolicy {
-    Any {
-        flags: HashMap<String, FlagPolicy>,
-        allow_positional: bool,
-        positional_path_from: Option<usize>,
-        allow_dash: bool,
-    },
-    AllowList {
-        flags: HashMap<String, FlagPolicy>,
-        allow_positional: bool,
-        positional_path_from: Option<usize>,
-        allow_dash: bool,
-    },
-    Deny,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ArgMode {
     AllowList,
     AllowAny,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct FlagPolicy {
-    arg: FlagValuePolicy,
-    value_type: FlagValueType,
 }
 
 #[derive(Debug)]
@@ -79,11 +49,6 @@ enum ParseError {
 }
 
 const BUILTIN_SAFE_COMMANDS_TOML: &str = include_str!("safe_commands.toml");
-
-#[derive(Deserialize)]
-struct SafeCommandConfig {
-    commands: Vec<SafeCommandEntry>,
-}
 
 lazy_static! {
     static ref BUILTIN_SAFE_COMMAND_RULES: Vec<SafeCommandRule> = load_builtin_safe_command_rules();
@@ -320,10 +285,7 @@ fn apply_agent_safe_commands_layer(
 
     let (mode, custom_rules) = match config {
         SafeCommandsConfig::Inline { mode, commands } => {
-            let config = SafeCommandConfig {
-                commands: commands.clone(),
-            };
-            let parsed_rules = build_safe_command_rules(config);
+            let parsed_rules = build_safe_command_rules_from_entries(commands.clone());
             (*mode, parsed_rules)
         }
         SafeCommandsConfig::File { mode, path } => {
@@ -1478,94 +1440,6 @@ fn load_builtin_safe_command_rules() -> Vec<SafeCommandRule> {
             Vec::new()
         }
     }
-}
-
-fn load_safe_command_rules_from_path(path: &Path) -> Result<Vec<SafeCommandRule>, String> {
-    let content =
-        std::fs::read_to_string(path).map_err(|err| format!("failed to read file: {err}"))?;
-    parse_safe_command_rules(&content)
-}
-
-fn parse_safe_command_rules(source: &str) -> Result<Vec<SafeCommandRule>, String> {
-    let config: SafeCommandConfig =
-        serde_toml::from_str(source).map_err(|err| format!("failed to parse config: {err}"))?;
-    Ok(build_safe_command_rules(config))
-}
-
-fn build_safe_command_rules(config: SafeCommandConfig) -> Vec<SafeCommandRule> {
-    config
-        .commands
-        .into_iter()
-        .map(|entry| {
-            let mut flags: HashMap<String, FlagPolicy> = HashMap::new();
-            for flag in entry.allowed_flags {
-                flags.insert(
-                    flag,
-                    FlagPolicy {
-                        arg: FlagValuePolicy::None,
-                        value_type: FlagValueType::Any,
-                    },
-                );
-            }
-            for flag in entry.flags {
-                flags.insert(
-                    flag.name,
-                    FlagPolicy {
-                        arg: flag.arg,
-                        value_type: flag.value,
-                    },
-                );
-            }
-            let command_chain = match entry.command {
-                Some(command) => command,
-                None => match entry.name {
-                    Some(name) => vec![name],
-                    None => {
-                        warn!("safe command entry missing name or command");
-                        return SafeCommandRule {
-                            command_chain: Vec::new(),
-                            args: ArgPolicy::Deny,
-                        };
-                    }
-                },
-            };
-            if command_chain.is_empty() || command_chain.iter().any(|item| item.trim().is_empty()) {
-                warn!("safe command entry has empty command chain");
-                return SafeCommandRule {
-                    command_chain: Vec::new(),
-                    args: ArgPolicy::Deny,
-                };
-            }
-            let allow_positional = entry.allow_positional || entry.allow_any;
-            let allow_dash = entry.allow_dash;
-            if flags.is_empty() && !allow_positional && !allow_dash {
-                return SafeCommandRule {
-                    command_chain,
-                    args: ArgPolicy::Deny,
-                };
-            }
-            if entry.allow_any {
-                return SafeCommandRule {
-                    command_chain,
-                    args: ArgPolicy::Any {
-                        flags,
-                        allow_positional,
-                        positional_path_from: entry.positional_path_from,
-                        allow_dash,
-                    },
-                };
-            }
-            SafeCommandRule {
-                command_chain,
-                args: ArgPolicy::AllowList {
-                    flags,
-                    allow_positional,
-                    positional_path_from: entry.positional_path_from,
-                    allow_dash,
-                },
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]

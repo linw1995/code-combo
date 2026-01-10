@@ -13,6 +13,10 @@ use std::{
 };
 
 pub use agent::{AgentPathConfig, AgentPathLayers};
+pub(crate) use bash::{
+    ArgPolicy, FlagPolicy, SafeCommandRule, build_safe_command_rules_from_entries,
+    load_safe_command_rules_from_path, parse_safe_command_rules,
+};
 pub use bash::{
     BashConfig, BashConfigLayers, FlagValuePolicy, FlagValueType, SafeCommandEntry,
     SafeCommandsMode, SafeFlagConfig,

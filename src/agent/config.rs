@@ -556,10 +556,16 @@ name = "test-agent"
 
 [agent.safe_commands]
 mode = "override"
-commands = [
-  { name = "cat", allow_any = true, allow_positional = true, positional_path_from = 0 },
-  { command = ["git", "status"], allow_any = true },
-]
+
+[[agent.safe_commands.commands]]
+name = "cat"
+allow_any = true
+allow_positional = true
+positional_path_from = 0
+
+[[agent.safe_commands.commands]]
+command = ["git", "status"]
+allow_any = true
 "#;
         let config = AgentConfig::from_toml(toml).expect("parse config");
         match config.safe_commands {
@@ -605,11 +611,13 @@ path = "./custom_safe_commands.toml"
 name = "test-agent"
 
 [agent.safe_commands]
-commands = [
-  { name = "ls", allow_any = true, flags = [
-    { name = "-l", arg = "none" },
-    { name = "--color", arg = "optional" },
-  ]},
+
+[[agent.safe_commands.commands]]
+name = "ls"
+allow_any = true
+flags = [
+  { name = "-l", arg = "none" },
+  { name = "--color", arg = "optional" },
 ]
 "#;
         let config = AgentConfig::from_toml(toml).expect("parse config");

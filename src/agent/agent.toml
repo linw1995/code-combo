@@ -11,3 +11,15 @@ When you need to offload work to MCP tools, use the MCP offloading CLI.
 Discover servers with `coco mcp -h`, list tools with `coco mcp <server> -h`,
 and list tool arguments with `coco mcp <server> <tool> --help`.
 """
+
+# Inline safe commands use the same schema as safe_commands.toml.
+# Uncomment and adjust if you want agent-specific overrides.
+#
+# [agent.safe_commands]
+# mode = "append"
+#
+# [[agent.safe_commands.commands]]
+# name = "cat"
+# allow_any = true
+# allow_positional = true
+# positional_path_from = 0
