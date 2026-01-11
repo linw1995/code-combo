@@ -44,6 +44,7 @@ pub struct Messages {
     last_focus: Option<usize>,
     last_focus_range: Option<Range<u16>>,
     stream_map: HashMap<usize, usize>,
+    stream_dirty: bool,
 
     // scrolling
     viewport_height: u16,
@@ -82,6 +83,7 @@ impl Messages {
 
     pub fn reset_stream(&mut self) {
         self.stream_map.clear();
+        self.stream_dirty = false;
     }
 
     pub fn finalize_stream(&mut self) {
@@ -90,50 +92,67 @@ impl Messages {
         }
         let mut messages = self.messages.write();
         for idx in self.stream_map.values().copied() {
-            if let Some(message) = messages.get_mut(idx)
-                && let Some(plain) = message.content_as_mut_any().downcast_mut::<Plain>()
-            {
-                plain.finalize_stream();
+            if let Some(message) = messages.get_mut(idx) {
+                if let Some(plain) = message.content_as_mut_any().downcast_mut::<Plain>() {
+                    plain.finalize_stream();
+                }
+                if let Some(thinking) = message.content_as_mut_any().downcast_mut::<Thinking>() {
+                    thinking.finalize_stream();
+                }
             }
         }
+        self.stream_dirty = false;
     }
 
     pub fn append_stream_text(&mut self, index: usize, kind: BotStreamKind, text: String) {
         if text.is_empty() {
             return;
         }
-        let mut messages = self.messages.write();
-        let message_index = match self.stream_map.get(&index).copied() {
-            Some(idx) if messages.get(idx).is_some() => idx,
-            _ => {
-                let new_message = match kind {
-                    BotStreamKind::Plain => Message::bot(Plain::new_stream(String::new()).into()),
-                    BotStreamKind::Thinking => Message::bot(Thinking::new(String::new()).into()),
-                };
-                if let Some(last) = messages.last_mut() {
-                    last.handle_action(&Action::Blur);
-                }
-                messages.push(new_message);
-                let idx = messages.len() - 1;
-                self.stream_map.insert(index, idx);
-                idx
-            }
-        };
-        if let Some(message) = messages.get_mut(message_index) {
-            match kind {
-                BotStreamKind::Plain => {
-                    if let Some(plain) = message.content_as_mut_any().downcast_mut::<Plain>() {
-                        plain.append_text(&text);
+        let existing_idx = self.stream_map.get(&index).copied();
+        let mut inserted_idx = None;
+        {
+            let messages = self.messages.write_untracked();
+            let message_index = match existing_idx {
+                Some(idx) if messages.get(idx).is_some() => idx,
+                _ => {
+                    let new_message = match kind {
+                        BotStreamKind::Plain => {
+                            Message::bot(Plain::new_stream(String::new()).into())
+                        }
+                        BotStreamKind::Thinking => {
+                            Message::bot(Thinking::new_stream(String::new()).into())
+                        }
+                    };
+                    if let Some(last) = messages.last_mut() {
+                        last.handle_action(&Action::Blur);
                     }
+                    messages.push(new_message);
+                    let idx = messages.len() - 1;
+                    inserted_idx = Some(idx);
+                    idx
                 }
-                BotStreamKind::Thinking => {
-                    if let Some(thinking) = message.content_as_mut_any().downcast_mut::<Thinking>()
-                    {
-                        thinking.append_text(&text);
+            };
+            if let Some(message) = messages.get_mut(message_index) {
+                match kind {
+                    BotStreamKind::Plain => {
+                        if let Some(plain) = message.content_as_mut_any().downcast_mut::<Plain>() {
+                            plain.append_text(&text);
+                        }
+                    }
+                    BotStreamKind::Thinking => {
+                        if let Some(thinking) =
+                            message.content_as_mut_any().downcast_mut::<Thinking>()
+                        {
+                            thinking.append_text(&text);
+                        }
                     }
                 }
             }
         }
+        if let Some(idx) = inserted_idx {
+            self.stream_map.insert(index, idx);
+        }
+        self.stream_dirty = true;
     }
 
     pub fn collapse_thinking(&mut self) {
@@ -779,6 +798,14 @@ impl Component for Messages {
                 .iter_mut()
                 .map(|m| m as &mut dyn Component),
         )
+    }
+
+    fn on_tick(&mut self) {
+        if !self.stream_dirty {
+            return;
+        }
+        self.stream_dirty = false;
+        global::signal_dirty();
     }
 
     fn handle_key_event(&mut self, key: &KeyEvent) {

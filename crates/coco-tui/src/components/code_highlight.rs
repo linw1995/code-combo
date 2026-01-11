@@ -96,6 +96,7 @@ pub struct CodeHighlight<'a> {
     widget: Paragraph<'a>,
     theme_dirty: bool,
     last_width: Option<u16>,
+    base_style: Option<Style>,
 }
 
 impl<'a> CodeHighlight<'a> {
@@ -120,8 +121,21 @@ impl<'a> CodeHighlight<'a> {
         lang: Lang,
         overlays: Vec<HighlightOverlay>,
     ) -> Result<Self> {
+        Self::try_new_with_overlays_and_style(source, lang, overlays, None)
+    }
+
+    pub fn try_new_with_style(source: &str, lang: Lang, base_style: Style) -> Result<Self> {
+        Self::try_new_with_overlays_and_style(source, lang, Vec::new(), Some(base_style))
+    }
+
+    pub fn try_new_with_overlays_and_style(
+        source: &str,
+        lang: Lang,
+        overlays: Vec<HighlightOverlay>,
+        base_style: Option<Style>,
+    ) -> Result<Self> {
         let overlays = normalize_overlays(overlays, source.len());
-        let widget = Self::build_widget(source, lang, &overlays, u16::MAX)?;
+        let widget = Self::build_widget(source, lang, &overlays, u16::MAX, base_style)?;
         Ok(Self {
             state: State {
                 source: source.to_string(),
@@ -131,6 +145,7 @@ impl<'a> CodeHighlight<'a> {
             widget,
             theme_dirty: false,
             last_width: None,
+            base_style,
         })
     }
 
@@ -139,10 +154,12 @@ impl<'a> CodeHighlight<'a> {
         lang: Lang,
         overlays: &[HighlightOverlay],
         width: u16,
+        base_style: Option<Style>,
     ) -> Result<Paragraph<'static>> {
         use Event::*;
 
         let theme = global::theme();
+        let base_style = base_style.unwrap_or_default();
         let show_guides = should_show_guides(source, width);
         let mut guide_budget = if show_guides { MAX_GUIDES } else { 0 };
         let names = theme
@@ -155,19 +172,20 @@ impl<'a> CodeHighlight<'a> {
         let mut line = vec![];
         let mut lines = vec![];
         let mut styles: Vec<Style> = vec![];
-        let default_style = Style::default();
+        let default_style = Style::default().patch(base_style);
         let mut offset = 0;
         let mut line_start_offset = 0;
         let mut overlay_index = 0;
         for event in events {
             match event {
-                Start(kind) => styles.push(
-                    theme
+                Start(kind) => {
+                    let style = theme
                         .tree_sitter
                         .get(kind)
                         .cloned()
-                        .unwrap_or(default_style),
-                ),
+                        .unwrap_or(default_style);
+                    styles.push(style.patch(base_style));
+                }
                 Source(src) => {
                     let style = styles.last().cloned().unwrap_or(default_style);
                     if src.contains("\n") {
@@ -257,12 +275,14 @@ impl Persistable for CodeHighlight<'static> {
 
     fn load(session: Session) -> Result<Self> {
         let state: State = session::load(session)?;
-        let widget = Self::build_widget(&state.source, state.lang, &state.overlays, u16::MAX)?;
+        let widget =
+            Self::build_widget(&state.source, state.lang, &state.overlays, u16::MAX, None)?;
         Ok(Self {
             state,
             widget,
             theme_dirty: false,
             last_width: None,
+            base_style: None,
         })
     }
 }
@@ -281,6 +301,7 @@ impl Component for CodeHighlight<'static> {
                 self.state.lang,
                 &self.state.overlays,
                 area.width,
+                self.base_style,
             )?;
             self.theme_dirty = false;
             self.last_width = Some(area.width);
@@ -297,6 +318,7 @@ impl<'a> Content for CodeHighlight<'a> {
             self.state.lang,
             &self.state.overlays,
             width,
+            self.base_style,
         )
         .map(|widget| widget.line_count(width))
         .unwrap_or(0)

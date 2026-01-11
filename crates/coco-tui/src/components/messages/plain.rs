@@ -15,8 +15,8 @@ use crate::{
 
 mod external_viewer;
 mod raw;
-use external_viewer::ExternalMarkdownViewer;
-use raw::RawTextViewer;
+pub(crate) use external_viewer::ExternalMarkdownViewer;
+pub(crate) use raw::RawTextViewer;
 
 type WidgetBuild = (
     Box<dyn ContentComponent>,
