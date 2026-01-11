@@ -615,7 +615,7 @@ pub async fn messages_stream(
     if !status.is_success() {
         let resp = resp.text().await.whatever_context("read response error")?;
         let message = format_error_message(status, &resp);
-        return Err(<Whatever as snafu::FromString>::without_source(message));
+        whatever!("{message}")
     }
 
     Ok(MessagesStream::new(resp))
@@ -644,7 +644,7 @@ pub async fn messages(
 
     if !status.is_success() {
         let message = format_error_message(status, &resp);
-        return Err(<Whatever as snafu::FromString>::without_source(message));
+        whatever!("{message}")
     }
 
     serde_json::from_str(&resp).whatever_context("decode response error")

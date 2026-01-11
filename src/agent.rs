@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use crate::{Config, PromptSchema, ProviderConfig, Result, ThinkingConfig};
+use crate::{Config, PromptSchema, ProviderConfig, Result, ResultDisplayExt, ThinkingConfig};
 use executor::PermissionControl;
 use prompt::{build_system_prompt_from_config, build_system_prompt_from_config_async};
 
@@ -152,7 +152,7 @@ impl StreamAccumulator {
                 if let Some(kind) = error.r#type.as_deref() {
                     message.push_str(&format!(" (type: {kind})"));
                 }
-                Err(<crate::Error as snafu::FromString>::without_source(message))
+                whatever!("{message}")
             }
             MessagesStreamEvent::Unknown { .. } => Ok(StreamAction::Continue),
         }
@@ -384,11 +384,7 @@ impl Agent {
             .inspect_err(|err| {
                 warn!("send messsages error: {err:?}");
             })
-            .map_err(|err| {
-                <crate::Error as snafu::FromString>::without_source(format!(
-                    "send messages error: {err}"
-                ))
-            })?;
+            .whatever_context_display("failed to send messages")?;
 
         let stop_reason = response.stop_reason.clone();
         let message = if response.content.is_empty() {
@@ -422,11 +418,7 @@ impl Agent {
             .inspect_err(|err| {
                 warn!("send messsages error: {err:?}");
             })
-            .map_err(|err| {
-                <crate::Error as snafu::FromString>::without_source(format!(
-                    "send messages error: {err}"
-                ))
-            })?;
+            .whatever_context_display("failed to send messages")?;
 
         let stop_reason = response.stop_reason.clone();
         let message = if response.content.is_empty() {
@@ -500,33 +492,19 @@ impl Agent {
             .inspect_err(|err| {
                 warn!("send messsages stream error: {err:?}");
             })
-            .map_err(|err| {
-                <crate::Error as snafu::FromString>::without_source(format!(
-                    "send messages stream error: {err}"
-                ))
-            })?;
+            .whatever_context_display("failed to send messages stream")?;
 
         let mut accumulator = StreamAccumulator::new();
         while let Some(event) = tokio::select! {
             _ = cancel_token.cancelled() => {
-                return Err(<crate::Error as snafu::FromString>::without_source(
-                    "chat stream cancelled".to_string(),
-                ));
+                whatever!("chat stream cancelled");
             }
             event = stream.next() => event,
         } {
-            let event = event.map_err(|err| {
-                <crate::Error as snafu::FromString>::without_source(format!(
-                    "read messages stream error: {err}"
-                ))
-            })?;
+            let event = event.whatever_context_display("read messages stream error")?;
             let action = accumulator
                 .handle_event(event, &mut on_update)
-                .map_err(|err| {
-                    <crate::Error as snafu::FromString>::without_source(format!(
-                        "parse messages stream error: {err}"
-                    ))
-                })?;
+                .whatever_context("parse messages stream error")?;
             if matches!(action, StreamAction::Stop) {
                 break;
             }
@@ -589,11 +567,7 @@ impl Agent {
                 thinking,
             )
             .await
-            .map_err(|err| {
-                <crate::Error as snafu::FromString>::without_source(format!(
-                    "failed to request prompt reply: {err}"
-                ))
-            })?;
+            .whatever_context_display("failed to request prompt reply")?;
         let stop_reason = response.stop_reason.clone();
         if !response.content.is_empty() {
             let mut history = self.messages.lock().await;
@@ -674,33 +648,19 @@ impl Agent {
             .inspect_err(|err| {
                 warn!("send prompt reply stream error: {err:?}");
             })
-            .map_err(|err| {
-                <crate::Error as snafu::FromString>::without_source(format!(
-                    "failed to request prompt reply stream: {err}"
-                ))
-            })?;
+            .whatever_context_display("failed to request prompt reply stream")?;
 
         let mut accumulator = StreamAccumulator::new();
         while let Some(event) = tokio::select! {
             _ = cancel_token.cancelled() => {
-                return Err(<crate::Error as snafu::FromString>::without_source(
-                    "prompt reply stream cancelled".to_string(),
-                ));
+                whatever!("prompt reply stream cancelled");
             }
             event = stream.next() => event,
         } {
-            let event = event.map_err(|err| {
-                <crate::Error as snafu::FromString>::without_source(format!(
-                    "read prompt reply stream error: {err}"
-                ))
-            })?;
+            let event = event.whatever_context_display("read prompt reply stream error")?;
             let action = accumulator
                 .handle_event(event, &mut on_update)
-                .map_err(|err| {
-                    <crate::Error as snafu::FromString>::without_source(format!(
-                        "parse prompt reply stream error: {err}"
-                    ))
-                })?;
+                .whatever_context("parse prompt reply stream error")?;
             if matches!(action, StreamAction::Stop) {
                 break;
             }
