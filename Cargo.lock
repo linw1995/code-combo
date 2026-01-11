@@ -109,6 +109,9 @@ name = "anthropic"
 version = "0.1.0"
 dependencies = [
  "bon",
+ "bytes",
+ "futures-core",
+ "futures-util",
  "reqwest",
  "serde",
  "serde_json",

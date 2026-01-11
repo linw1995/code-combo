@@ -10,12 +10,15 @@ bon.workspace = true
 # HTTP
 reqwest = { version = "0.12", default-features = false, features = [
   "json",
+  "stream",
   "rustls-tls-webpki-roots",
 ] }
+futures-core.workspace = true
 
 # Serialization and data handling
 serde.workspace = true
 serde_json.workspace = true
+bytes = "1.9.0"
 
 # Error handling
 snafu.workspace = true
@@ -26,3 +29,4 @@ tracing.workspace = true
 [dev-dependencies]
 # Async Runtime
 tokio.workspace = true
+futures-util.workspace = true

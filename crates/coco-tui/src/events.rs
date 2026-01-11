@@ -37,6 +37,12 @@ impl From<AskEvent> for Event {
 #[derive(Debug, Clone)]
 pub enum AnswerEvent {
     Bot(Vec<BotMessage>),
+    BotStreamReset,
+    BotStream {
+        index: usize,
+        kind: BotStreamKind,
+        text: String,
+    },
     Cancelled,
     // Below events come from User
     ToolOutput {
@@ -92,6 +98,12 @@ pub enum ComboEvent {
         prompt: String,
         thinking: Option<ThinkingConfig>,
     },
+    PromptStream {
+        name: String,
+        index: usize,
+        kind: BotStreamKind,
+        text: String,
+    },
     PromptReply {
         name: String,
         tool_use: ToolUse,
@@ -127,4 +139,10 @@ pub enum BotMessage {
     ToolUse(ToolUse),
     System(String),
     Thinking(String),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum BotStreamKind {
+    Plain,
+    Thinking,
 }

@@ -67,6 +67,28 @@ impl Client {
         .await
     }
 
+    #[builder]
+    pub async fn messages_stream(
+        &self,
+        system_prompt: Option<&str>,
+        conversations: Vec<Message>,
+        tools: Vec<Tool>,
+        thinking: Option<Thinking>,
+    ) -> Result<MessagesStream> {
+        messages::messages_stream(
+            &self.cli,
+            &self.base_url,
+            MessagesRequest::builder()
+                .maybe_system(system_prompt)
+                .messages(conversations)
+                .model(&self.model)
+                .maybe_thinking(thinking)
+                .tools(tools)
+                .build(),
+        )
+        .await
+    }
+
     pub async fn messages_with_tool_choice(
         &self,
         system_prompt: Option<&str>,
@@ -86,6 +108,33 @@ impl Client {
                 temperature: None,
                 tool_choice: Some(tool_choice),
                 thinking,
+                stream: None,
+                tools,
+            },
+        )
+        .await
+    }
+
+    pub async fn messages_stream_with_tool_choice(
+        &self,
+        system_prompt: Option<&str>,
+        conversations: Vec<Message>,
+        tools: Vec<Tool>,
+        tool_choice: ToolChoice,
+        thinking: Option<Thinking>,
+    ) -> Result<MessagesStream> {
+        messages::messages_stream(
+            &self.cli,
+            &self.base_url,
+            MessagesRequest {
+                model: self.model.clone(),
+                messages: conversations,
+                max_tokens: 32000,
+                system: system_prompt.unwrap_or_default().to_string(),
+                temperature: None,
+                tool_choice: Some(tool_choice),
+                thinking,
+                stream: None,
                 tools,
             },
         )

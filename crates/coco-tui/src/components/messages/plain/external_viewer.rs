@@ -2,7 +2,7 @@ use std::process::Stdio;
 
 use ansi_to_tui::IntoText;
 use coco_macro::{ComponentExt, ContentComponentExt};
-use ratatui::{Frame, layout::Rect, widgets::Wrap};
+use ratatui::{Frame, layout::Rect, style::Style, widgets::Wrap};
 use snafu::prelude::*;
 use tokio::io::AsyncWriteExt;
 
@@ -21,6 +21,15 @@ pub struct ExternalMarkdownViewer<'a> {
 
 impl<'a> ExternalMarkdownViewer<'a> {
     pub async fn try_new(text: &str, cmd: &str, args: &[String]) -> Result<Self> {
+        Self::try_new_with_style(text, cmd, args, Style::default()).await
+    }
+
+    pub async fn try_new_with_style(
+        text: &str,
+        cmd: &str,
+        args: &[String],
+        base_style: Style,
+    ) -> Result<Self> {
         let output = match tokio::process::Command::new(cmd)
             .args(args)
             .stdin(Stdio::piped())
@@ -42,10 +51,15 @@ impl<'a> ExternalMarkdownViewer<'a> {
         }
         .whatever_context("failed to run external markdown viewer")?;
 
-        let text = output
+        let mut text = output
             .stdout
             .into_text()
             .whatever_context("failed to convert the external markdown viewer result")?;
+        for line in &mut text.lines {
+            for span in &mut line.spans {
+                span.style = span.style.patch(base_style);
+            }
+        }
         let widget = Paragraph::new_wrap(text, Wrap { trim: false });
         Ok(Self { widget })
     }

@@ -3,17 +3,29 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
     prelude::Rect,
-    widgets::{Paragraph, Wrap},
+    style::{Modifier, Style},
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
+use tracing::warn;
 
-use super::{Component, Content, ShortcutHints, fold::FoldState};
+use super::{
+    Component, Content, ShortcutHints, fold::FoldState, plain::ExternalMarkdownViewer,
+    plain::RawTextViewer,
+};
 use crate::{
-    components::{ContentComponent, Persistable},
+    components::{CacheInvalidation, CodeHighlight, ContentComponent, Persistable},
     error::*,
     global,
     session::{self, Session},
 };
+use coco_highlight::Lang;
+use code_combo::MarkdownRenderEngine;
+
+type WidgetBuild = (
+    Box<dyn ContentComponent>,
+    Option<oneshot::Receiver<Box<dyn ContentComponent>>>,
+);
 
 #[derive(Serialize, Deserialize)]
 struct ThinkingState {
@@ -25,16 +37,41 @@ struct ThinkingState {
 #[component(type_id = "thinking")]
 pub struct Thinking {
     state: ThinkingState,
+    widget: Box<dyn ContentComponent>,
+    rx: Option<oneshot::Receiver<Box<dyn ContentComponent>>>,
 }
 
 impl Thinking {
     pub fn new(text: String) -> Self {
-        Self {
-            state: ThinkingState {
+        Self::new_with_external(
+            ThinkingState {
                 text,
                 fold_state: FoldState::Expanded,
             },
+            true,
+        )
+    }
+
+    pub fn new_stream(text: String) -> Self {
+        Self::new_with_external(
+            ThinkingState {
+                text,
+                fold_state: FoldState::Expanded,
+            },
+            false,
+        )
+    }
+
+    pub fn append_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
         }
+        self.state.text.push_str(text);
+        self.refresh_widget(false);
+    }
+
+    pub fn finalize_stream(&mut self) {
+        self.refresh_widget(true);
     }
 
     pub fn collapse(&mut self) {
@@ -49,8 +86,63 @@ impl Thinking {
         self.state.fold_state.is_collapsed()
     }
 
-    fn display_text(&self) -> &str {
-        &self.state.text
+    fn refresh_widget(&mut self, allow_external: bool) {
+        let (widget, rx) = Self::build_widget(&self.state.text, allow_external);
+        self.widget = widget;
+        self.rx = rx;
+    }
+
+    fn new_with_external(state: ThinkingState, allow_external: bool) -> Self {
+        let (widget, rx) = Self::build_widget(&state.text, allow_external);
+        Self { state, widget, rx }
+    }
+
+    fn build_widget(text: &str, allow_external: bool) -> WidgetBuild {
+        let cfg = global::config_sync();
+        let base_style = Style::default().add_modifier(Modifier::DIM);
+
+        let rx = if allow_external {
+            match cfg.ui.markdown_render_engine {
+                MarkdownRenderEngine::ExternalCommand { executable, args } => {
+                    let (tx, rx) = oneshot::channel();
+                    tokio::task::spawn({
+                        let text = text.to_string();
+                        async move {
+                            match ExternalMarkdownViewer::try_new_with_style(
+                                &text,
+                                &executable,
+                                &args,
+                                base_style,
+                            )
+                            .await
+                            {
+                                Ok(widget) => {
+                                    tx.send(widget.into()).ok();
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        ?err,
+                                        "failed using an external CLI tool to render Markdown"
+                                    );
+                                }
+                            };
+                        }
+                    });
+                    Some(rx)
+                }
+                MarkdownRenderEngine::Native => None,
+            }
+        } else {
+            None
+        };
+
+        let widget = CodeHighlight::try_new_with_style(text, Lang::Markdown, base_style)
+            .map(|x| x.into())
+            .unwrap_or_else(|err| {
+                warn!(?err, "failed to new CodeHighlight Component");
+                RawTextViewer::new_with_style(text.to_string(), base_style).into()
+            });
+        (widget, rx)
     }
 }
 
@@ -61,14 +153,29 @@ impl Persistable for Thinking {
 
     fn load(session: Session) -> Result<Self> {
         let state: ThinkingState = session::load(session)?;
-        Ok(Self { state })
+        Ok(Self::new_with_external(state, true))
     }
 }
 
 impl Component for Thinking {
+    fn on_cache_invalidation(&mut self, reason: CacheInvalidation) {
+        self.widget.invalidate_cache(reason);
+    }
+
     fn handle_key_event(&mut self, key: &KeyEvent) {
         if matches!(key.code, KeyCode::Char('r' | 'R' | 'z' | 'Z')) {
             self.toggle();
+            global::signal_dirty();
+        }
+    }
+
+    fn on_tick(&mut self) {
+        if let Some(rx) = &mut self.rx {
+            let Ok(widget) = rx.try_recv() else {
+                return;
+            };
+            self.widget = widget;
+            self.rx = None;
             global::signal_dirty();
         }
     }
@@ -77,13 +184,7 @@ impl Component for Thinking {
         if self.is_collapsed() {
             return Ok(());
         }
-        let theme = global::theme();
-        let text = self.display_text().to_string();
-        let paragraph = Paragraph::new(text)
-            .style(theme.ui.thinking_text)
-            .wrap(Wrap { trim: false });
-        frame.render_widget(paragraph, area);
-        Ok(())
+        self.widget.draw(frame, area)
     }
 }
 
@@ -95,8 +196,7 @@ impl Content for Thinking {
         if self.is_collapsed() {
             return 0;
         }
-        let paragraph = Paragraph::new(self.display_text().to_string()).wrap(Wrap { trim: false });
-        paragraph.line_count(width)
+        self.widget.height(width)
     }
 
     fn shortcut_hints(&self) -> ShortcutHints {

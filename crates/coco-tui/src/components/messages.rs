@@ -1,4 +1,4 @@
-use std::{cmp::min, ops::Range};
+use std::{cmp::min, collections::HashMap, ops::Range};
 
 use coco_macro::ComponentExt;
 use crossterm::event::KeyEvent;
@@ -11,7 +11,7 @@ use ratatui::{
     widgets::{Block, Borders, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 use snafu::ResultExt;
-use tracing::{trace, warn};
+use tracing::warn;
 
 use crate::{
     components::Persistable,
@@ -21,8 +21,8 @@ use crate::{
 };
 
 use super::{
-    Action, AnswerEvent, AskEvent, Component, Content, Event, Message, NavigationKey,
-    NavigationResult, Role,
+    Action, AnswerEvent, AskEvent, BotStreamKind, Component, Content, Event, Message,
+    NavigationKey, NavigationResult, Role,
 };
 
 mod combo;
@@ -43,6 +43,8 @@ pub struct Messages {
     focus: State<Option<usize>>,
     last_focus: Option<usize>,
     last_focus_range: Option<Range<u16>>,
+    stream_map: HashMap<usize, usize>,
+    stream_dirty: bool,
 
     // scrolling
     viewport_height: u16,
@@ -77,6 +79,80 @@ impl Messages {
             last.handle_action(&Action::Blur);
         }
         messages.push(message);
+    }
+
+    pub fn reset_stream(&mut self) {
+        self.stream_map.clear();
+        self.stream_dirty = false;
+    }
+
+    pub fn finalize_stream(&mut self) {
+        if self.stream_map.is_empty() {
+            return;
+        }
+        let mut messages = self.messages.write();
+        for idx in self.stream_map.values().copied() {
+            if let Some(message) = messages.get_mut(idx) {
+                if let Some(plain) = message.content_as_mut_any().downcast_mut::<Plain>() {
+                    plain.finalize_stream();
+                }
+                if let Some(thinking) = message.content_as_mut_any().downcast_mut::<Thinking>() {
+                    thinking.finalize_stream();
+                }
+            }
+        }
+        self.stream_dirty = false;
+    }
+
+    pub fn append_stream_text(&mut self, index: usize, kind: BotStreamKind, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        let existing_idx = self.stream_map.get(&index).copied();
+        let mut inserted_idx = None;
+        {
+            let messages = self.messages.write_untracked();
+            let message_index = match existing_idx {
+                Some(idx) if messages.get(idx).is_some() => idx,
+                _ => {
+                    let new_message = match kind {
+                        BotStreamKind::Plain => {
+                            Message::bot(Plain::new_stream(String::new()).into())
+                        }
+                        BotStreamKind::Thinking => {
+                            Message::bot(Thinking::new_stream(String::new()).into())
+                        }
+                    };
+                    if let Some(last) = messages.last_mut() {
+                        last.handle_action(&Action::Blur);
+                    }
+                    messages.push(new_message);
+                    let idx = messages.len() - 1;
+                    inserted_idx = Some(idx);
+                    idx
+                }
+            };
+            if let Some(message) = messages.get_mut(message_index) {
+                match kind {
+                    BotStreamKind::Plain => {
+                        if let Some(plain) = message.content_as_mut_any().downcast_mut::<Plain>() {
+                            plain.append_text(&text);
+                        }
+                    }
+                    BotStreamKind::Thinking => {
+                        if let Some(thinking) =
+                            message.content_as_mut_any().downcast_mut::<Thinking>()
+                        {
+                            thinking.append_text(&text);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(idx) = inserted_idx {
+            self.stream_map.insert(index, idx);
+        }
+        self.stream_dirty = true;
     }
 
     pub fn collapse_thinking(&mut self) {
@@ -724,6 +800,14 @@ impl Component for Messages {
         )
     }
 
+    fn on_tick(&mut self) {
+        if !self.stream_dirty {
+            return;
+        }
+        self.stream_dirty = false;
+        global::signal_dirty();
+    }
+
     fn handle_key_event(&mut self, key: &KeyEvent) {
         // NOTE: By default, only actionable messages receive key events to avoid interfering with
         // global navigation/escape semantics in `Chat` (e.g. Esc leaving Messages focus).
@@ -759,7 +843,6 @@ impl Component for Messages {
         if self.total_height > area.height {
             let [area_list, area_bar] =
                 Layout::horizontal([Min(10), Length(scrollbar_width)]).areas(area);
-            trace!(?area_list, ?area_bar, "print messages area");
 
             self.virtual_draw(frame, area_list, &heights)?;
             self.draw_scrollbar(frame, area_bar)?;

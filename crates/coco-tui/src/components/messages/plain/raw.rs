@@ -1,5 +1,11 @@
 use coco_macro::{ComponentExt, ContentComponentExt};
-use ratatui::{Frame, prelude::Rect, widgets::Wrap};
+use ratatui::{
+    Frame,
+    prelude::Rect,
+    style::Style,
+    text::{Line, Span, Text},
+    widgets::Wrap,
+};
 
 use crate::{
     components::{Component, Content, ContentComponent, Persistable},
@@ -18,9 +24,19 @@ pub struct RawTextViewer<'a> {
 
 impl<'a> RawTextViewer<'a> {
     pub fn new(text: String) -> Self {
+        Self::new_with_style(text, Style::default())
+    }
+
+    pub fn new_with_style(text: String, style: Style) -> Self {
+        let text_string = text.clone();
+        let lines = text_string
+            .split('\n')
+            .map(|line| Line::from(Span::styled(line.to_string(), style)))
+            .collect::<Vec<_>>();
+        let text_widget = Text::from(lines);
         Self {
-            text: text.clone(),
-            widget: Paragraph::new_wrap(text, Wrap { trim: false }),
+            text: text_string,
+            widget: Paragraph::new_wrap(text_widget, Wrap { trim: false }),
         }
     }
 }
