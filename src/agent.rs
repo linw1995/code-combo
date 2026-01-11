@@ -633,6 +633,116 @@ impl Agent {
         })
     }
 
+    pub async fn reply_prompt_stream_with_thinking<F>(
+        &mut self,
+        system_prompt: &str,
+        schemas: Vec<PromptSchema>,
+        thinking: Option<ThinkingConfig>,
+        cancel_token: CancellationToken,
+        mut on_update: F,
+    ) -> Result<PromptReply>
+    where
+        F: FnMut(ChatStreamUpdate) + Send,
+    {
+        ensure_whatever!(!schemas.is_empty(), "schemas cannot be empty");
+        let reply_tool = build_reply_tool(&schemas)?;
+        let (_, client) = self.pick_provider()?;
+        let messages = {
+            let mut history = self.messages.lock().await;
+            let new_message = build_reply_prompt_message(&schemas);
+            history.push(new_message);
+            history.clone()
+        };
+        let messages = self.prepare_messages_for_request(messages);
+        let tool_choice = ToolChoice::tool().name(PROMPT_REPLY_TOOL_NAME).call();
+        let system_prompt = system_prompt.trim();
+        let system_prompt = if system_prompt.is_empty() {
+            None
+        } else {
+            Some(system_prompt)
+        };
+        let thinking = self.thinking_payload_with_override(thinking.as_ref());
+        let mut stream = client
+            .messages_stream_with_tool_choice(
+                system_prompt,
+                messages,
+                vec![reply_tool],
+                tool_choice,
+                thinking,
+            )
+            .await
+            .inspect_err(|err| {
+                warn!("send prompt reply stream error: {err:?}");
+            })
+            .map_err(|err| {
+                <crate::Error as snafu::FromString>::without_source(format!(
+                    "failed to request prompt reply stream: {err}"
+                ))
+            })?;
+
+        let mut accumulator = StreamAccumulator::new();
+        while let Some(event) = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                return Err(<crate::Error as snafu::FromString>::without_source(
+                    "prompt reply stream cancelled".to_string(),
+                ));
+            }
+            event = stream.next() => event,
+        } {
+            let event = event.map_err(|err| {
+                <crate::Error as snafu::FromString>::without_source(format!(
+                    "read prompt reply stream error: {err}"
+                ))
+            })?;
+            let action = accumulator
+                .handle_event(event, &mut on_update)
+                .map_err(|err| {
+                    <crate::Error as snafu::FromString>::without_source(format!(
+                        "parse prompt reply stream error: {err}"
+                    ))
+                })?;
+            if matches!(action, StreamAction::Stop) {
+                break;
+            }
+        }
+
+        let (blocks, stop_reason) = accumulator.finish();
+        if !blocks.is_empty() {
+            let msg = Message::assistant(Content::Multiple(blocks.clone()));
+            self.messages.lock().await.push(msg);
+        }
+        let mut thinking = Vec::new();
+        let mut reply_tool = None;
+        for block in &blocks {
+            match block {
+                AnthropicBlock::Thinking { thinking: text, .. } => {
+                    thinking.push(text.clone());
+                }
+                AnthropicBlock::ToolUse(tool_use) if tool_use.name == PROMPT_REPLY_TOOL_NAME => {
+                    reply_tool = Some(tool_use.clone());
+                }
+                _ => (),
+            }
+        }
+        let Some(tool_use) = reply_tool else {
+            whatever!("reply tool use not found in response");
+        };
+        {
+            let mut history = self.messages.lock().await;
+            history.push(Message::user(Content::Multiple(vec![
+                AnthropicBlock::tool_result(&tool_use.id, None, Content::Text("ok".to_string())),
+            ])));
+        }
+        let response = serde_json::to_string(&tool_use.input)
+            .whatever_context("failed to serialize reply tool input")?;
+        self.mark_thinking_cleanup_pending(stop_reason.as_ref());
+        Ok(PromptReply {
+            tool_use,
+            response,
+            thinking,
+        })
+    }
+
     pub fn grant_once(&mut self, id: &str, name: &str) {
         self.executor
             .update_pcl(name, PermissionControl::Once(id.to_string()))

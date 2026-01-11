@@ -98,6 +98,12 @@ pub enum ComboEvent {
         prompt: String,
         thinking: Option<ThinkingConfig>,
     },
+    PromptStream {
+        name: String,
+        index: usize,
+        kind: BotStreamKind,
+        text: String,
+    },
     PromptReply {
         name: String,
         tool_use: ToolUse,

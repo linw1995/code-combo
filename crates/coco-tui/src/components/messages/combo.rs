@@ -331,7 +331,20 @@ impl Combo {
             }
             ComboEvent::Prompt { name, prompt, .. } => {
                 if &self.state.name == name {
+                    self.messages.finalize_stream();
+                    self.messages.reset_stream();
                     self.push_prompt(prompt);
+                }
+            }
+            ComboEvent::PromptStream {
+                name,
+                index,
+                kind,
+                text,
+            } => {
+                if &self.state.name == name {
+                    self.messages
+                        .append_stream_text(*index, *kind, text.clone());
                 }
             }
             ComboEvent::PromptReply {
@@ -340,6 +353,8 @@ impl Combo {
                 thinking,
             } => {
                 if &self.state.name == name {
+                    self.messages.finalize_stream();
+                    self.messages.reset_stream();
                     for block in thinking {
                         self.push_prompt_thinking(block);
                     }
@@ -361,6 +376,7 @@ impl Combo {
                     drop(state);
                     self.update_command_line(command_line.clone());
                     self.preview_lines = StreamedLines::new(Some(LIMIT));
+                    self.messages.reset_stream();
                     self.messages.clear();
                 }
             }
@@ -407,12 +423,18 @@ impl Combo {
                     self.is_recording = false;
                     self.combo_stream_suppressed = true;
                     self.clear_combo_stream();
+                    self.messages.finalize_stream();
+                    self.messages.reset_stream();
                     {
                         let mut state = self.state.write();
                         state.starter_state = StarterState::Cancelled;
                         state.display_state.expand();
                     }
                 }
+            }
+            ComboEvent::ReplyToolError { .. } => {
+                self.messages.finalize_stream();
+                self.messages.reset_stream();
             }
             _ => (),
         }

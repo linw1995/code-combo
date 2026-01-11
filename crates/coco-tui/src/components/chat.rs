@@ -358,7 +358,8 @@ impl Chat<'static> {
             | ComboEvent::Output { .. }
             | ComboEvent::RecordStart { .. }
             | ComboEvent::RecordOutput { .. }
-            | ComboEvent::RecordEnd { .. } => {
+            | ComboEvent::RecordEnd { .. }
+            | ComboEvent::PromptStream { .. } => {
                 self.set_processing();
             }
             ComboEvent::Prompt { thinking, .. } => {
@@ -1599,20 +1600,57 @@ async fn task_combo_execute(
                             .into(),
                         )
                         .unwrap();
+                        let stream_tx = tx.clone();
+                        let stream_name = name.clone();
+                        let updates_seen = Arc::new(AtomicBool::new(false));
+                        let updates_seen_stream = updates_seen.clone();
                         let reply = if cancel_token.is_cancelled() {
                             Err("prompt reply cancelled".to_string())
                         } else {
                             agent
-                                .reply_prompt_with_thinking(&system_prompt, schemas, thinking)
+                                .reply_prompt_stream_with_thinking(
+                                    &system_prompt,
+                                    schemas,
+                                    thinking.clone(),
+                                    cancel_token.clone(),
+                                    move |update| {
+                                        updates_seen_stream.store(true, Ordering::Relaxed);
+                                        let (index, kind, text) = match update {
+                                            ChatStreamUpdate::Plain { index, text } => {
+                                                (index, BotStreamKind::Plain, text)
+                                            }
+                                            ChatStreamUpdate::Thinking { index, text } => {
+                                                (index, BotStreamKind::Thinking, text)
+                                            }
+                                        };
+                                        stream_tx
+                                            .send(
+                                                ComboEvent::PromptStream {
+                                                    name: stream_name.clone(),
+                                                    index,
+                                                    kind,
+                                                    text,
+                                                }
+                                                .into(),
+                                            )
+                                            .ok();
+                                    },
+                                )
                                 .await
                                 .map_err(|err| err.to_string())
                         };
+                        let streamed = updates_seen.load(Ordering::Relaxed);
                         if let Ok(reply) = &reply {
+                            let thinking = if streamed {
+                                Vec::new()
+                            } else {
+                                reply.thinking.clone()
+                            };
                             tx.send(
                                 ComboEvent::PromptReply {
                                     name: name.clone(),
                                     tool_use: reply.tool_use.clone(),
-                                    thinking: reply.thinking.clone(),
+                                    thinking,
                                 }
                                 .into(),
                             )
