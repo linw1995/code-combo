@@ -32,6 +32,12 @@ struct State {
     overlays: Vec<HighlightOverlay>,
 }
 
+#[derive(Debug, Clone)]
+struct PendingSnapshot {
+    source: String,
+    width: u16,
+}
+
 const MAX_GUIDES: usize = 2;
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -101,8 +107,7 @@ pub struct CodeHighlight<'a> {
     last_width: Option<u16>,
     base_style: Option<Style>,
     pending_rx: Option<oneshot::Receiver<Result<Paragraph<'static>>>>,
-    pending_width: Option<u16>,
-    pending_source: Option<String>,
+    pending_snapshot: Option<PendingSnapshot>,
 }
 
 impl<'a> CodeHighlight<'a> {
@@ -154,8 +159,7 @@ impl<'a> CodeHighlight<'a> {
             last_width: None,
             base_style,
             pending_rx: None,
-            pending_width: None,
-            pending_source: None,
+            pending_snapshot: None,
         })
     }
 
@@ -303,7 +307,7 @@ impl<'a> CodeHighlight<'a> {
 
     fn spawn_build(&mut self, width: u16) {
         let source = self.state.source.clone();
-        let source_snapshot = source.clone();
+        let snapshot_source = source.clone();
         let lang = self.state.lang;
         let overlays = self.state.overlays.clone();
         let base_style = self.base_style;
@@ -313,8 +317,10 @@ impl<'a> CodeHighlight<'a> {
             tx.send(result).ok();
         });
         self.pending_rx = Some(rx);
-        self.pending_width = Some(width);
-        self.pending_source = Some(source_snapshot);
+        self.pending_snapshot = Some(PendingSnapshot {
+            source: snapshot_source,
+            width,
+        });
     }
 
     fn poll_pending(&mut self) -> bool {
@@ -325,26 +331,27 @@ impl<'a> CodeHighlight<'a> {
             return false;
         };
         self.pending_rx = None;
-        let width = self.pending_width.take();
-        let source_snapshot = self.pending_source.take();
+        let snapshot = self.pending_snapshot.take();
         match result {
             Ok(widget) => {
-                let stale = source_snapshot.as_deref() != Some(self.state.source.as_str());
+                let stale = snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.source != self.state.source);
                 if !stale {
                     self.widget = widget;
                     self.source_dirty = false;
                 } else {
                     self.source_dirty = true;
                 }
-                if let Some(width) = width {
-                    self.last_width = Some(width);
+                if let Some(snapshot) = snapshot {
+                    self.last_width = Some(snapshot.width);
                 }
             }
             Err(err) => {
                 warn!(?err, "failed to build CodeHighlight widget");
                 self.source_dirty = true;
-                if let Some(width) = width {
-                    self.last_width = Some(width);
+                if let Some(snapshot) = snapshot {
+                    self.last_width = Some(snapshot.width);
                 }
             }
         }
@@ -381,8 +388,7 @@ impl Persistable for CodeHighlight<'static> {
             last_width: None,
             base_style: None,
             pending_rx: None,
-            pending_width: None,
-            pending_source: None,
+            pending_snapshot: None,
         })
     }
 }
