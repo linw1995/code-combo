@@ -2,7 +2,7 @@ use anthropic::Block as AnthropicBlock;
 use coco_macro::ComponentExt;
 use code_combo::tools::Final;
 use code_combo::{
-    Agent, Block as ChatBlock, ChatResponse, Config, Content as ChatContent,
+    Agent, Block as ChatBlock, ChatResponse, ChatStreamUpdate, Config, Content as ChatContent,
     Message as ChatMessage, Output, SessionEnv, Starter, StarterCommand, StarterError,
     StarterEvent, StopReason, TextEdit, ToolUse, discover_starters,
 };
@@ -19,17 +19,24 @@ use ratatui::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 use time::OffsetDateTime;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use super::{
-    Action, AnswerEvent, AskEvent, BotMessage, CacheInvalidation, Combo, ComboAction, ComboEvent,
-    CommandPaletteAction, Component, Event, Input, Message, Messages, NavigationKey,
-    NavigationResult, Plain, SessionAction, ShortcutHints, ShortcutHintsPanel, Thinking, Tool,
-    ToolAction, TranscriptMessage,
+    Action, AnswerEvent, AskEvent, BotMessage, BotStreamKind, CacheInvalidation, Combo,
+    ComboAction, ComboEvent, CommandPaletteAction, Component, Event, Input, Message, Messages,
+    NavigationKey, NavigationResult, Plain, SessionAction, ShortcutHints, ShortcutHintsPanel,
+    Thinking, Tool, ToolAction, TranscriptMessage,
 };
 use crate::{
     components::{CommandPalette, Content, Persistable},
@@ -917,6 +924,8 @@ impl Component for Chat<'static> {
                 self.set_processing();
             }
             Event::Answer(AnswerEvent::Bot(msgs)) => {
+                self.messages.finalize_stream();
+                self.messages.reset_stream();
                 self.set_ready();
                 self.messages
                     .extend(msgs.iter().cloned().map(|msg| match msg {
@@ -932,7 +941,15 @@ impl Component for Chat<'static> {
                 // Trigger session save after receiving bot response
                 global::trigger_schedule_session_save();
             }
+            Event::Answer(AnswerEvent::BotStreamReset) => {
+                self.messages.reset_stream();
+            }
+            Event::Answer(AnswerEvent::BotStream { index, kind, text }) => {
+                self.messages
+                    .append_stream_text(*index, *kind, text.clone());
+            }
             Event::Answer(AnswerEvent::Cancelled) => {
+                self.messages.reset_stream();
                 self.set_ready();
             }
             Event::Ask(AskEvent::ToolUsePermission(_)) => {
@@ -1858,18 +1875,33 @@ async fn task_chat(mut agent: Agent, content: ChatContent, cancel_token: Cancell
     }
     let msg = ChatMessage::user(content);
     tx.send(Event::Ask(AskEvent::Bot)).unwrap();
+    tx.send(AnswerEvent::BotStreamReset.into()).ok();
 
-    let chat_resp = tokio::select! {
-        _ = cancel_token.cancelled() => {
-            tx.send(AnswerEvent::Cancelled.into()).ok();
-            return;
-        }
-        chat_resp = agent.chat(msg) => chat_resp,
-    };
+    let stream_tx = tx.clone();
+    let updates_seen = Arc::new(AtomicBool::new(false));
+    let updates_seen_stream = updates_seen.clone();
+    let chat_resp = agent
+        .chat_stream(msg, cancel_token.clone(), move |update| {
+            updates_seen_stream.store(true, Ordering::Relaxed);
+            let (index, kind, text) = match update {
+                ChatStreamUpdate::Plain { index, text } => (index, BotStreamKind::Plain, text),
+                ChatStreamUpdate::Thinking { index, text } => {
+                    (index, BotStreamKind::Thinking, text)
+                }
+            };
+            stream_tx
+                .send(AnswerEvent::BotStream { index, kind, text }.into())
+                .ok();
+        })
+        .await;
 
     let chat_resp = match chat_resp {
         Ok(resp) => resp,
         Err(err) => {
+            if cancel_token.is_cancelled() {
+                tx.send(AnswerEvent::Cancelled.into()).ok();
+                return;
+            }
             warn!(?err, "chat request failed");
             tx.send(
                 AnswerEvent::Bot(vec![BotMessage::System(format!(
@@ -1882,7 +1914,8 @@ async fn task_chat(mut agent: Agent, content: ChatContent, cancel_token: Cancell
         }
     };
 
-    handle_chat_response(agent, cancel_token, chat_resp).await;
+    let streamed = updates_seen.load(Ordering::Relaxed);
+    handle_chat_response(agent, cancel_token, chat_resp, streamed).await;
 }
 
 async fn task_chat_with_history(mut agent: Agent, cancel_token: CancellationToken) {
@@ -1892,18 +1925,33 @@ async fn task_chat_with_history(mut agent: Agent, cancel_token: CancellationToke
         return;
     }
     tx.send(Event::Ask(AskEvent::Bot)).unwrap();
+    tx.send(AnswerEvent::BotStreamReset.into()).ok();
 
-    let chat_resp = tokio::select! {
-        _ = cancel_token.cancelled() => {
-            tx.send(AnswerEvent::Cancelled.into()).ok();
-            return;
-        }
-        chat_resp = agent.chat_with_history() => chat_resp,
-    };
+    let stream_tx = tx.clone();
+    let updates_seen = Arc::new(AtomicBool::new(false));
+    let updates_seen_stream = updates_seen.clone();
+    let chat_resp = agent
+        .chat_stream_with_history(cancel_token.clone(), move |update| {
+            updates_seen_stream.store(true, Ordering::Relaxed);
+            let (index, kind, text) = match update {
+                ChatStreamUpdate::Plain { index, text } => (index, BotStreamKind::Plain, text),
+                ChatStreamUpdate::Thinking { index, text } => {
+                    (index, BotStreamKind::Thinking, text)
+                }
+            };
+            stream_tx
+                .send(AnswerEvent::BotStream { index, kind, text }.into())
+                .ok();
+        })
+        .await;
 
     let chat_resp = match chat_resp {
         Ok(resp) => resp,
         Err(err) => {
+            if cancel_token.is_cancelled() {
+                tx.send(AnswerEvent::Cancelled.into()).ok();
+                return;
+            }
             warn!(?err, "chat request failed");
             tx.send(
                 AnswerEvent::Bot(vec![BotMessage::System(format!(
@@ -1916,18 +1964,26 @@ async fn task_chat_with_history(mut agent: Agent, cancel_token: CancellationToke
         }
     };
 
-    handle_chat_response(agent, cancel_token, chat_resp).await;
+    let streamed = updates_seen.load(Ordering::Relaxed);
+    handle_chat_response(agent, cancel_token, chat_resp, streamed).await;
 }
 
 async fn handle_chat_response(
     agent: Agent,
     cancel_token: CancellationToken,
     chat_resp: ChatResponse,
+    streamed: bool,
 ) {
     let tx = global::event_tx();
     let mut to_execute: Vec<code_combo::ToolUse> = vec![];
     let mut bot_messages = match chat_resp.message.content {
-        ChatContent::Text(text) => vec![BotMessage::Plain(text)],
+        ChatContent::Text(text) => {
+            if streamed {
+                Vec::new()
+            } else {
+                vec![BotMessage::Plain(text)]
+            }
+        }
         ChatContent::Multiple(blocks) => {
             to_execute.extend(blocks.iter().filter_map(|b| {
                 if let code_combo::Block::ToolUse(tool_use) = b {
@@ -1939,9 +1995,19 @@ async fn handle_chat_response(
             blocks
                 .into_iter()
                 .filter_map(|m| match m {
-                    code_combo::Block::Text { text } => Some(BotMessage::Plain(text)),
+                    code_combo::Block::Text { text } => {
+                        if streamed {
+                            None
+                        } else {
+                            Some(BotMessage::Plain(text))
+                        }
+                    }
                     code_combo::Block::Thinking { thinking, .. } => {
-                        Some(BotMessage::Thinking(thinking))
+                        if streamed {
+                            None
+                        } else {
+                            Some(BotMessage::Thinking(thinking))
+                        }
                     }
                     code_combo::Block::ToolUse(tool_use) => Some(BotMessage::ToolUse(tool_use)),
                     code_combo::Block::ToolResult { .. } => None,

@@ -18,6 +18,11 @@ mod raw;
 use external_viewer::ExternalMarkdownViewer;
 use raw::RawTextViewer;
 
+type WidgetBuild = (
+    Box<dyn ContentComponent>,
+    Option<oneshot::Receiver<Box<dyn ContentComponent>>>,
+);
+
 /// Plain text render widget.
 ///
 /// TODO: Support Markdown syntax with multiple approaches:
@@ -34,39 +39,77 @@ pub struct Plain {
 
 impl Plain {
     pub fn new(text: String) -> Self {
+        Self::new_with_external(text, true)
+    }
+
+    pub fn new_stream(text: String) -> Self {
+        Self::new_with_external(text, false)
+    }
+
+    pub fn append_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.text.push_str(text);
+        self.refresh_widget(false);
+    }
+
+    pub fn finalize_stream(&mut self) {
+        self.refresh_widget(true);
+    }
+
+    fn refresh_widget(&mut self, allow_external: bool) {
+        let (widget, rx) = Self::build_widget(&self.text, allow_external);
+        self.widget = widget;
+        self.rx = rx;
+    }
+
+    fn new_with_external(text: String, allow_external: bool) -> Self {
+        let (widget, rx) = Self::build_widget(&text, allow_external);
+        Self { text, widget, rx }
+    }
+
+    fn build_widget(text: &str, allow_external: bool) -> WidgetBuild {
         let cfg = global::config_sync();
 
-        let rx = match cfg.ui.markdown_render_engine {
-            MarkdownRenderEngine::ExternalCommand { executable, args } => {
-                let (tx, rx) = oneshot::channel();
+        let rx = if allow_external {
+            match cfg.ui.markdown_render_engine {
+                MarkdownRenderEngine::ExternalCommand { executable, args } => {
+                    let (tx, rx) = oneshot::channel();
 
-                tokio::task::spawn({
-                    let text = text.clone();
-                    async move {
-                        match ExternalMarkdownViewer::try_new(&text, &executable, &args).await {
-                            Ok(widget) => {
-                                trace!("using an external CLI tool to render Markdown success");
-                                tx.send(widget.into()).ok();
-                            }
-                            Err(err) => {
-                                warn!(?err, "failed using an external CLI tool to render Markdown");
-                            }
-                        };
-                    }
-                });
+                    tokio::task::spawn({
+                        let text = text.to_string();
+                        async move {
+                            match ExternalMarkdownViewer::try_new(&text, &executable, &args).await {
+                                Ok(widget) => {
+                                    trace!("using an external CLI tool to render Markdown success");
+                                    tx.send(widget.into()).ok();
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        ?err,
+                                        "failed using an external CLI tool to render Markdown"
+                                    );
+                                }
+                            };
+                        }
+                    });
 
-                Some(rx)
+                    Some(rx)
+                }
+                MarkdownRenderEngine::Native => None,
             }
-            MarkdownRenderEngine::Native => None,
+        } else {
+            None
         };
 
-        let widget = CodeHighlight::try_new(&text, coco_highlight::Lang::Markdown)
+        let widget = CodeHighlight::try_new(text, coco_highlight::Lang::Markdown)
             .map(|x| x.into())
             .unwrap_or_else(|err| {
                 warn!(?err, "failed to new CodeHighlight Component");
-                RawTextViewer::new(text.clone()).into()
+                RawTextViewer::new(text.to_string()).into()
             });
-        Self { text, widget, rx }
+        (widget, rx)
     }
 }
 

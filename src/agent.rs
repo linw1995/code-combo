@@ -4,9 +4,13 @@
 //! - [`Agent`] - The main agent struct for chat interactions
 //! - [`AgentConfig`] - Configuration types for customizing agents
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
-use anthropic::{Block as AnthropicBlock, Client, Thinking, Tool as AnthropicTool, ToolChoice};
+use anthropic::{
+    Block as AnthropicBlock, Client, ContentBlockDelta, MessagesStreamEvent, Thinking,
+    Tool as AnthropicTool, ToolChoice,
+};
+use futures_util::StreamExt;
 use serde_json::{Map as JsonMap, json};
 use snafu::prelude::*;
 use tokio::sync::Mutex;
@@ -55,10 +59,191 @@ pub struct ChatResponse {
     pub stop_reason: Option<StopReason>,
 }
 
+#[derive(Debug, Clone)]
+pub enum ChatStreamUpdate {
+    Plain { index: usize, text: String },
+    Thinking { index: usize, text: String },
+}
+
 pub struct PromptReply {
     pub tool_use: ToolUse,
     pub response: String,
     pub thinking: Vec<String>,
+}
+
+enum StreamAction {
+    Continue,
+    Stop,
+}
+
+struct StreamAccumulator {
+    blocks: Vec<Block>,
+    tool_inputs: HashMap<usize, String>,
+    stop_reason: Option<StopReason>,
+}
+
+impl StreamAccumulator {
+    fn new() -> Self {
+        Self {
+            blocks: Vec::new(),
+            tool_inputs: HashMap::new(),
+            stop_reason: None,
+        }
+    }
+
+    fn finish(self) -> (Vec<Block>, Option<StopReason>) {
+        (self.blocks, self.stop_reason)
+    }
+
+    fn handle_event<F>(
+        &mut self,
+        event: MessagesStreamEvent,
+        on_update: &mut F,
+    ) -> Result<StreamAction>
+    where
+        F: FnMut(ChatStreamUpdate),
+    {
+        match event {
+            MessagesStreamEvent::MessageStart { .. } => Ok(StreamAction::Continue),
+            MessagesStreamEvent::ContentBlockStart {
+                index,
+                content_block,
+            } => {
+                self.ensure_block_slot(index);
+                self.blocks[index] = content_block;
+                match &self.blocks[index] {
+                    Block::Text { text } if !text.is_empty() => {
+                        on_update(ChatStreamUpdate::Plain {
+                            index,
+                            text: text.clone(),
+                        });
+                    }
+                    Block::Thinking { thinking, .. } if !thinking.is_empty() => {
+                        on_update(ChatStreamUpdate::Thinking {
+                            index,
+                            text: thinking.clone(),
+                        });
+                    }
+                    _ => (),
+                }
+                Ok(StreamAction::Continue)
+            }
+            MessagesStreamEvent::ContentBlockDelta { index, delta } => {
+                self.apply_delta(index, delta, on_update)?;
+                Ok(StreamAction::Continue)
+            }
+            MessagesStreamEvent::ContentBlockStop { index } => {
+                self.finalize_tool_input(index)?;
+                Ok(StreamAction::Continue)
+            }
+            MessagesStreamEvent::MessageDelta { delta, .. } => {
+                if let Some(reason) = delta.stop_reason {
+                    self.stop_reason = Some(reason);
+                }
+                Ok(StreamAction::Continue)
+            }
+            MessagesStreamEvent::MessageStop => Ok(StreamAction::Stop),
+            MessagesStreamEvent::Ping => Ok(StreamAction::Continue),
+            MessagesStreamEvent::Error { error } => {
+                let mut message = format!("stream error: {}", error.message);
+                if let Some(code) = error.code.as_deref() {
+                    message.push_str(&format!(" (code: {code})"));
+                }
+                if let Some(kind) = error.r#type.as_deref() {
+                    message.push_str(&format!(" (type: {kind})"));
+                }
+                Err(<crate::Error as snafu::FromString>::without_source(message))
+            }
+            MessagesStreamEvent::Unknown { .. } => Ok(StreamAction::Continue),
+        }
+    }
+
+    fn ensure_block_slot(&mut self, index: usize) {
+        if self.blocks.len() <= index {
+            self.blocks.resize_with(index + 1, || Block::Text {
+                text: String::new(),
+            });
+        }
+    }
+
+    fn apply_delta<F>(
+        &mut self,
+        index: usize,
+        delta: ContentBlockDelta,
+        on_update: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(ChatStreamUpdate),
+    {
+        self.ensure_block_slot(index);
+        match delta {
+            ContentBlockDelta::TextDelta { text } => {
+                if text.is_empty() {
+                    return Ok(());
+                }
+                match &mut self.blocks[index] {
+                    Block::Text { text: current } => current.push_str(&text),
+                    _ => {
+                        self.blocks[index] = Block::Text { text: text.clone() };
+                    }
+                }
+                on_update(ChatStreamUpdate::Plain { index, text });
+            }
+            ContentBlockDelta::ThinkingDelta { thinking } => {
+                if thinking.is_empty() {
+                    return Ok(());
+                }
+                match &mut self.blocks[index] {
+                    Block::Thinking {
+                        thinking: current, ..
+                    } => current.push_str(&thinking),
+                    _ => {
+                        self.blocks[index] = Block::Thinking {
+                            thinking: thinking.clone(),
+                            signature: None,
+                        };
+                    }
+                }
+                on_update(ChatStreamUpdate::Thinking {
+                    index,
+                    text: thinking,
+                });
+            }
+            ContentBlockDelta::SignatureDelta { signature } => {
+                if let Block::Thinking {
+                    signature: slot, ..
+                } = &mut self.blocks[index]
+                {
+                    *slot = Some(signature);
+                }
+            }
+            ContentBlockDelta::InputJsonDelta { partial_json } => {
+                if !partial_json.is_empty() {
+                    self.tool_inputs
+                        .entry(index)
+                        .or_default()
+                        .push_str(&partial_json);
+                }
+            }
+            ContentBlockDelta::Unknown => (),
+        }
+        Ok(())
+    }
+
+    fn finalize_tool_input(&mut self, index: usize) -> Result<()> {
+        let Some(buffer) = self.tool_inputs.remove(&index) else {
+            return Ok(());
+        };
+        if buffer.is_empty() {
+            return Ok(());
+        }
+        let input: serde_json::Value =
+            serde_json::from_str(&buffer).whatever_context("decode tool input json")?;
+        if let Some(Block::ToolUse(tool_use)) = self.blocks.get_mut(index) {
+            tool_use.input = input;
+        }
+        Ok(())
+    }
 }
 
 impl Agent {
@@ -248,6 +433,110 @@ impl Agent {
             Message::assistant(Content::Multiple(Vec::default()))
         } else {
             let msg = Message::assistant(Content::Multiple(response.content));
+            self.messages.lock().await.push(msg.clone());
+            msg
+        };
+        self.mark_thinking_cleanup_pending(stop_reason.as_ref());
+        Ok(ChatResponse {
+            message,
+            stop_reason,
+        })
+    }
+
+    pub async fn chat_stream<F>(
+        &mut self,
+        message: Message,
+        cancel_token: CancellationToken,
+        on_update: F,
+    ) -> Result<ChatResponse>
+    where
+        F: FnMut(ChatStreamUpdate) + Send,
+    {
+        self.chat_stream_internal(Some(message), cancel_token, on_update)
+            .await
+    }
+
+    pub async fn chat_stream_with_history<F>(
+        &mut self,
+        cancel_token: CancellationToken,
+        on_update: F,
+    ) -> Result<ChatResponse>
+    where
+        F: FnMut(ChatStreamUpdate) + Send,
+    {
+        self.chat_stream_internal(None, cancel_token, on_update)
+            .await
+    }
+
+    async fn chat_stream_internal<F>(
+        &mut self,
+        message: Option<Message>,
+        cancel_token: CancellationToken,
+        mut on_update: F,
+    ) -> Result<ChatResponse>
+    where
+        F: FnMut(ChatStreamUpdate) + Send,
+    {
+        let (_, client) = self.pick_provider()?;
+        let thinking = self.thinking_payload();
+
+        let messages = {
+            let mut messages = self.messages.lock().await;
+            if let Some(message) = message {
+                messages.push(message);
+            }
+            messages.clone()
+        };
+        let messages = self.prepare_messages_for_request(messages);
+
+        let mut stream = client
+            .messages_stream()
+            .system_prompt(&self.system_prompt)
+            .conversations(messages)
+            .tools(self.executor.anthropic_tools())
+            .maybe_thinking(thinking)
+            .call()
+            .await
+            .inspect_err(|err| {
+                warn!("send messsages stream error: {err:?}");
+            })
+            .map_err(|err| {
+                <crate::Error as snafu::FromString>::without_source(format!(
+                    "send messages stream error: {err}"
+                ))
+            })?;
+
+        let mut accumulator = StreamAccumulator::new();
+        while let Some(event) = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                return Err(<crate::Error as snafu::FromString>::without_source(
+                    "chat stream cancelled".to_string(),
+                ));
+            }
+            event = stream.next() => event,
+        } {
+            let event = event.map_err(|err| {
+                <crate::Error as snafu::FromString>::without_source(format!(
+                    "read messages stream error: {err}"
+                ))
+            })?;
+            let action = accumulator
+                .handle_event(event, &mut on_update)
+                .map_err(|err| {
+                    <crate::Error as snafu::FromString>::without_source(format!(
+                        "parse messages stream error: {err}"
+                    ))
+                })?;
+            if matches!(action, StreamAction::Stop) {
+                break;
+            }
+        }
+
+        let (blocks, stop_reason) = accumulator.finish();
+        let message = if blocks.is_empty() {
+            Message::assistant(Content::Multiple(Vec::default()))
+        } else {
+            let msg = Message::assistant(Content::Multiple(blocks));
             self.messages.lock().await.push(msg.clone());
             msg
         };
@@ -590,4 +879,104 @@ fn build_reply_tool_directive(schemas: &[PromptSchema]) -> String {
 Do not output plain text. Provide all required fields in the tool input. \
 Required fields: {fields}."
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_accumulator_updates_plain_and_thinking() {
+        let mut accumulator = StreamAccumulator::new();
+        let mut updates = Vec::new();
+        let mut on_update = |update| updates.push(update);
+
+        accumulator
+            .handle_event(
+                MessagesStreamEvent::ContentBlockStart {
+                    index: 0,
+                    content_block: Block::text(""),
+                },
+                &mut on_update,
+            )
+            .unwrap();
+        accumulator
+            .handle_event(
+                MessagesStreamEvent::ContentBlockDelta {
+                    index: 0,
+                    delta: ContentBlockDelta::TextDelta {
+                        text: "Hello".to_string(),
+                    },
+                },
+                &mut on_update,
+            )
+            .unwrap();
+        accumulator
+            .handle_event(
+                MessagesStreamEvent::ContentBlockStart {
+                    index: 1,
+                    content_block: Block::Thinking {
+                        thinking: String::new(),
+                        signature: None,
+                    },
+                },
+                &mut on_update,
+            )
+            .unwrap();
+        accumulator
+            .handle_event(
+                MessagesStreamEvent::ContentBlockDelta {
+                    index: 1,
+                    delta: ContentBlockDelta::ThinkingDelta {
+                        thinking: "Reasoning".to_string(),
+                    },
+                },
+                &mut on_update,
+            )
+            .unwrap();
+        accumulator
+            .handle_event(
+                MessagesStreamEvent::MessageDelta {
+                    delta: anthropic::MessageDelta {
+                        stop_reason: Some(StopReason::EndTurn),
+                        stop_sequence: None,
+                    },
+                    usage: None,
+                },
+                &mut on_update,
+            )
+            .unwrap();
+        let action = accumulator
+            .handle_event(MessagesStreamEvent::MessageStop, &mut on_update)
+            .unwrap();
+
+        assert!(matches!(action, StreamAction::Stop));
+        assert_eq!(updates.len(), 2);
+        match &updates[0] {
+            ChatStreamUpdate::Plain { index, text } => {
+                assert_eq!(*index, 0);
+                assert_eq!(text, "Hello");
+            }
+            other => panic!("unexpected update: {other:?}"),
+        }
+        match &updates[1] {
+            ChatStreamUpdate::Thinking { index, text } => {
+                assert_eq!(*index, 1);
+                assert_eq!(text, "Reasoning");
+            }
+            other => panic!("unexpected update: {other:?}"),
+        }
+
+        let (blocks, stop_reason) = accumulator.finish();
+        assert_eq!(stop_reason, Some(StopReason::EndTurn));
+        assert_eq!(blocks.len(), 2);
+        match &blocks[0] {
+            Block::Text { text } => assert_eq!(text, "Hello"),
+            other => panic!("unexpected block: {other:?}"),
+        }
+        match &blocks[1] {
+            Block::Thinking { thinking, .. } => assert_eq!(thinking, "Reasoning"),
+            other => panic!("unexpected block: {other:?}"),
+        }
+    }
 }

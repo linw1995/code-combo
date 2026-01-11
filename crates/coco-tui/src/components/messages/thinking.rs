@@ -37,6 +37,13 @@ impl Thinking {
         }
     }
 
+    pub fn append_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.state.text.push_str(text);
+    }
+
     pub fn collapse(&mut self) {
         self.state.fold_state.collapse();
     }
