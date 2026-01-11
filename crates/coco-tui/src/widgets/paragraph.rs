@@ -1,5 +1,6 @@
 use ratatui::{
     prelude::{Buffer, Rect},
+    style::Style,
     text::{Line, Span, Text},
     widgets::{Widget, WidgetRef, Wrap},
 };
@@ -34,6 +35,31 @@ impl<'a> Paragraph<'a> {
         Self {
             text: text.into(),
             wrap: Some(wrap),
+        }
+    }
+
+    pub fn append_text(&mut self, text: &str, style: Style) {
+        if text.is_empty() {
+            return;
+        }
+        let mut parts = text.split('\n');
+        let first = parts.next().unwrap_or_default();
+        if self.text.lines.is_empty() {
+            self.text.lines.push(Line::default());
+        }
+        if !first.is_empty()
+            && let Some(last) = self.text.lines.last_mut()
+        {
+            last.spans.push(Span::styled(first.to_string(), style));
+        }
+        for part in parts {
+            if part.is_empty() {
+                self.text.lines.push(Line::default());
+            } else {
+                self.text
+                    .lines
+                    .push(Line::from(Span::styled(part.to_string(), style)));
+            }
         }
     }
 

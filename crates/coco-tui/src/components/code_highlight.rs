@@ -97,10 +97,12 @@ pub struct CodeHighlight<'a> {
     state: State,
     widget: Paragraph<'a>,
     theme_dirty: bool,
+    source_dirty: bool,
     last_width: Option<u16>,
     base_style: Option<Style>,
     pending_rx: Option<oneshot::Receiver<Result<Paragraph<'static>>>>,
     pending_width: Option<u16>,
+    pending_source: Option<String>,
 }
 
 impl<'a> CodeHighlight<'a> {
@@ -148,11 +150,28 @@ impl<'a> CodeHighlight<'a> {
             },
             widget,
             theme_dirty: false,
+            source_dirty: true,
             last_width: None,
             base_style,
             pending_rx: None,
             pending_width: None,
+            pending_source: None,
         })
+    }
+
+    pub fn append_source(&mut self, chunk: &str) {
+        if chunk.is_empty() {
+            return;
+        }
+        self.state.source.push_str(chunk);
+        self.widget
+            .append_text(chunk, self.base_style.unwrap_or_default());
+        self.source_dirty = true;
+        if let Some(width) = self.last_width
+            && self.pending_rx.is_none()
+        {
+            self.spawn_build(width);
+        }
     }
 
     fn build_placeholder_widget(source: &str, base_style: Option<Style>) -> Paragraph<'static> {
@@ -284,6 +303,7 @@ impl<'a> CodeHighlight<'a> {
 
     fn spawn_build(&mut self, width: u16) {
         let source = self.state.source.clone();
+        let source_snapshot = source.clone();
         let lang = self.state.lang;
         let overlays = self.state.overlays.clone();
         let base_style = self.base_style;
@@ -294,6 +314,7 @@ impl<'a> CodeHighlight<'a> {
         });
         self.pending_rx = Some(rx);
         self.pending_width = Some(width);
+        self.pending_source = Some(source_snapshot);
     }
 
     fn poll_pending(&mut self) -> bool {
@@ -305,15 +326,23 @@ impl<'a> CodeHighlight<'a> {
         };
         self.pending_rx = None;
         let width = self.pending_width.take();
+        let source_snapshot = self.pending_source.take();
         match result {
             Ok(widget) => {
-                self.widget = widget;
+                let stale = source_snapshot.as_deref() != Some(self.state.source.as_str());
+                if !stale {
+                    self.widget = widget;
+                    self.source_dirty = false;
+                } else {
+                    self.source_dirty = true;
+                }
                 if let Some(width) = width {
                     self.last_width = Some(width);
                 }
             }
             Err(err) => {
                 warn!(?err, "failed to build CodeHighlight widget");
+                self.source_dirty = true;
                 if let Some(width) = width {
                     self.last_width = Some(width);
                 }
@@ -324,15 +353,13 @@ impl<'a> CodeHighlight<'a> {
     }
 
     fn maybe_spawn(&mut self, width: u16) {
-        let needs_rebuild = self.theme_dirty || self.last_width != Some(width);
+        let needs_rebuild = self.theme_dirty || self.source_dirty || self.last_width != Some(width);
         if !needs_rebuild {
             return;
         }
-        if self.pending_width == Some(width) && !self.theme_dirty {
+        if self.pending_rx.is_some() {
             return;
         }
-        self.pending_rx = None;
-        self.pending_width = None;
         self.spawn_build(width);
         self.theme_dirty = false;
     }
@@ -350,10 +377,12 @@ impl Persistable for CodeHighlight<'static> {
             state,
             widget,
             theme_dirty: false,
+            source_dirty: true,
             last_width: None,
             base_style: None,
             pending_rx: None,
             pending_width: None,
+            pending_source: None,
         })
     }
 }

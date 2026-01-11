@@ -51,6 +51,14 @@ impl Plain {
             return;
         }
         self.text.push_str(text);
+        if let Some(widget) = self
+            .widget
+            .as_mut_any()
+            .downcast_mut::<CodeHighlight<'static>>()
+        {
+            widget.append_source(text);
+            return;
+        }
         self.refresh_widget(false);
     }
 
