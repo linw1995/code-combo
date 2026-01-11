@@ -37,7 +37,6 @@ macro_rules! handle_component_event {
                 if matches!($event, Event::Tick) {
                     $component.on_tick();
                 } else {
-                    tracing::trace!(?$event, "handling component event");
                 }
                 for child in $component.children() {
                     child.handle_event($event);

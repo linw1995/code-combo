@@ -11,7 +11,7 @@ use ratatui::{
     widgets::{Block, Borders, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 use snafu::ResultExt;
-use tracing::{trace, warn};
+use tracing::warn;
 
 use crate::{
     components::Persistable,
@@ -816,7 +816,6 @@ impl Component for Messages {
         if self.total_height > area.height {
             let [area_list, area_bar] =
                 Layout::horizontal([Min(10), Length(scrollbar_width)]).areas(area);
-            trace!(?area_list, ?area_bar, "print messages area");
 
             self.virtual_draw(frame, area_list, &heights)?;
             self.draw_scrollbar(frame, area_bar)?;

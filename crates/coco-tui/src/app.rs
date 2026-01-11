@@ -208,6 +208,7 @@ impl App {
                 }
                 Event::Dirty => self.dirty = true,
                 _ => {
+                    tracing::trace!(?event, "handling component event");
                     self.root.handle_event(&event);
                 }
             }
