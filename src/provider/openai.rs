@@ -377,6 +377,10 @@ impl OpenAIStream {
         }
     }
 
+    fn tool_base_index(&self) -> usize {
+        (self.thinking_started as usize) + (self.text_started as usize)
+    }
+
     fn close_all_blocks(&mut self) {
         self.close_thinking_block();
         if self.text_started && !self.text_closed {
@@ -452,8 +456,9 @@ impl Stream for OpenAIStream {
                             });
                         }
                         if let Some(tool_calls) = delta.tool_calls {
+                            let base_index = this.tool_base_index();
                             for tool_call in tool_calls {
-                                let index = tool_call.index + 1;
+                                let index = base_index + tool_call.index;
                                 if !this.tool_started.contains_key(&index) {
                                     let id = tool_call
                                         .id

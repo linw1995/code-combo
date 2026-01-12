@@ -165,6 +165,7 @@ impl From<anthropic_api::StopReason> for StopReason {
             anthropic_api::StopReason::ToolUse => Self::ToolUse,
             anthropic_api::StopReason::PauseTurn => Self::PauseTurn,
             anthropic_api::StopReason::Refusal => Self::Refusal,
+            anthropic_api::StopReason::Unknown => Self::EndTurn,
         }
     }
 }
