@@ -218,7 +218,7 @@ impl App {
                     self.terminal
                         .clear()
                         .whatever_context("failed to clear terminal for full refresh")?;
-                    self.dirty = true;
+                    self.send_action(Action::Render);
                 }
                 _ => {
                     if !matches!(event, Event::Tick) {
