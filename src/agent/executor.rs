@@ -342,11 +342,11 @@ impl Executor {
         self.bash_session_allowlist.contains(&key)
     }
 
-    /// Generate a list of Tools of Anthropic API
-    pub fn anthropic_tools(&self) -> Vec<anthropic::Tool> {
+    /// Generate a list of tools for provider API
+    pub fn provider_tools(&self) -> Vec<crate::provider::Tool> {
         self.tools
             .iter()
-            .map(|(name, t)| anthropic::Tool {
+            .map(|(name, t)| crate::provider::Tool {
                 name: name.to_owned(),
                 description: t.description().to_string(),
                 input_schema: t.input_schema(),
@@ -463,7 +463,7 @@ mod tests {
         let mut executor = Executor::default();
         executor.apply_tool_policies(None, None);
         let names: HashSet<String> = executor
-            .anthropic_tools()
+            .provider_tools()
             .into_iter()
             .map(|tool| tool.name)
             .collect();
@@ -478,7 +478,7 @@ mod tests {
         let mut executor = Executor::default();
         executor.apply_tool_policies(Some(&Vec::new()), None);
         let names: Vec<String> = executor
-            .anthropic_tools()
+            .provider_tools()
             .into_iter()
             .map(|tool| tool.name)
             .collect();
@@ -493,7 +493,7 @@ mod tests {
             Some(&[BASH_TOOL_NAME.to_string(), READ_TOOL_NAME.to_string()]),
         );
         let names: HashSet<String> = executor
-            .anthropic_tools()
+            .provider_tools()
             .into_iter()
             .map(|tool| tool.name)
             .collect();
@@ -515,7 +515,7 @@ mod tests {
             Some(&[READ_TOOL_NAME.to_string()]),
         );
         let names: HashSet<String> = executor
-            .anthropic_tools()
+            .provider_tools()
             .into_iter()
             .map(|tool| tool.name)
             .collect();

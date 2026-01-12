@@ -80,7 +80,7 @@ impl From<Final> for Output {
 /// Result for LLM
 pub type ExecuteResult = Result<Output, Final>;
 
-impl TryFrom<&Final> for anthropic::Content {
+impl TryFrom<&Final> for crate::provider::Content {
     type Error = serde_json::Error;
 
     fn try_from(value: &Final) -> Result<Self, Self::Error> {

@@ -13,7 +13,6 @@ path = "src/main.rs"
 # Core
 code-combo = { path = "../.." }
 coco-macro = { path = "../coco-macro/" }
-anthropic = { path = "../anthropic" }
 
 # CLI
 clap.workspace = true

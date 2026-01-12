@@ -1,4 +1,3 @@
-use anthropic::Block as AnthropicBlock;
 use coco_macro::ComponentExt;
 use code_combo::tools::Final;
 use code_combo::{
@@ -1827,7 +1826,7 @@ async fn task_combo_execute(
 }
 
 fn build_tool_use_message(tool_use: &ToolUse) -> ChatMessage {
-    ChatMessage::assistant(ChatContent::Multiple(vec![AnthropicBlock::tool_use(
+    ChatMessage::assistant(ChatContent::Multiple(vec![ChatBlock::tool_use(
         &tool_use.id,
         &tool_use.name,
         tool_use.input.clone(),
@@ -1838,7 +1837,7 @@ const TOOL_RESULT_MAX_BYTES: usize = 80 * 1024;
 const TOOL_RESULT_TRUNCATION_SUFFIX: &str = "\n... (truncated)";
 
 fn build_tool_result_message(tool_use_id: &str, is_error: bool, output: &Final) -> ChatMessage {
-    ChatMessage::user(ChatContent::Multiple(vec![AnthropicBlock::tool_result(
+    ChatMessage::user(ChatContent::Multiple(vec![ChatBlock::tool_result(
         tool_use_id,
         Some(is_error),
         final_to_tool_content(output),
