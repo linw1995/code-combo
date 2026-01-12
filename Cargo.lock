@@ -342,7 +342,6 @@ name = "coco-tui"
 version = "0.1.0"
 dependencies = [
  "ansi-to-tui",
- "anthropic",
  "bitflags",
  "bon",
  "clap",
@@ -381,6 +380,7 @@ dependencies = [
  "hyper-util",
  "indoc",
  "lazy_static",
+ "openai",
  "rmcp",
  "schemars",
  "serde",
@@ -1386,6 +1386,19 @@ name = "once_cell_polyfill"
 version = "1.70.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4895175b425cb1f87721b59f0f286c2092bd4af812243672510e1ac53e2e0ad"
+
+[[package]]
+name = "openai"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "snafu",
+ "tracing",
+]
 
 [[package]]
 name = "parking_lot"

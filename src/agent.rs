@@ -6,9 +6,8 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use anthropic::{
-    Block as AnthropicBlock, Client, ContentBlockDelta, MessagesStreamEvent, Thinking,
-    Tool as AnthropicTool, ToolChoice,
+use crate::provider::{
+    Block, Client, ContentBlockDelta, MessagesStreamEvent, Thinking, ToolChoice,
 };
 use futures_util::StreamExt;
 use serde_json::{Map as JsonMap, json};
@@ -26,7 +25,7 @@ mod config;
 mod executor;
 mod prompt;
 
-pub use anthropic::{Block, Content, Message, Role, StopReason, ToolUse};
+pub use crate::provider::{Content, Message, StopReason, ToolUse};
 pub use bash_executor::{bash_unsafe_ranges, bash_unsafe_reason};
 pub use executor::{ExecuteStatus, Executor, Input, Output};
 
@@ -384,12 +383,12 @@ impl Agent {
         let messages = self.prepare_messages_for_request(messages);
 
         let response = client
-            .messages()
-            .system_prompt(&self.system_prompt)
-            .conversations(messages)
-            .tools(self.executor.anthropic_tools())
-            .maybe_thinking(thinking)
-            .call()
+            .messages(
+                Some(&self.system_prompt),
+                messages,
+                self.executor.provider_tools(),
+                thinking,
+            )
             .await
             .inspect_err(|err| {
                 warn!("send messsages error: {err:?}");
@@ -418,12 +417,12 @@ impl Agent {
         let messages = self.messages.lock().await.clone();
         let messages = self.prepare_messages_for_request(messages);
         let response = client
-            .messages()
-            .system_prompt(&self.system_prompt)
-            .conversations(messages)
-            .tools(self.executor.anthropic_tools())
-            .maybe_thinking(thinking)
-            .call()
+            .messages(
+                Some(&self.system_prompt),
+                messages,
+                self.executor.provider_tools(),
+                thinking,
+            )
             .await
             .inspect_err(|err| {
                 warn!("send messsages error: {err:?}");
@@ -492,12 +491,12 @@ impl Agent {
         let messages = self.prepare_messages_for_request(messages);
 
         let mut stream = client
-            .messages_stream()
-            .system_prompt(&self.system_prompt)
-            .conversations(messages)
-            .tools(self.executor.anthropic_tools())
-            .maybe_thinking(thinking)
-            .call()
+            .messages_stream(
+                Some(&self.system_prompt),
+                messages,
+                self.executor.provider_tools(),
+                thinking,
+            )
             .await
             .inspect_err(|err| {
                 warn!("send messsages stream error: {err:?}");
@@ -560,7 +559,7 @@ impl Agent {
             history.clone()
         };
         let messages = self.prepare_messages_for_request(messages);
-        let tool_choice = ToolChoice::tool().name(PROMPT_REPLY_TOOL_NAME).call();
+        let tool_choice = ToolChoice::tool(PROMPT_REPLY_TOOL_NAME, None);
         let system_prompt = system_prompt.trim();
         let system_prompt = if system_prompt.is_empty() {
             None
@@ -589,10 +588,10 @@ impl Agent {
         let mut reply_tool = None;
         for block in response.content.into_iter() {
             match block {
-                AnthropicBlock::Thinking { thinking: text, .. } => {
+                Block::Thinking { thinking: text, .. } => {
                     thinking.push(text);
                 }
-                AnthropicBlock::ToolUse(tool_use) if tool_use.name == PROMPT_REPLY_TOOL_NAME => {
+                Block::ToolUse(tool_use) if tool_use.name == PROMPT_REPLY_TOOL_NAME => {
                     reply_tool = Some(tool_use);
                 }
                 _ => (),
@@ -603,9 +602,11 @@ impl Agent {
         };
         {
             let mut history = self.messages.lock().await;
-            history.push(Message::user(Content::Multiple(vec![
-                AnthropicBlock::tool_result(&tool_use.id, None, Content::Text("ok".to_string())),
-            ])));
+            history.push(Message::user(Content::Multiple(vec![Block::tool_result(
+                &tool_use.id,
+                None,
+                Content::Text("ok".to_string()),
+            )])));
         }
         let response = serde_json::to_string(&tool_use.input)
             .whatever_context("failed to serialize reply tool input")?;
@@ -638,7 +639,7 @@ impl Agent {
             history.clone()
         };
         let messages = self.prepare_messages_for_request(messages);
-        let tool_choice = ToolChoice::tool().name(PROMPT_REPLY_TOOL_NAME).call();
+        let tool_choice = ToolChoice::tool(PROMPT_REPLY_TOOL_NAME, None);
         let system_prompt = system_prompt.trim();
         let system_prompt = if system_prompt.is_empty() {
             None
@@ -685,10 +686,10 @@ impl Agent {
         let mut reply_tool = None;
         for block in &blocks {
             match block {
-                AnthropicBlock::Thinking { thinking: text, .. } => {
+                Block::Thinking { thinking: text, .. } => {
                     thinking.push(text.clone());
                 }
-                AnthropicBlock::ToolUse(tool_use) if tool_use.name == PROMPT_REPLY_TOOL_NAME => {
+                Block::ToolUse(tool_use) if tool_use.name == PROMPT_REPLY_TOOL_NAME => {
                     reply_tool = Some(tool_use.clone());
                 }
                 _ => (),
@@ -699,9 +700,11 @@ impl Agent {
         };
         {
             let mut history = self.messages.lock().await;
-            history.push(Message::user(Content::Multiple(vec![
-                AnthropicBlock::tool_result(&tool_use.id, None, Content::Text("ok".to_string())),
-            ])));
+            history.push(Message::user(Content::Multiple(vec![Block::tool_result(
+                &tool_use.id,
+                None,
+                Content::Text("ok".to_string()),
+            )])));
         }
         let response = serde_json::to_string(&tool_use.input)
             .whatever_context("failed to serialize reply tool input")?;
@@ -925,12 +928,7 @@ impl Agent {
         // otherwise fallback to provider.name
         let model = Self::resolve_model(provider, selected_model);
 
-        let builder = Client::builder()
-            .base_url(&provider.base_url)
-            .token(provider.api_key.get()?)
-            .model(&model)
-            .user_agent(crate::version::user_agent().to_string());
-        let client = builder.build().expect("Failed to initialize client");
+        let client = Client::new(provider, &model, crate::version::user_agent().to_string())?;
         Ok((&provider.name, client))
     }
 
@@ -949,7 +947,7 @@ fn build_reply_prompt_message(schemas: &[PromptSchema]) -> Message {
     Message::user(Content::Text(build_reply_tool_directive(schemas)))
 }
 
-fn build_reply_tool(schemas: &[PromptSchema]) -> Result<AnthropicTool> {
+fn build_reply_tool(schemas: &[PromptSchema]) -> Result<crate::provider::Tool> {
     let mut properties = JsonMap::new();
     let mut required = Vec::new();
     for schema in schemas {
@@ -969,7 +967,7 @@ fn build_reply_tool(schemas: &[PromptSchema]) -> Result<AnthropicTool> {
         "required": required,
         "additionalProperties": false,
     });
-    Ok(AnthropicTool {
+    Ok(crate::provider::Tool {
         name: PROMPT_REPLY_TOOL_NAME.to_string(),
         description: "Return the response using the provided schema.".to_string(),
         input_schema,
@@ -1045,7 +1043,7 @@ mod tests {
         accumulator
             .handle_event(
                 MessagesStreamEvent::MessageDelta {
-                    delta: anthropic::MessageDelta {
+                    delta: crate::provider::MessageDelta {
                         stop_reason: Some(StopReason::EndTurn),
                         stop_sequence: None,
                     },

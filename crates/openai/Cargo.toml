@@ -1,0 +1,17 @@
+[package]
+name = "openai"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "stream",
+  "rustls-tls-webpki-roots",
+] }
+serde.workspace = true
+serde_json.workspace = true
+bytes = "1.9.0"
+futures-core.workspace = true
+snafu.workspace = true
+tracing.workspace = true

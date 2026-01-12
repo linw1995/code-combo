@@ -513,7 +513,7 @@ safe_commands_mode = \"override\"\n\
             "",
             "[[providers]]",
             "name = \"new\"",
-            "kind = \"open_a_i\"",
+            "kind = \"openai\"",
             "api_key = \"test-key\"",
             "base_url = \"https://new.example\"",
             "",
