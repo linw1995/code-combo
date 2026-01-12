@@ -2,6 +2,7 @@
 pub struct UI {
     #[serde(default = "default_theme")]
     pub theme: String,
+    #[serde(default)]
     pub markdown_render_engine: MarkdownRenderEngine,
 }
 

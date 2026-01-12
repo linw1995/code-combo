@@ -8,6 +8,7 @@ pub mod exec;
 pub mod global;
 pub mod logging;
 mod mcp;
+mod runtime_overrides;
 mod text_edit;
 pub mod tools;
 pub mod version;
@@ -18,6 +19,7 @@ pub use config::*;
 pub use error::*;
 pub use exec::*;
 pub use mcp::*;
+pub use runtime_overrides::*;
 pub use text_edit::*;
 
 #[cfg(test)]

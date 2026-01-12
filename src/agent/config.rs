@@ -522,6 +522,7 @@ tools = ["custom_tool"]
         let layers = AgentPathLayers {
             global: Some(AgentPathConfig {
                 agent_config_path: Some("custom_agent.toml".to_string()),
+                ..Default::default()
             }),
             workspace: None,
         };

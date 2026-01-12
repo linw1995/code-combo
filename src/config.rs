@@ -47,17 +47,19 @@ fn override_error(message: impl Into<String>) -> BoxError {
 
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct Config {
+    #[serde(default, skip_serializing_if = "ui_is_default")]
     pub ui: UI,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub providers: Vec<ProviderConfig>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_tools: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deny_tools: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<McpConfig>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bash: Option<BashConfig>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentPathConfig>,
 
     #[serde(skip)]
@@ -68,6 +70,11 @@ pub struct Config {
     pub bash_layers: BashConfigLayers,
     #[serde(skip)]
     pub agent_path_layers: AgentPathLayers,
+}
+
+fn ui_is_default(ui: &UI) -> bool {
+    let default = UI::default();
+    ui.theme == default.theme && matches!(ui.markdown_render_engine, MarkdownRenderEngine::Native)
 }
 
 impl Config {
