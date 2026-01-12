@@ -119,6 +119,7 @@
               prek
 
               cargo-nextest
+              cargo-flamegraph
             ]
             ++ (with self.packages.${system}; [
               run-test

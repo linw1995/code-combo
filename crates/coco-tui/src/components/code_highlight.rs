@@ -11,6 +11,8 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
+use tokio::sync::oneshot;
+use tracing::warn;
 
 use super::{CacheInvalidation, Component, Content, ContentComponent};
 use crate::{
@@ -28,6 +30,12 @@ struct State {
     lang: Lang,
     #[serde(default)]
     overlays: Vec<HighlightOverlay>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingSnapshot {
+    source: String,
+    width: u16,
 }
 
 const MAX_GUIDES: usize = 2;
@@ -95,8 +103,11 @@ pub struct CodeHighlight<'a> {
     state: State,
     widget: Paragraph<'a>,
     theme_dirty: bool,
+    source_dirty: bool,
     last_width: Option<u16>,
     base_style: Option<Style>,
+    pending_rx: Option<oneshot::Receiver<Result<Paragraph<'static>>>>,
+    pending_snapshot: Option<PendingSnapshot>,
 }
 
 impl<'a> CodeHighlight<'a> {
@@ -135,7 +146,7 @@ impl<'a> CodeHighlight<'a> {
         base_style: Option<Style>,
     ) -> Result<Self> {
         let overlays = normalize_overlays(overlays, source.len());
-        let widget = Self::build_widget(source, lang, &overlays, u16::MAX, base_style)?;
+        let widget = Self::build_placeholder_widget(source, base_style);
         Ok(Self {
             state: State {
                 source: source.to_string(),
@@ -144,9 +155,36 @@ impl<'a> CodeHighlight<'a> {
             },
             widget,
             theme_dirty: false,
+            source_dirty: true,
             last_width: None,
             base_style,
+            pending_rx: None,
+            pending_snapshot: None,
         })
+    }
+
+    pub fn append_source(&mut self, chunk: &str) {
+        if chunk.is_empty() {
+            return;
+        }
+        self.state.source.push_str(chunk);
+        self.widget
+            .append_text(chunk, self.base_style.unwrap_or_default());
+        self.source_dirty = true;
+        if let Some(width) = self.last_width
+            && self.pending_rx.is_none()
+        {
+            self.spawn_build(width);
+        }
+    }
+
+    fn build_placeholder_widget(source: &str, base_style: Option<Style>) -> Paragraph<'static> {
+        let base_style = base_style.unwrap_or_default();
+        let lines = source
+            .split('\n')
+            .map(|line| Line::from(Span::styled(line.to_string(), base_style)))
+            .collect::<Vec<_>>();
+        Paragraph::new_wrap(Text::from(lines), Wrap { trim: false })
     }
 
     fn build_widget(
@@ -266,6 +304,72 @@ impl<'a> CodeHighlight<'a> {
         );
         Ok(widget)
     }
+
+    fn spawn_build(&mut self, width: u16) {
+        let source = self.state.source.clone();
+        let snapshot_source = source.clone();
+        let lang = self.state.lang;
+        let overlays = self.state.overlays.clone();
+        let base_style = self.base_style;
+        let (tx, rx) = oneshot::channel();
+        tokio::task::spawn_blocking(move || {
+            let result = Self::build_widget(&source, lang, &overlays, width, base_style);
+            tx.send(result).ok();
+        });
+        self.pending_rx = Some(rx);
+        self.pending_snapshot = Some(PendingSnapshot {
+            source: snapshot_source,
+            width,
+        });
+    }
+
+    fn poll_pending(&mut self) -> bool {
+        let Some(rx) = &mut self.pending_rx else {
+            return false;
+        };
+        let Ok(result) = rx.try_recv() else {
+            return false;
+        };
+        self.pending_rx = None;
+        let snapshot = self.pending_snapshot.take();
+        match result {
+            Ok(widget) => {
+                let stale = snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.source != self.state.source);
+                if !stale {
+                    self.widget = widget;
+                    self.source_dirty = false;
+                } else {
+                    self.source_dirty = true;
+                }
+                if let Some(snapshot) = snapshot {
+                    self.last_width = Some(snapshot.width);
+                }
+            }
+            Err(err) => {
+                warn!(?err, "failed to build CodeHighlight widget");
+                self.source_dirty = true;
+                if let Some(snapshot) = snapshot {
+                    self.last_width = Some(snapshot.width);
+                }
+            }
+        }
+        self.theme_dirty = false;
+        true
+    }
+
+    fn maybe_spawn(&mut self, width: u16) {
+        let needs_rebuild = self.theme_dirty || self.source_dirty || self.last_width != Some(width);
+        if !needs_rebuild {
+            return;
+        }
+        if self.pending_rx.is_some() {
+            return;
+        }
+        self.spawn_build(width);
+        self.theme_dirty = false;
+    }
 }
 
 impl Persistable for CodeHighlight<'static> {
@@ -275,14 +379,16 @@ impl Persistable for CodeHighlight<'static> {
 
     fn load(session: Session) -> Result<Self> {
         let state: State = session::load(session)?;
-        let widget =
-            Self::build_widget(&state.source, state.lang, &state.overlays, u16::MAX, None)?;
+        let widget = Self::build_placeholder_widget(&state.source, None);
         Ok(Self {
             state,
             widget,
             theme_dirty: false,
+            source_dirty: true,
             last_width: None,
             base_style: None,
+            pending_rx: None,
+            pending_snapshot: None,
         })
     }
 }
@@ -294,18 +400,15 @@ impl Component for CodeHighlight<'static> {
         }
     }
 
-    fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
-        if self.theme_dirty || self.last_width != Some(area.width) {
-            self.widget = Self::build_widget(
-                &self.state.source,
-                self.state.lang,
-                &self.state.overlays,
-                area.width,
-                self.base_style,
-            )?;
-            self.theme_dirty = false;
-            self.last_width = Some(area.width);
+    fn on_tick(&mut self) {
+        if self.poll_pending() {
+            global::signal_dirty();
         }
+    }
+
+    fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        let _ = self.poll_pending();
+        self.maybe_spawn(area.width);
         frame.render_widget(&self.widget, area);
         Ok(())
     }
@@ -313,15 +416,7 @@ impl Component for CodeHighlight<'static> {
 
 impl<'a> Content for CodeHighlight<'a> {
     fn height(&self, width: u16) -> usize {
-        Self::build_widget(
-            &self.state.source,
-            self.state.lang,
-            &self.state.overlays,
-            width,
-            self.base_style,
-        )
-        .map(|widget| widget.line_count(width))
-        .unwrap_or(0)
+        self.widget.line_count(width)
     }
 }
 
@@ -563,6 +658,7 @@ impl<'a> GuideMarker<'a> {
 #[cfg(test)]
 mod tests {
     use ratatui::{Terminal, backend::TestBackend, prelude::Buffer};
+    use tokio::time::{Duration, sleep};
 
     use super::*;
 
@@ -588,8 +684,20 @@ mod tests {
             .draw(|frame| widget.draw(frame, frame.area()).unwrap())
             .unwrap();
 
-        let buffer = terminal.backend().buffer();
-        let guide_line = buffer_line(buffer, 1, width);
+        let mut guide_line = String::new();
+        for _ in 0..50 {
+            widget.on_tick();
+            terminal
+                .draw(|frame| widget.draw(frame, frame.area()).unwrap())
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            guide_line = buffer_line(buffer, 1, width);
+            if guide_line.contains("┗━ line break") {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+
         assert!(
             guide_line.contains("┗━ line break"),
             "unexpected guide line: {guide_line:?}"

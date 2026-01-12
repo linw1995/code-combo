@@ -1,3 +1,5 @@
+use std::ops::DerefMut;
+
 use coco_macro::{ComponentExt, ContentComponentExt};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -7,7 +9,7 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
-use tracing::warn;
+use tracing::{trace, warn};
 
 use super::{
     Component, Content, ShortcutHints, fold::FoldState, plain::ExternalMarkdownViewer,
@@ -67,6 +69,14 @@ impl Thinking {
             return;
         }
         self.state.text.push_str(text);
+        if let Some(widget) = self
+            .widget
+            .as_mut_any()
+            .downcast_mut::<CodeHighlight<'static>>()
+        {
+            widget.append_source(text);
+            return;
+        }
         self.refresh_widget(false);
     }
 
@@ -158,6 +168,11 @@ impl Persistable for Thinking {
 }
 
 impl Component for Thinking {
+    fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
+        let children: Vec<&mut dyn Component> = vec![self.widget.deref_mut()];
+        Box::new(children.into_iter())
+    }
+
     fn on_cache_invalidation(&mut self, reason: CacheInvalidation) {
         self.widget.invalidate_cache(reason);
     }
@@ -170,13 +185,13 @@ impl Component for Thinking {
     }
 
     fn on_tick(&mut self) {
-        if let Some(rx) = &mut self.rx {
-            let Ok(widget) = rx.try_recv() else {
-                return;
-            };
+        if let Some(rx) = &mut self.rx
+            && let Ok(widget) = rx.try_recv()
+        {
             self.widget = widget;
             self.rx = None;
             global::signal_dirty();
+            trace!("replaced inner widget of Thinking Message");
         }
     }
 
