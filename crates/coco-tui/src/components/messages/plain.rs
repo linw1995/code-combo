@@ -1,3 +1,5 @@
+use std::ops::DerefMut;
+
 use coco_macro::{ComponentExt, ContentComponentExt};
 use code_combo::MarkdownRenderEngine;
 use ratatui::{Frame, prelude::Rect};
@@ -25,10 +27,10 @@ type WidgetBuild = (
 
 /// Plain text render widget.
 ///
-/// TODO: Support Markdown syntax with multiple approaches:
-/// - Use a built-in Markdown parser and renderer. (Streaming)
+/// Support Markdown syntax with multiple approaches:
+/// - Use a built-in Markdown parser and renderer. (Tree-Sitter Highlight, Streaming)
 /// - Use an external CLI tool to render Markdown
-/// - Save content to a temporary file and open with external viewer
+/// - TODO: Save content to a temporary file and open with external viewer
 #[derive(ComponentExt, ContentComponentExt)]
 #[component(type_id = "plain")]
 pub struct Plain {
@@ -132,15 +134,19 @@ impl Persistable for Plain {
 }
 
 impl Component for Plain {
+    fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
+        let children: Vec<&mut dyn Component> = vec![self.widget.deref_mut()];
+        Box::new(children.into_iter())
+    }
+
     fn on_cache_invalidation(&mut self, reason: CacheInvalidation) {
         self.widget.invalidate_cache(reason);
     }
 
     fn on_tick(&mut self) {
-        if let Some(rx) = &mut self.rx {
-            let Ok(widget) = rx.try_recv() else {
-                return;
-            };
+        if let Some(rx) = &mut self.rx
+            && let Ok(widget) = rx.try_recv()
+        {
             self.widget = widget;
             self.rx = None;
             global::signal_dirty();

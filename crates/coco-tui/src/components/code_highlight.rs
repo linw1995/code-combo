@@ -315,7 +315,6 @@ impl<'a> CodeHighlight<'a> {
         tokio::task::spawn_blocking(move || {
             let result = Self::build_widget(&source, lang, &overlays, width, base_style);
             tx.send(result).ok();
-            global::signal_dirty();
         });
         self.pending_rx = Some(rx);
         self.pending_snapshot = Some(PendingSnapshot {

@@ -556,6 +556,16 @@ impl Persistable for StrReplace<'static> {
 }
 
 impl Component for StrReplace<'static> {
+    fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
+        let chidlren: Vec<&mut dyn Component> = match &mut self.widget {
+            StrReplaceWidget::CodeHighlight(widget) => Some(widget as &mut dyn Component),
+            _ => None,
+        }
+        .into_iter()
+        .collect();
+        Box::new(chidlren.into_iter())
+    }
+
     fn on_cache_invalidation(&mut self, reason: CacheInvalidation) {
         if matches!(reason, CacheInvalidation::Theme) {
             self.theme_dirty = true;
@@ -697,6 +707,8 @@ impl Component for StrReplace<'static> {
                 self.rebuild_view();
             }
             _ => {
+                // Handle other kinds of events by default
+                // - on_tick
                 handle_component_event!(self, event);
             }
         }

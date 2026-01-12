@@ -525,6 +525,11 @@ impl Persistable for Bash<'static> {
 }
 
 impl Component for Bash<'static> {
+    fn children(&'_ mut self) -> Box<dyn Iterator<Item = &'_ mut dyn Component> + '_> {
+        let children: Vec<&mut dyn Component> = vec![&mut self.input];
+        Box::new(children.into_iter())
+    }
+
     fn on_cache_invalidation(&mut self, reason: CacheInvalidation) {
         if matches!(reason, CacheInvalidation::Theme) {
             self.theme_dirty = true;
@@ -563,7 +568,11 @@ impl Component for Bash<'static> {
                     && self.has_output_content();
                 self.set_requiring_confirmation(false);
             }
-            _ => (),
+            _ => {
+                // Handle other kinds of events by default
+                // - on_tick
+                handle_component_event!(self, event);
+            }
         }
     }
 
