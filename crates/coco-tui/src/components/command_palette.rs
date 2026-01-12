@@ -232,6 +232,8 @@ pub struct CommandPalette {
     model_entries: Vec<ModelEntry>,
     current_session_created_at: Option<OffsetDateTime>,
     current_model_override: Option<String>,
+    last_model_override: Option<String>,
+    auto_model_label: Option<String>,
 }
 
 impl Default for CommandPalette {
@@ -252,6 +254,8 @@ impl CommandPalette {
             model_entries: Vec::new(),
             current_session_created_at: None,
             current_model_override: None,
+            last_model_override: None,
+            auto_model_label: None,
         }
     }
 
@@ -259,9 +263,13 @@ impl CommandPalette {
         &mut self,
         current_session_created_at: OffsetDateTime,
         current_model_override: Option<String>,
+        last_model_override: Option<String>,
+        auto_model_label: Option<String>,
     ) {
         self.current_session_created_at = Some(current_session_created_at);
         self.current_model_override = current_model_override;
+        self.last_model_override = last_model_override;
+        self.auto_model_label = auto_model_label;
         self.open_main();
     }
 
@@ -380,7 +388,11 @@ impl CommandPalette {
             BREADCRUMB_MODELS.to_string(),
         ]);
 
-        let entries = Self::build_model_entries(self.current_model_override.as_deref());
+        let entries = Self::build_model_entries(
+            self.current_model_override.as_deref(),
+            self.last_model_override.as_deref(),
+            self.auto_model_label.as_deref(),
+        );
 
         let commands = entries
             .iter()
@@ -414,7 +426,11 @@ impl CommandPalette {
             .collect()
     }
 
-    fn build_model_entries(current_model_override: Option<&str>) -> Vec<ModelEntry> {
+    fn build_model_entries(
+        current_model_override: Option<&str>,
+        last_model_override: Option<&str>,
+        auto_model_label: Option<&str>,
+    ) -> Vec<ModelEntry> {
         let config = global::config_sync();
         let mut entries = Vec::new();
         let mut seen = HashSet::new();
@@ -443,6 +459,27 @@ impl CommandPalette {
             }
         }
 
+        let mut last_found = false;
+        for entry in entries.iter_mut() {
+            let Some(model) = entry.model.as_deref() else {
+                continue;
+            };
+            let is_current = Some(model) == current_model_override;
+            let is_last = Some(model) == last_model_override;
+            if is_last {
+                last_found = true;
+            }
+            let suffix = match (is_current, is_last) {
+                (true, true) => " (current, last)",
+                (true, false) => " (current)",
+                (false, true) => " (last)",
+                (false, false) => "",
+            };
+            if !suffix.is_empty() {
+                entry.label = format!("{}{}", entry.label, suffix);
+            }
+        }
+
         if let Some(current_model) = current_model_override
             && let Some(idx) = entries
                 .iter()
@@ -455,10 +492,31 @@ impl CommandPalette {
         entries.insert(
             0,
             ModelEntry {
-                label: "Auto (default)".to_string(),
+                label: match auto_model_label {
+                    Some(model) => format!("Auto (default: {model})"),
+                    None => "Auto (default)".to_string(),
+                },
                 model: None,
             },
         );
+
+        if let Some(last_model) = last_model_override
+            && !last_found
+        {
+            let is_current = Some(last_model) == current_model_override;
+            let suffix = if is_current {
+                " (current, last)"
+            } else {
+                " (last)"
+            };
+            entries.insert(
+                1,
+                ModelEntry {
+                    label: format!("{last_model}{suffix}"),
+                    model: Some(last_model.to_string()),
+                },
+            );
+        }
 
         entries
     }
@@ -578,6 +636,8 @@ impl Persistable for CommandPalette {
             model_entries: Vec::new(),
             current_session_created_at: None,
             current_model_override: None,
+            last_model_override: None,
+            auto_model_label: None,
         })
     }
 }

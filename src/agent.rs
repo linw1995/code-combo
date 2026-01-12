@@ -749,6 +749,17 @@ impl Agent {
         }
     }
 
+    pub fn resolved_default_model(&self) -> String {
+        let default_model = self.default_model().map(|s| s.to_string());
+        match Self::select_provider_index(default_model.as_deref(), &self.config.providers) {
+            Ok(idx) => {
+                let provider = &self.config.providers[idx];
+                Self::resolve_model(provider, default_model)
+            }
+            Err(_) => default_model.unwrap_or_else(|| "unknown".to_string()),
+        }
+    }
+
     fn selected_model(&self) -> Option<String> {
         self.model_override
             .clone()

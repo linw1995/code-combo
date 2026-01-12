@@ -3,8 +3,9 @@ use coco_macro::ComponentExt;
 use code_combo::tools::Final;
 use code_combo::{
     Agent, Block as ChatBlock, ChatResponse, ChatStreamUpdate, Config, Content as ChatContent,
-    Message as ChatMessage, Output, SessionEnv, Starter, StarterCommand, StarterError,
-    StarterEvent, StopReason, TextEdit, ToolUse, discover_starters,
+    Message as ChatMessage, Output, RuntimeOverrides, SessionEnv, Starter, StarterCommand,
+    StarterError, StarterEvent, StopReason, TextEdit, ToolUse, discover_starters,
+    load_runtime_overrides, save_runtime_overrides,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use futures::StreamExt;
@@ -237,6 +238,21 @@ impl Chat<'static> {
         self.agent
             .setup_system_prompt_async(config_dir, workspace_dir)
             .await;
+    }
+
+    pub fn apply_runtime_overrides(&mut self, overrides: RuntimeOverrides) {
+        if let Some(auto_accept_edits) = overrides.auto_accept_edits {
+            self.state.write_untracked().auto_accept_edits = auto_accept_edits;
+            self.agent.set_auto_accept_edits(auto_accept_edits);
+        }
+        if let Some(thinking_enabled) = overrides.thinking_enabled {
+            self.state.write_untracked().thinking_enabled = thinking_enabled;
+            self.agent.set_thinking_enabled(thinking_enabled);
+        }
+
+        let model_override = overrides.model_override;
+        self.state.write_untracked().model_override = model_override.clone();
+        self.agent.set_model_override(model_override);
     }
 
     fn restore_session_by_metadata(&self, metadata: session::PersistentSessionMetadata) {
@@ -538,6 +554,7 @@ impl Chat<'static> {
             state.auto_accept_edits
         };
         self.agent.set_auto_accept_edits(enabled);
+        self.persist_runtime_overrides();
         global::trigger_schedule_session_save();
     }
 
@@ -548,6 +565,7 @@ impl Chat<'static> {
             state.thinking_enabled
         };
         self.agent.set_thinking_enabled(enabled);
+        self.persist_runtime_overrides();
         global::trigger_schedule_session_save();
     }
 
@@ -876,9 +894,24 @@ impl Chat<'static> {
     }
 
     fn switch_model(&mut self, model_override: Option<&String>) {
-        self.state.write().model_override = model_override.cloned();
-        self.agent.set_model_override(model_override.cloned());
+        let model_override = model_override.cloned();
+        self.state.write().model_override = model_override.clone();
+        self.agent.set_model_override(model_override);
+        self.persist_runtime_overrides();
         global::trigger_schedule_session_save();
+    }
+
+    fn persist_runtime_overrides(&self) {
+        let config = global::config_sync();
+        let state = self.state.read();
+        let overrides = RuntimeOverrides {
+            model_override: state.model_override.clone(),
+            thinking_enabled: Some(state.thinking_enabled),
+            auto_accept_edits: Some(state.auto_accept_edits),
+        };
+        if let Err(err) = save_runtime_overrides(&config.config_dir, &overrides) {
+            warn!(?err, "failed to persist runtime overrides");
+        }
     }
 }
 
@@ -1111,8 +1144,21 @@ impl Component for Chat<'static> {
             (Input, KM::NONE, Esc) => self.update_focus(InputBlur),
             (InputBlur, KM::NONE, Enter) => self.update_focus(Input),
             (InputBlur, KM::CONTROL, Char('p')) => {
-                self.command_palette
-                    .open(self.state.created_at, self.state.model_override.clone());
+                let config_dir = global::config_sync().config_dir;
+                let last_model_override = match load_runtime_overrides(&config_dir) {
+                    Ok(overrides) => overrides.model_override,
+                    Err(err) => {
+                        warn!(?err, "failed to load runtime overrides");
+                        None
+                    }
+                };
+                let auto_model_label = Some(self.agent.resolved_default_model());
+                self.command_palette.open(
+                    self.state.created_at,
+                    self.state.model_override.clone(),
+                    last_model_override,
+                    auto_model_label,
+                );
                 self.update_focus(CommandPalette);
             }
             (Messages, KM::NONE, Esc) if !self.messages.is_actionable() => {

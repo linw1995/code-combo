@@ -2,8 +2,9 @@ use std::path::{Path, PathBuf};
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use code_combo::{
+    RuntimeOverrides,
     cli::{ClientCommand, handle_client_command, init_client_logging},
-    default_config_dir, load_config_with_overrides, workspace_config_path,
+    default_config_dir, load_config_with_overrides, load_runtime_overrides, workspace_config_path,
 };
 use snafu::prelude::*;
 
@@ -14,7 +15,7 @@ use coco_tui::{
     error::Result,
     global, version,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 /// Code Combo
 #[derive(Parser)]
@@ -170,6 +171,14 @@ async fn main() -> Result<()> {
     global::set_config(config.clone()).await;
 
     let mut root_view = Chat::new(config);
+    let overrides = match load_runtime_overrides(&config_dir) {
+        Ok(overrides) => overrides,
+        Err(err) => {
+            warn!(?err, "failed to load runtime overrides");
+            RuntimeOverrides::default()
+        }
+    };
+    root_view.apply_runtime_overrides(overrides);
     root_view.setup().await;
     let mut app = app::App::new(Box::new(root_view))?;
     if let Some(prompt) = startup_prompt {
