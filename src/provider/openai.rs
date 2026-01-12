@@ -37,9 +37,9 @@ pub async fn messages(
     conversations: Vec<Message>,
     tools: Vec<Tool>,
     tool_choice: Option<ToolChoice>,
-    _thinking: Option<Thinking>,
+    thinking: Option<Thinking>,
 ) -> Result<MessagesResponse, Whatever> {
-    let request = build_request(system_prompt, conversations, tools, tool_choice)?;
+    let request = build_request(system_prompt, conversations, tools, tool_choice, thinking)?;
     let response = client.chat_completions(request).await?;
     Ok(response_into_messages(response))
 }
@@ -50,9 +50,9 @@ pub async fn messages_stream(
     conversations: Vec<Message>,
     tools: Vec<Tool>,
     tool_choice: Option<ToolChoice>,
-    _thinking: Option<Thinking>,
+    thinking: Option<Thinking>,
 ) -> Result<OpenAIStream, Whatever> {
-    let request = build_request(system_prompt, conversations, tools, tool_choice)?;
+    let request = build_request(system_prompt, conversations, tools, tool_choice, thinking)?;
     let stream = client.chat_completions_stream(request).await?;
     Ok(OpenAIStream::new(stream))
 }
@@ -62,6 +62,7 @@ fn build_request(
     conversations: Vec<Message>,
     tools: Vec<Tool>,
     tool_choice: Option<ToolChoice>,
+    thinking: Option<Thinking>,
 ) -> Result<openai_api::ChatCompletionRequest, Whatever> {
     let mut messages = Vec::new();
     if let Some(system_prompt) = system_prompt
@@ -70,6 +71,7 @@ fn build_request(
         messages.push(openai_api::ChatMessage {
             role: openai_api::Role::System,
             content: Some(system_prompt.to_string()),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -88,6 +90,12 @@ fn build_request(
         })
         .collect();
     let tool_choice = tool_choice.map(convert_tool_choice);
+    let (reasoning_effort, max_completion_tokens) = match thinking {
+        Some(Thinking::Enabled { budget_tokens }) => {
+            (Some(openai_api::ReasoningEffort::High), Some(budget_tokens))
+        }
+        None => (None, None),
+    };
     Ok(openai_api::ChatCompletionRequest {
         model: String::new(),
         messages,
@@ -95,6 +103,8 @@ fn build_request(
         tool_choice,
         stream: None,
         stream_options: None,
+        reasoning_effort,
+        max_completion_tokens,
     })
 }
 
@@ -137,6 +147,7 @@ fn convert_user_message(
                 output.push(openai_api::ChatMessage {
                     role: openai_api::Role::User,
                     content: Some(value),
+                    reasoning_content: None,
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
@@ -163,6 +174,7 @@ fn convert_user_message(
         output.push(openai_api::ChatMessage {
             role: openai_api::Role::User,
             content: Some(text),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -173,6 +185,7 @@ fn convert_user_message(
         output.push(openai_api::ChatMessage {
             role: openai_api::Role::Tool,
             content: Some(content),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some(tool_use_id),
             name: None,
@@ -193,6 +206,7 @@ fn convert_assistant_message(
                 output.push(openai_api::ChatMessage {
                     role: openai_api::Role::Assistant,
                     content: Some(value),
+                    reasoning_content: None,
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
@@ -226,6 +240,7 @@ fn convert_assistant_message(
         output.push(openai_api::ChatMessage {
             role: openai_api::Role::Assistant,
             content: if text.is_empty() { None } else { Some(text) },
+            reasoning_content: None,
             tool_calls: if tool_calls.is_empty() {
                 None
             } else {
@@ -258,6 +273,14 @@ fn response_into_messages(response: openai_api::ChatCompletionResponse) -> Messa
     let stop_sequence = None;
     if let Some(choice) = response.choices.into_iter().next() {
         stop_reason = choice.finish_reason.and_then(map_finish_reason);
+        if let Some(reasoning_content) = choice.message.reasoning_content
+            && !reasoning_content.is_empty()
+        {
+            content_blocks.push(Block::Thinking {
+                thinking: reasoning_content,
+                signature: None,
+            });
+        }
         if let Some(content) = choice.message.content
             && !content.is_empty()
         {
@@ -298,6 +321,8 @@ fn map_finish_reason(reason: String) -> Option<StopReason> {
 pub struct OpenAIStream {
     inner: openai_api::ChatCompletionStream,
     pending: VecDeque<MessagesStreamEvent>,
+    thinking_started: bool,
+    thinking_closed: bool,
     text_started: bool,
     text_closed: bool,
     tool_started: HashMap<usize, ToolCallState>,
@@ -318,6 +343,8 @@ impl OpenAIStream {
         Self {
             inner,
             pending,
+            thinking_started: false,
+            thinking_closed: false,
             text_started: false,
             text_closed: false,
             tool_started: HashMap::new(),
@@ -343,9 +370,19 @@ impl OpenAIStream {
         self.push_event(MessagesStreamEvent::MessageStop);
     }
 
-    fn close_all_blocks(&mut self) {
-        if self.text_started && !self.text_closed {
+    fn close_thinking_block(&mut self) {
+        if self.thinking_started && !self.thinking_closed {
             self.push_event(MessagesStreamEvent::ContentBlockStop { index: 0 });
+            self.thinking_closed = true;
+        }
+    }
+
+    fn close_all_blocks(&mut self) {
+        self.close_thinking_block();
+        if self.text_started && !self.text_closed {
+            self.push_event(MessagesStreamEvent::ContentBlockStop {
+                index: if self.thinking_started { 1 } else { 0 },
+            });
             self.text_closed = true;
         }
         for index in self.tool_started.keys().cloned().collect::<Vec<_>>() {
@@ -375,20 +412,42 @@ impl Stream for OpenAIStream {
                 Poll::Ready(Some(Ok(chunk))) => {
                     if let Some(choice) = chunk.choices.into_iter().next() {
                         let delta = choice.delta;
+                        if let Some(reasoning_content) = delta.reasoning_content
+                            && !reasoning_content.is_empty()
+                        {
+                            if !this.thinking_started {
+                                this.thinking_started = true;
+                                this.push_event(MessagesStreamEvent::ContentBlockStart {
+                                    index: 0,
+                                    content_block: Block::Thinking {
+                                        thinking: String::new(),
+                                        signature: None,
+                                    },
+                                });
+                            }
+                            this.push_event(MessagesStreamEvent::ContentBlockDelta {
+                                index: 0,
+                                delta: ContentBlockDelta::ThinkingDelta {
+                                    thinking: reasoning_content,
+                                },
+                            });
+                        }
                         if let Some(content) = delta.content
                             && !content.is_empty()
                         {
+                            this.close_thinking_block();
+                            let text_index = if this.thinking_started { 1 } else { 0 };
                             if !this.text_started {
                                 this.text_started = true;
                                 this.push_event(MessagesStreamEvent::ContentBlockStart {
-                                    index: 0,
+                                    index: text_index,
                                     content_block: Block::Text {
                                         text: String::new(),
                                     },
                                 });
                             }
                             this.push_event(MessagesStreamEvent::ContentBlockDelta {
-                                index: 0,
+                                index: text_index,
                                 delta: ContentBlockDelta::TextDelta { text: content },
                             });
                         }
