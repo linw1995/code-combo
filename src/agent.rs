@@ -49,6 +49,7 @@ pub struct Agent {
     thinking_enabled: bool,
     thinking_budget_tokens: usize,
     thinking_cleanup_pending: bool,
+    model_override: Option<String>,
 
     /// Full agent configuration loaded at initialization
     agent_config: AgentConfig,
@@ -300,6 +301,7 @@ impl Agent {
             thinking_enabled: false,
             thinking_budget_tokens,
             thinking_cleanup_pending: false,
+            model_override: None,
             agent_config,
         }
     }
@@ -348,6 +350,14 @@ impl Agent {
 
     pub fn default_model(&self) -> Option<&str> {
         self.agent_config.default_model.as_deref()
+    }
+
+    pub fn model_override(&self) -> Option<&str> {
+        self.model_override.as_deref()
+    }
+
+    pub fn set_model_override(&mut self, model: Option<String>) {
+        self.model_override = model;
     }
 
     pub async fn dump_messages(&self) -> Vec<Message> {
@@ -728,6 +738,23 @@ impl Agent {
         self.thinking_enabled
     }
 
+    pub fn current_model(&self) -> String {
+        let selected_model = self.selected_model();
+        match Self::select_provider_index(selected_model.as_deref(), &self.config.providers) {
+            Ok(idx) => {
+                let provider = &self.config.providers[idx];
+                Self::resolve_model(provider, selected_model)
+            }
+            Err(_) => selected_model.unwrap_or_else(|| "unknown".to_string()),
+        }
+    }
+
+    fn selected_model(&self) -> Option<String> {
+        self.model_override
+            .clone()
+            .or_else(|| self.default_model().map(|s| s.to_string()))
+    }
+
     pub async fn execute<'a>(
         &mut self,
         id: &str,
@@ -824,78 +851,68 @@ impl Agent {
         }
     }
 
-    /// Select the appropriate provider for the given model.
+    /// Select the appropriate provider index for the given model.
     ///
     /// Selection algorithm:
     /// 1. If no model is specified, returns the first provider
     /// 2. If a model is specified, returns the first provider that:
-    ///    - Has no models field (wildcard), OR
+    ///    - Matches provider name, OR
     ///    - Has the requested model in its models list
-    /// 3. If no matching provider, returns an error
-    fn select_provider<'a>(
+    /// 3. If no exact match, returns the first wildcard provider
+    /// 4. If no matching provider, returns an error
+    fn select_provider_index(
         agent_model: Option<&str>,
-        providers: &'a mut [ProviderConfig],
-    ) -> Result<&'a mut ProviderConfig> {
+        providers: &[ProviderConfig],
+    ) -> Result<usize> {
         if providers.is_empty() {
             whatever!("No providers configured")
         }
 
         // If no model specified, use first provider
         let Some(model) = agent_model else {
-            return Ok(&mut providers[0]);
+            return Ok(0);
         };
 
-        // Find provider index that supports this model
-        let mut provider_index = None;
-        for (idx, provider) in providers.iter().enumerate() {
-            // Wildcard provider (no models specified or empty list)
-            if provider.models.is_none() || provider.models.as_ref().is_some_and(|m| m.is_empty()) {
-                provider_index = Some(idx);
-                break;
-            }
-
-            // Exact match
-            if let Some(models) = &provider.models
-                && models.contains(&model.to_string())
-            {
-                provider_index = Some(idx);
-                break;
-            }
+        // Exact match by provider name or declared models
+        if let Some((idx, _)) = providers.iter().enumerate().find(|(_, provider)| {
+            provider.name == model
+                || provider
+                    .models
+                    .as_ref()
+                    .is_some_and(|models| models.iter().any(|candidate| candidate == model))
+        }) {
+            return Ok(idx);
         }
 
-        // Return provider or error
-        match provider_index {
-            Some(idx) => Ok(&mut providers[idx]),
-            None => {
-                let available: Vec<_> = providers
-                    .iter()
-                    .map(|p| (p.name.clone(), p.models.clone()))
-                    .collect();
-                whatever!(
-                    "No provider supports model '{}'. Available providers: {:?}",
-                    model,
-                    available
-                )
-            }
+        // Wildcard provider (no models specified or empty list)
+        if let Some((idx, _)) = providers.iter().enumerate().find(|(_, provider)| {
+            provider.models.is_none() || provider.models.as_ref().is_some_and(|m| m.is_empty())
+        }) {
+            return Ok(idx);
         }
+
+        let available: Vec<_> = providers
+            .iter()
+            .map(|p| (p.name.clone(), p.models.clone()))
+            .collect();
+        whatever!(
+            "No provider supports model '{}'. Available providers: {:?}",
+            model,
+            available
+        )
     }
 
     fn pick_provider(&mut self) -> Result<(&str, Client)> {
-        // Get default_model first to avoid borrow checker issues
-        let default_model = self.default_model().map(|s| s.to_string());
+        let selected_model = self.selected_model();
 
-        let provider = Self::select_provider(default_model.as_deref(), &mut self.config.providers)?;
+        let provider_idx =
+            Self::select_provider_index(selected_model.as_deref(), &self.config.providers)?;
+        let provider = &mut self.config.providers[provider_idx];
 
-        // Use agent's default_model if configured,
+        // Use model override or agent's default_model if configured,
         // otherwise fallback to first provider.models,
         // otherwise fallback to provider.name
-        let model = default_model.unwrap_or_else(|| {
-            provider
-                .models
-                .to_owned()
-                .and_then(|models| models.first().cloned())
-                .unwrap_or(provider.name.to_owned())
-        });
+        let model = Self::resolve_model(provider, selected_model);
 
         let builder = Client::builder()
             .base_url(&provider.base_url)
@@ -904,6 +921,16 @@ impl Agent {
             .user_agent(crate::version::user_agent().to_string());
         let client = builder.build().expect("Failed to initialize client");
         Ok((&provider.name, client))
+    }
+
+    fn resolve_model(provider: &ProviderConfig, selected_model: Option<String>) -> String {
+        selected_model.unwrap_or_else(|| {
+            provider
+                .models
+                .as_ref()
+                .and_then(|models| models.first().cloned())
+                .unwrap_or_else(|| provider.name.to_owned())
+        })
     }
 }
 
