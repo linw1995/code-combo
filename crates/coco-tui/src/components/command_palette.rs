@@ -647,44 +647,34 @@ impl Component for CommandPalette {
         use KeyCode::*;
         use KeyModifiers as KM;
 
-        let action = match (key.modifiers, key.code) {
-            (KM::CONTROL, Char('n' | 'N')) => Some(CommandPaletteAction::NewSession),
-            (KM::CONTROL, Char('t' | 'T')) => Some(CommandPaletteAction::Transcript),
-            (KM::CONTROL, Char('s' | 'S')) => {
-                if self.mode == CommandPaletteMode::Main {
-                    self.open_session_switcher();
-                }
+        use CommandPaletteMode::Main;
+
+        let action = match (&self.mode, key.modifiers, key.code) {
+            (Main, KM::CONTROL, Char('n' | 'N')) => Some(CommandPaletteAction::NewSession),
+            (Main, KM::CONTROL, Char('t' | 'T')) => Some(CommandPaletteAction::Transcript),
+            (Main, KM::CONTROL, Char('s' | 'S')) => {
+                self.open_session_switcher();
                 None
             }
-            (KM::CONTROL, Char('l' | 'L')) => {
-                if self.mode == CommandPaletteMode::Main {
-                    self.open_theme_switcher();
-                }
+            (Main, KM::CONTROL, Char('l' | 'L')) => {
+                self.open_theme_switcher();
                 None
             }
-            (KM::CONTROL, Char('o' | 'O')) => {
-                if self.mode == CommandPaletteMode::Main {
-                    self.open_model_switcher();
-                }
+            (Main, KM::CONTROL, Char('o' | 'O')) => {
+                self.open_model_switcher();
                 None
             }
-            (KM::CONTROL, Char('x' | 'X')) => {
-                if self.mode == CommandPaletteMode::Main {
-                    Some(CommandPaletteAction::Shell)
-                } else {
-                    None
-                }
-            }
-            (KM::NONE, Char('k')) => {
+            (Main, KM::CONTROL, Char('x' | 'X')) => Some(CommandPaletteAction::Shell),
+            (_, KM::NONE, Char('k')) => {
                 self.command_list.select_prev();
                 None
             }
-            (KM::NONE, Char('j')) => {
+            (_, KM::NONE, Char('j')) => {
                 self.command_list.select_next();
                 None
             }
-            (KM::NONE, Enter) => self.on_enter(),
-            (KM::NONE, Esc) => unreachable!("Esc key should be handled by the parent component"),
+            (_, KM::NONE, Enter) => self.on_enter(),
+            (_, KM::NONE, Esc) => unreachable!("Esc key should be handled by the parent component"),
             _ => None,
         };
 
