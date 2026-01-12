@@ -14,6 +14,7 @@ pub enum Event {
     Tick,
     Dirty,
     Render,
+    FullRefresh,
 }
 
 #[derive(Debug, Clone)]

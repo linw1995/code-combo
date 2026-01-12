@@ -45,6 +45,7 @@ pub struct App {
     // Config
     frame_rate: f64,
     tick_rate: f64,
+    full_refresh_rate: f64,
 }
 
 impl App {
@@ -69,6 +70,7 @@ impl App {
             root,
             frame_rate: 60.0,
             tick_rate: 4.0,
+            full_refresh_rate: 1.0 / 30.0, // every 30 seconds
         })
     }
 
@@ -98,6 +100,7 @@ impl App {
             self.cancellation_token.clone(),
             self.frame_rate,
             self.tick_rate,
+            self.full_refresh_rate,
         );
         self.send_event(Event::Init);
         self.task = tokio::spawn(async {
@@ -164,10 +167,12 @@ impl App {
         cancellation_token: CancellationToken,
         frame_rate: f64,
         tick_rate: f64,
+        full_refresh_rate: f64,
     ) {
         let mut event_stream = EventStream::new();
         let mut tick_interval = interval(Duration::from_secs_f64(1.0 / tick_rate));
         let mut render_interval = interval(Duration::from_secs_f64(1.0 / frame_rate));
+        let mut full_refresh_interval = interval(Duration::from_secs_f64(1.0 / full_refresh_rate));
 
         loop {
             let event = tokio::select! {
@@ -176,6 +181,7 @@ impl App {
                 },
                 _ = tick_interval.tick() => Event::Tick,
                 _ = render_interval.tick() => Event::Render,
+                _ = full_refresh_interval.tick() => Event::FullRefresh,
                 crossterm_event = event_stream.next().fuse() => match crossterm_event {
                     Some(Ok(event)) => match event {
                         CrosstermEvent::Key(key) => Event::Key(key),
@@ -207,6 +213,13 @@ impl App {
                     }
                 }
                 Event::Dirty => self.dirty = true,
+                Event::FullRefresh => {
+                    trace!("full refresh triggered");
+                    self.terminal
+                        .clear()
+                        .whatever_context("failed to clear terminal for full refresh")?;
+                    self.send_action(Action::Render);
+                }
                 _ => {
                     if !matches!(event, Event::Tick) {
                         tracing::trace!(?event, "handling component event");
