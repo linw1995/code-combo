@@ -1,4 +1,4 @@
-use std::iter;
+use std::{collections::HashSet, iter};
 
 use coco_macro::ComponentExt;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -28,11 +28,13 @@ const COMMAND_NEW_SESSION: &str = "New Session";
 const COMMAND_TRANSCRIPT: &str = "Transcript";
 const COMMAND_SWITCH_SESSION: &str = "Switch Session";
 const COMMAND_SWITCH_THEME: &str = "Switch Theme";
+const COMMAND_SWITCH_MODEL: &str = "Switch Model";
 const COMMAND_SHELL: &str = "Shell";
 
 const BREADCRUMB_ROOT: &str = "Command Palette";
 const BREADCRUMB_SESSIONS: &str = "Sessions";
 const BREADCRUMB_THEMES: &str = "Themes";
+const BREADCRUMB_MODELS: &str = "Models";
 
 const SESSION_SWITCH_LIMIT: usize = 20;
 
@@ -47,6 +49,7 @@ enum CommandPaletteMode {
     Main,
     SwitchSession,
     SwitchTheme,
+    SwitchModel,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -208,6 +211,12 @@ struct SessionSwitchEntry {
     metadata: session::PersistentSessionMetadata,
 }
 
+#[derive(Clone, Debug)]
+struct ModelEntry {
+    label: String,
+    model: Option<String>,
+}
+
 /// Command Palette is a popup floating window that allows users to quickly execute commands.
 ///
 /// This component provides a floating interface that can be triggered to access various
@@ -220,7 +229,9 @@ pub struct CommandPalette {
     breadcrumb: Breadcrumb,
     mode: CommandPaletteMode,
     session_switch_entries: Vec<SessionSwitchEntry>,
+    model_entries: Vec<ModelEntry>,
     current_session_created_at: Option<OffsetDateTime>,
+    current_model_override: Option<String>,
 }
 
 impl Default for CommandPalette {
@@ -238,12 +249,19 @@ impl CommandPalette {
             breadcrumb,
             mode: CommandPaletteMode::Main,
             session_switch_entries: Vec::new(),
+            model_entries: Vec::new(),
             current_session_created_at: None,
+            current_model_override: None,
         }
     }
 
-    pub fn open(&mut self, current_session_created_at: OffsetDateTime) {
+    pub fn open(
+        &mut self,
+        current_session_created_at: OffsetDateTime,
+        current_model_override: Option<String>,
+    ) {
         self.current_session_created_at = Some(current_session_created_at);
+        self.current_model_override = current_model_override;
         self.open_main();
     }
 
@@ -254,6 +272,10 @@ impl CommandPalette {
                 true
             }
             CommandPaletteMode::SwitchTheme => {
+                self.open_main();
+                true
+            }
+            CommandPaletteMode::SwitchModel => {
                 self.open_main();
                 true
             }
@@ -280,6 +302,10 @@ impl CommandPalette {
                 shortcut: Some("<C-l>".to_string()),
             },
             Command {
+                name: COMMAND_SWITCH_MODEL.to_string(),
+                shortcut: Some("<C-o>".to_string()),
+            },
+            Command {
                 name: COMMAND_SHELL.to_string(),
                 shortcut: Some("<C-x>".to_string()),
             },
@@ -289,6 +315,7 @@ impl CommandPalette {
     fn open_main(&mut self) {
         self.mode = CommandPaletteMode::Main;
         self.session_switch_entries.clear();
+        self.model_entries.clear();
         self.command_list.set_commands(Self::main_commands());
         self.breadcrumb.set_items(vec![BREADCRUMB_ROOT.to_string()]);
     }
@@ -346,6 +373,27 @@ impl CommandPalette {
         self.command_list.set_commands(commands);
     }
 
+    fn open_model_switcher(&mut self) {
+        self.mode = CommandPaletteMode::SwitchModel;
+        self.breadcrumb.set_items(vec![
+            BREADCRUMB_ROOT.to_string(),
+            BREADCRUMB_MODELS.to_string(),
+        ]);
+
+        let entries = Self::build_model_entries(self.current_model_override.as_deref());
+
+        let commands = entries
+            .iter()
+            .map(|entry| Command {
+                name: entry.label.clone(),
+                shortcut: None,
+            })
+            .collect();
+
+        self.model_entries = entries;
+        self.command_list.set_commands(commands);
+    }
+
     fn build_session_switch_entries(
         &self,
         current_session_created_at: Option<OffsetDateTime>,
@@ -364,6 +412,55 @@ impl CommandPalette {
                 SessionSwitchEntry { label, metadata }
             })
             .collect()
+    }
+
+    fn build_model_entries(current_model_override: Option<&str>) -> Vec<ModelEntry> {
+        let config = global::config_sync();
+        let mut entries = Vec::new();
+        let mut seen = HashSet::new();
+
+        for provider in &config.providers {
+            let models = match provider.models.as_ref() {
+                Some(models) if !models.is_empty() => models.as_slice(),
+                _ => {
+                    if seen.insert(provider.name.clone()) {
+                        entries.push(ModelEntry {
+                            label: format!("{} (provider)", provider.name),
+                            model: Some(provider.name.clone()),
+                        });
+                    }
+                    continue;
+                }
+            };
+
+            for model in models {
+                if seen.insert(model.clone()) {
+                    entries.push(ModelEntry {
+                        label: model.clone(),
+                        model: Some(model.clone()),
+                    });
+                }
+            }
+        }
+
+        if let Some(current_model) = current_model_override
+            && let Some(idx) = entries
+                .iter()
+                .position(|entry| entry.model.as_deref() == Some(current_model))
+        {
+            let entry = entries.remove(idx);
+            entries.insert(0, entry);
+        }
+
+        entries.insert(
+            0,
+            ModelEntry {
+                label: "Auto (default)".to_string(),
+                model: None,
+            },
+        );
+
+        entries
     }
 
     fn list_session_metadata(&self) -> Vec<session::PersistentSessionMetadata> {
@@ -405,6 +502,10 @@ impl CommandPalette {
                         self.open_theme_switcher();
                         None
                     }
+                    Some(COMMAND_SWITCH_MODEL) => {
+                        self.open_model_switcher();
+                        None
+                    }
                     Some(COMMAND_NEW_SESSION) => Some(CommandPaletteAction::NewSession),
                     Some(COMMAND_TRANSCRIPT) => Some(CommandPaletteAction::Transcript),
                     Some(COMMAND_SHELL) => Some(CommandPaletteAction::Shell),
@@ -444,6 +545,18 @@ impl CommandPalette {
                     None
                 }
             }
+            CommandPaletteMode::SwitchModel => {
+                let entry = self
+                    .command_list
+                    .selected_index()
+                    .and_then(|idx| self.model_entries.get(idx))
+                    .cloned();
+
+                entry.map(|entry| {
+                    self.open_main();
+                    CommandPaletteAction::SwitchModel(entry.model)
+                })
+            }
         }
     }
 }
@@ -462,7 +575,9 @@ impl Persistable for CommandPalette {
             breadcrumb,
             mode: CommandPaletteMode::Main,
             session_switch_entries: Vec::new(),
+            model_entries: Vec::new(),
             current_session_created_at: None,
+            current_model_override: None,
         })
     }
 }
@@ -484,6 +599,12 @@ impl Component for CommandPalette {
             (KM::CONTROL, Char('l' | 'L')) => {
                 if self.mode == CommandPaletteMode::Main {
                     self.open_theme_switcher();
+                }
+                None
+            }
+            (KM::CONTROL, Char('o' | 'O')) => {
+                if self.mode == CommandPaletteMode::Main {
+                    self.open_model_switcher();
                 }
                 None
             }

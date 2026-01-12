@@ -79,6 +79,7 @@ pub enum CommandPaletteAction {
     Transcript,
     RestoreSession(PersistentSessionMetadata),
     SwitchTheme(String),
+    SwitchModel(Option<String>),
     Shell,
 }
 

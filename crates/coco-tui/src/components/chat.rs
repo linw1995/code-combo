@@ -75,6 +75,8 @@ struct Inner {
     auto_accept_edits: bool,
     #[serde(default)]
     thinking_enabled: bool,
+    #[serde(default)]
+    model_override: Option<String>,
     pending_chats: Vec<ChatBlock>,
     #[serde(with = "time::serde::rfc3339")]
     created_at: time::OffsetDateTime,
@@ -98,6 +100,7 @@ impl Default for Inner {
             focus: Focus::Input,
             auto_accept_edits: false,
             thinking_enabled: false,
+            model_override: None,
             pending_chats: Vec::new(),
             created_at: now,
             updated_at: now,
@@ -644,6 +647,7 @@ impl Chat<'static> {
         block = block
             .title_bottom(Line::from(""))
             .title_bottom(self.widget_state_indicator())
+            .title_bottom(self.model_indicator())
             .title_bottom(self.auto_accept_indicator())
             .title_bottom(self.thinking_indicator());
         if let Some(line) = self.ctrl_c_reminder_line() {
@@ -704,6 +708,16 @@ impl Chat<'static> {
                 Span::styled(format!(" {state} "), theme.ui.status_processing),
             ]),
         }
+    }
+
+    fn model_indicator(&self) -> Line<'static> {
+        let theme = global::theme();
+        let model = self.agent.current_model();
+        Line::from(vec![
+            Span::styled(" model: ", theme.ui.shortcut_desc),
+            Span::styled(model, theme.ui.shortcut),
+            Span::raw(" "),
+        ])
     }
 
     fn auto_accept_indicator(&self) -> Line<'static> {
@@ -823,11 +837,19 @@ impl Chat<'static> {
 
         self.set_combo_thinking_active(false);
 
+        let auto_accept_edits = self.agent.auto_accept_edits();
+        let thinking_enabled = self.agent.thinking_enabled();
+        let model_override = self.agent.model_override().map(|model| model.to_string());
+
         // 2. Clear messages
         self.messages.clear();
 
         // 3. Reset state
-        *self.state.write() = Inner::default();
+        let mut state = self.state.write();
+        *state = Inner::default();
+        state.auto_accept_edits = auto_accept_edits;
+        state.thinking_enabled = thinking_enabled;
+        state.model_override = model_override;
         self.cancellation_guard.reset();
 
         // 4. Cancel any pending save timer
@@ -852,6 +874,12 @@ impl Chat<'static> {
 
         global::signal_dirty();
     }
+
+    fn switch_model(&mut self, model_override: Option<&String>) {
+        self.state.write().model_override = model_override.cloned();
+        self.agent.set_model_override(model_override.cloned());
+        global::trigger_schedule_session_save();
+    }
 }
 
 impl Persistable for Chat<'static> {
@@ -865,6 +893,7 @@ impl Persistable for Chat<'static> {
         let mut inst = Self::new(global::config_sync());
         let auto_accept_edits = state.auto_accept_edits;
         let thinking_enabled = state.thinking_enabled;
+        let model_override = state.model_override.clone();
 
         if state.focus == Focus::ShortcutHints {
             state.focus = Focus::InputBlur;
@@ -883,6 +912,7 @@ impl Persistable for Chat<'static> {
 
         inst.agent.set_auto_accept_edits(auto_accept_edits);
         inst.agent.set_thinking_enabled(thinking_enabled);
+        inst.agent.set_model_override(model_override);
 
         inst.state = State::new(state);
         inst.messages = Messages::load(session)?;
@@ -1081,7 +1111,8 @@ impl Component for Chat<'static> {
             (Input, KM::NONE, Esc) => self.update_focus(InputBlur),
             (InputBlur, KM::NONE, Enter) => self.update_focus(Input),
             (InputBlur, KM::CONTROL, Char('p')) => {
-                self.command_palette.open(self.state.created_at);
+                self.command_palette
+                    .open(self.state.created_at, self.state.model_override.clone());
                 self.update_focus(CommandPalette);
             }
             (Messages, KM::NONE, Esc) if !self.messages.is_actionable() => {
@@ -1266,6 +1297,10 @@ impl Component for Chat<'static> {
                 CommandPaletteAction::SwitchTheme(theme) => {
                     self.update_focus(Focus::InputBlur);
                     self.switch_theme(theme.to_owned());
+                }
+                CommandPaletteAction::SwitchModel(model_override) => {
+                    self.update_focus(Focus::InputBlur);
+                    self.switch_model(model_override.as_ref());
                 }
                 CommandPaletteAction::Shell => {
                     self.update_focus(Focus::InputBlur);
