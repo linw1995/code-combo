@@ -658,6 +658,7 @@ impl<'a> GuideMarker<'a> {
 #[cfg(test)]
 mod tests {
     use ratatui::{Terminal, backend::TestBackend, prelude::Buffer};
+    use tokio::time::{Duration, sleep};
 
     use super::*;
 
@@ -683,8 +684,20 @@ mod tests {
             .draw(|frame| widget.draw(frame, frame.area()).unwrap())
             .unwrap();
 
-        let buffer = terminal.backend().buffer();
-        let guide_line = buffer_line(buffer, 1, width);
+        let mut guide_line = String::new();
+        for _ in 0..50 {
+            widget.on_tick();
+            terminal
+                .draw(|frame| widget.draw(frame, frame.area()).unwrap())
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            guide_line = buffer_line(buffer, 1, width);
+            if guide_line.contains("┗━ line break") {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+
         assert!(
             guide_line.contains("┗━ line break"),
             "unexpected guide line: {guide_line:?}"
