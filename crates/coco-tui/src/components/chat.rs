@@ -241,6 +241,10 @@ impl Chat<'static> {
     }
 
     pub fn apply_runtime_overrides(&mut self, overrides: RuntimeOverrides) {
+        if let Some(auto_accept_edits) = overrides.auto_accept_edits {
+            self.state.write_untracked().auto_accept_edits = auto_accept_edits;
+            self.agent.set_auto_accept_edits(auto_accept_edits);
+        }
         if let Some(thinking_enabled) = overrides.thinking_enabled {
             self.state.write_untracked().thinking_enabled = thinking_enabled;
             self.agent.set_thinking_enabled(thinking_enabled);
@@ -550,6 +554,7 @@ impl Chat<'static> {
             state.auto_accept_edits
         };
         self.agent.set_auto_accept_edits(enabled);
+        self.persist_runtime_overrides();
         global::trigger_schedule_session_save();
     }
 
@@ -902,6 +907,7 @@ impl Chat<'static> {
         let overrides = RuntimeOverrides {
             model_override: state.model_override.clone(),
             thinking_enabled: Some(state.thinking_enabled),
+            auto_accept_edits: Some(state.auto_accept_edits),
         };
         if let Err(err) = save_runtime_overrides(&config.config_dir, &overrides) {
             warn!(?err, "failed to persist runtime overrides");

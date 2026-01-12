@@ -13,6 +13,8 @@ pub struct AgentPathConfig {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_accept_edits: Option<bool>,
 }
 
 /// Holds agent path configs from global and workspace

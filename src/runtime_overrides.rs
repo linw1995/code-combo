@@ -14,6 +14,8 @@ pub struct RuntimeOverrides {
     pub model_override: Option<String>,
     #[serde(default)]
     pub thinking_enabled: Option<bool>,
+    #[serde(default)]
+    pub auto_accept_edits: Option<bool>,
 }
 
 pub fn runtime_overrides_path(config_dir: &Path) -> PathBuf {
@@ -29,10 +31,18 @@ pub fn load_runtime_overrides(config_dir: &Path) -> Result<RuntimeOverrides> {
         fs::read_to_string(&path).whatever_context("failed to read runtime overrides file")?;
     let config: Config =
         toml::from_str(&content).whatever_context("failed to parse runtime overrides file")?;
-    let agent = config.agent;
+    let (model_override, thinking_enabled, auto_accept_edits) = match config.agent {
+        Some(cfg) => (
+            cfg.model.clone(),
+            cfg.thinking_enabled,
+            cfg.auto_accept_edits,
+        ),
+        None => (None, None, None),
+    };
     let overrides = RuntimeOverrides {
-        model_override: agent.as_ref().and_then(|cfg| cfg.model.clone()),
-        thinking_enabled: agent.and_then(|cfg| cfg.thinking_enabled),
+        model_override,
+        thinking_enabled,
+        auto_accept_edits,
     };
     Ok(overrides)
 }
@@ -41,11 +51,15 @@ pub fn save_runtime_overrides(config_dir: &Path, overrides: &RuntimeOverrides) -
     fs::create_dir_all(config_dir).whatever_context("failed to create config dir")?;
     let path = runtime_overrides_path(config_dir);
     let mut config = Config::default();
-    if overrides.model_override.is_some() || overrides.thinking_enabled.is_some() {
+    if overrides.model_override.is_some()
+        || overrides.thinking_enabled.is_some()
+        || overrides.auto_accept_edits.is_some()
+    {
         config.agent = Some(AgentPathConfig {
             agent_config_path: None,
             model: overrides.model_override.clone(),
             thinking_enabled: overrides.thinking_enabled,
+            auto_accept_edits: overrides.auto_accept_edits,
         });
     }
     let output =
