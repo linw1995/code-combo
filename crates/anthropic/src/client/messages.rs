@@ -147,6 +147,8 @@ pub enum StopReason {
     PauseTurn,
     /// refusal: when streaming classifiers intervene to handle potential policy violations
     Refusal,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,9 +164,11 @@ pub struct CacheCreation {
 #[serde(rename_all = "snake_case")]
 pub struct ServerToolUse {
     /// The number of web fetch tool requests.
-    pub web_fetch_requests: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_fetch_requests: Option<usize>,
     /// The number of web search tool requests.
-    pub web_search_requests: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search_requests: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,6 +177,8 @@ pub enum ServiceTier {
     Standard,
     Priority,
     Batch,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,7 +252,7 @@ pub struct StreamUsage {
     pub service_tier: Option<ServiceTier>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct MessageDelta {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -505,6 +511,7 @@ fn parse_messages_stream_event(event: SseEvent) -> Result<MessagesStreamEvent, W
         .and_then(|value| value.as_str())
         .unwrap_or(event.event.as_str())
         .to_string();
+    trace!(?event_type, ?data, "received sse event");
     match event_type.as_str() {
         "message_start" => {
             let event: MessageStartEvent =
@@ -538,7 +545,7 @@ fn parse_messages_stream_event(event: SseEvent) -> Result<MessagesStreamEvent, W
             let event: MessageDeltaEvent =
                 serde_json::from_value(data).whatever_context("decode message_delta event")?;
             Ok(MessagesStreamEvent::MessageDelta {
-                delta: event.delta,
+                delta: event.delta.unwrap_or_default(),
                 usage: event.usage,
             })
         }
@@ -580,7 +587,8 @@ struct ContentBlockStopEvent {
 
 #[derive(Debug, Deserialize)]
 struct MessageDeltaEvent {
-    delta: MessageDelta,
+    #[serde(default)]
+    delta: Option<MessageDelta>,
     #[serde(default)]
     usage: Option<StreamUsage>,
 }
