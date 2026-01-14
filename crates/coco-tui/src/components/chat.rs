@@ -1642,31 +1642,37 @@ async fn handle_offload_combo_reply(
         .append_message(ChatMessage::user(ChatContent::Text(directive)))
         .await;
 
-    // Call chat to get LLM response
+    // Call chat to get LLM response with streaming for thinking updates
+    let stream_tx = tx.clone();
+    let stream_name = combo_name.to_string();
     let chat_response = agent
-        .chat_stream_with_history(cancel_token.clone(), |_update| {
-            // We don't stream for offload since we need to process the tool_use
+        .chat_stream_with_history(cancel_token.clone(), move |update| {
+            let (index, kind, text) = match update {
+                ChatStreamUpdate::Plain { index, text } => (index, BotStreamKind::Plain, text),
+                ChatStreamUpdate::Thinking { index, text } => {
+                    (index, BotStreamKind::Thinking, text)
+                }
+            };
+            stream_tx
+                .send(
+                    ComboEvent::PromptStream {
+                        name: stream_name.clone(),
+                        index,
+                        kind,
+                        text,
+                    }
+                    .into(),
+                )
+                .ok();
         })
         .await
         .map_err(|e| format!("chat failed: {e}"))?;
 
-    // Extract Bash tool_use and thinking blocks from response
+    // Extract Bash tool_use from response
     let blocks = match &chat_response.message.content {
         ChatContent::Multiple(blocks) => blocks.as_slice(),
         ChatContent::Text(_) => &[],
     };
-
-    // Extract thinking blocks
-    let thinking: Vec<String> = blocks
-        .iter()
-        .filter_map(|block| {
-            if let ChatBlock::Thinking { thinking, .. } = block {
-                Some(thinking.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
 
     let bash_tool_use = blocks
         .iter()
@@ -1693,12 +1699,12 @@ async fn handle_offload_combo_reply(
     // Auto-grant and execute the bash command
     agent.grant_once(&bash_tool_use.id, BASH_TOOL_NAME);
 
-    // Send tool use event for UI feedback
+    // Send tool use event for UI feedback (thinking already streamed via PromptStream)
     tx.send(
         ComboEvent::ReplyToolUse {
             name: combo_name.to_string(),
             tool_use: bash_tool_use.clone(),
-            thinking,
+            thinking: Vec::new(),
             offload: true,
         }
         .into(),
