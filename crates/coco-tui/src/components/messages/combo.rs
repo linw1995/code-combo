@@ -220,6 +220,12 @@ impl Combo {
             .push(Message::bot(Thinking::new(thinking.to_string()).into()));
     }
 
+    fn push_offload_bash_tool_use(&mut self, tool_use: ToolUse) {
+        self.state.write().view = ComboView::Messages;
+        self.messages
+            .push(Message::bot(Tool::new(tool_use).into()).with_role_prefix(false));
+    }
+
     fn forward_output_to_child(&mut self, tool_use_id: &str, chunk: &OutputChunk) -> bool {
         let event = Event::Answer(AnswerEvent::ToolOutput {
             id: tool_use_id.to_string(),
@@ -347,10 +353,11 @@ impl Combo {
                         .append_stream_text(*index, *kind, text.clone());
                 }
             }
-            ComboEvent::PromptReply {
+            ComboEvent::ReplyToolUse {
                 name,
                 tool_use,
                 thinking,
+                offload,
             } => {
                 if &self.state.name == name {
                     self.messages.finalize_stream();
@@ -358,7 +365,21 @@ impl Combo {
                     for block in thinking {
                         self.push_prompt_thinking(block);
                     }
-                    self.push_prompt_reply(tool_use);
+                    if *offload {
+                        self.push_offload_bash_tool_use(tool_use.clone());
+                    } else {
+                        self.push_prompt_reply(tool_use);
+                    }
+                }
+            }
+            ComboEvent::ReplyToolResult {
+                name,
+                tool_use_id,
+                is_error,
+                output,
+            } => {
+                if &self.state.name == name {
+                    self.forward_result_to_child(tool_use_id, *is_error, output.clone());
                 }
             }
             ComboEvent::Executing { name, command_line } => {
@@ -931,10 +952,18 @@ impl Component for Combo {
     }
 
     fn handle_event(&mut self, event: &Event) {
-        if let Event::Combo(event) = event {
-            self.on_combo_event(event);
-        } else {
-            handle_component_event!(self, event);
+        match event {
+            Event::Combo(event) => {
+                self.on_combo_event(event);
+            }
+            Event::Answer(AnswerEvent::ToolResult { .. })
+            | Event::Answer(AnswerEvent::ToolOutput { .. }) => {
+                // Route tool events to the correct child component by id
+                self.messages.on_tool_event(event);
+            }
+            _ => {
+                handle_component_event!(self, event);
+            }
         }
     }
 

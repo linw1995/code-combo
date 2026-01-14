@@ -1,4 +1,4 @@
-use std::{path::Path, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::Path, path::PathBuf, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
@@ -19,6 +19,7 @@ pub enum ClientMessage {
     RecordChunk(RecordChunkPayload),
     RecordEnd(RecordEndPayload),
     Prompt(PromptPayload),
+    Reply(ReplyPayload),
     Mcp(McpRequest),
 }
 
@@ -27,6 +28,7 @@ pub enum ClientMessage {
 pub enum ServerMessage {
     RecordControl(RecordControl),
     PromptResponse(String),
+    ReplyValidation(ReplyValidation),
     Metadata(MetadataResponse),
     Mcp(McpResponse),
 }
@@ -105,6 +107,22 @@ pub struct ThinkingConfig {
     pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub budget_tokens: Option<usize>,
+}
+
+/// Payload for combo reply via bash command offload.
+/// Contains the field values extracted by the LLM.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplyPayload {
+    /// Field name to value mapping
+    pub fields: HashMap<String, String>,
+}
+
+/// Server response to validate reply fields against required schemas.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplyValidation {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Snafu)]
@@ -213,6 +231,17 @@ impl SessionSocketClient {
         self.send_message(&ClientMessage::Prompt(payload)).await?;
         match self.read_server_message().await? {
             ServerMessage::PromptResponse(response) => Ok(response),
+            other => Err(SessionClientError::UnexpectedServerMessage { message: other }),
+        }
+    }
+
+    pub async fn send_reply_wait_validation(
+        &self,
+        payload: ReplyPayload,
+    ) -> ClientResult<ReplyValidation> {
+        self.send_message(&ClientMessage::Reply(payload)).await?;
+        match self.read_server_message().await? {
+            ServerMessage::ReplyValidation(validation) => Ok(validation),
             other => Err(SessionClientError::UnexpectedServerMessage { message: other }),
         }
     }

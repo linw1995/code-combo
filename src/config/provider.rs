@@ -24,6 +24,12 @@ pub struct ProviderConfig {
     /// If None or empty, this provider accepts any model (wildcard).
     #[serde(default)]
     pub models: Option<Vec<String>>,
+
+    /// When true, combo reply uses Bash tool to call `coco reply` command
+    /// instead of the built-in combo_reply tool. This offloads the structured
+    /// response extraction to an external command.
+    #[serde(default)]
+    pub offload_combo_reply: bool,
 }
 
 impl std::fmt::Debug for ProviderConfig {

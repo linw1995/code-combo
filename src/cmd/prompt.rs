@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde_json::Value;
 use snafu::prelude::*;
 use tokio::io::AsyncReadExt;
@@ -60,6 +62,39 @@ pub async fn handle_tell(prompt: String) -> Result<()> {
         .whatever_context("failed to send prompt to session socket")?;
     info!("prompt sent to session socket");
     Ok(())
+}
+
+/// Handle the reply command for combo reply offload.
+/// Fields are provided as --field=value format.
+/// Validation is done by the parent process (TUI) which knows the required schemas.
+pub async fn handle_reply(fields: Vec<String>) -> Result<()> {
+    let parsed_fields = parse_reply_fields(&fields)?;
+
+    // Output the fields as JSON for bash result parsing
+    let output = serde_json::to_string(&parsed_fields)
+        .whatever_context("failed to serialize reply fields")?;
+    println!("{output}");
+
+    info!("reply output generated");
+    Ok(())
+}
+
+fn parse_reply_fields(fields: &[String]) -> Result<HashMap<String, String>> {
+    let mut parsed = HashMap::new();
+    for field in fields {
+        // Handle --field=value format
+        let field = field.strip_prefix("--").unwrap_or(field);
+        let Some((key, value)) = field.split_once('=') else {
+            whatever!("invalid field format {field:?}, expected --field=value");
+        };
+        let key = key.trim();
+        ensure_whatever!(!key.is_empty(), "field key cannot be empty");
+        if parsed.contains_key(key) {
+            whatever!("duplicate field key: {key}");
+        }
+        parsed.insert(key.to_string(), value.to_string());
+    }
+    Ok(parsed)
 }
 
 async fn resolve_prompt(prompt: String) -> Result<String> {

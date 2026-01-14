@@ -384,8 +384,11 @@ impl Chat<'static> {
                 self.set_combo_thinking_active(thinking.as_ref().is_some_and(|cfg| cfg.enabled));
                 self.set_processing();
             }
-            ComboEvent::PromptReply { .. } => {
+            ComboEvent::ReplyToolUse { offload: false, .. } => {
                 self.set_combo_thinking_active(false);
+                self.set_processing();
+            }
+            ComboEvent::ReplyToolUse { offload: true, .. } => {
                 self.set_processing();
             }
             ComboEvent::Executed { starter, .. } => {
@@ -406,6 +409,9 @@ impl Chat<'static> {
                 self.messages
                     .push(Message::system(Plain::new(message.to_string()).into()));
                 global::trigger_schedule_session_save();
+            }
+            ComboEvent::ReplyToolResult { .. } => {
+                // Result is handled by Combo component
             }
         }
     }
@@ -1527,6 +1533,237 @@ fn shell_escape(value: &str) -> String {
     escaped
 }
 
+/// Build a directive prompt for LLM to use `coco reply` command.
+fn build_offload_reply_directive(schemas: &[code_combo::PromptSchema]) -> String {
+    let field_args: Vec<String> = schemas
+        .iter()
+        .map(|s| format!("--{}=<value>", s.name))
+        .collect();
+
+    let field_descriptions: Vec<String> = schemas
+        .iter()
+        .map(|s| format!("- --{}=<value>: {}", s.name, s.description))
+        .collect();
+
+    format!(
+        r#"You must respond by calling the bash tool to execute the `coco reply` command.
+Use this exact format:
+```
+coco reply {field_args}
+```
+
+Required fields:
+{field_list}
+
+The value should be properly shell-escaped if it contains special characters.
+Do not output any other text or explanation. Only call the bash tool with the coco reply command."#,
+        field_args = field_args.join(" "),
+        field_list = field_descriptions.join("\n"),
+    )
+}
+
+/// Check if a bash tool_use input contains a `coco reply` command.
+fn is_coco_reply_command(input: &Value) -> bool {
+    let Some(command) = input.get("command").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    let trimmed = command.trim();
+    // Check if command starts with "coco reply" (with possible path prefix)
+    trimmed == "coco reply"
+        || trimmed.starts_with("coco reply ")
+        || trimmed.ends_with("/coco reply")
+        || trimmed.contains("/coco reply ")
+}
+
+/// Parse coco reply stdout output as JSON fields and validate required schemas.
+fn parse_coco_reply_output(
+    output: &Final,
+    schemas: &[code_combo::PromptSchema],
+) -> Result<String, String> {
+    match output {
+        Final::Json(value) => {
+            // BashOutput structure: { stdout, stderr, exit_code, timed_out }
+            let exit_code = value
+                .get("exit_code")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(255) as u8;
+            if exit_code != 0 {
+                let stderr = value.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+                return Err(format!(
+                    "coco reply failed with exit code {exit_code}: {stderr}"
+                ));
+            }
+            let stdout = value
+                .get("stdout")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            // Validate it's valid JSON
+            let parsed: serde_json::Value = serde_json::from_str(stdout)
+                .map_err(|e| format!("coco reply output is not valid JSON: {e}"))?;
+
+            // Validate all required fields are present
+            let obj = parsed
+                .as_object()
+                .ok_or_else(|| "coco reply output must be a JSON object".to_string())?;
+            let missing: Vec<&str> = schemas
+                .iter()
+                .filter(|s| !obj.contains_key(&s.name))
+                .map(|s| s.name.as_str())
+                .collect();
+            if !missing.is_empty() {
+                return Err(format!("missing required fields: {}", missing.join(", ")));
+            }
+
+            Ok(stdout.to_string())
+        }
+        Final::Message(msg) => Err(format!("unexpected message output: {msg}")),
+    }
+}
+
+/// Handle combo reply via offload to bash `coco reply` command.
+/// Returns Ok(json_response) on success, Err(error_message) on failure.
+async fn handle_offload_combo_reply(
+    agent: &mut Agent,
+    schemas: &[code_combo::PromptSchema],
+    combo_name: &str,
+    cancel_token: CancellationToken,
+    tx: tokio::sync::mpsc::UnboundedSender<Event>,
+) -> Result<String, String> {
+    use code_combo::tools::BASH_TOOL_NAME;
+
+    if cancel_token.is_cancelled() {
+        return Err("prompt reply cancelled".to_string());
+    }
+
+    // Build and append the directive prompt
+    let directive = build_offload_reply_directive(schemas);
+    agent
+        .append_message(ChatMessage::user(ChatContent::Text(directive)))
+        .await;
+
+    // Call chat to get LLM response with streaming for thinking updates
+    let stream_tx = tx.clone();
+    let stream_name = combo_name.to_string();
+    let chat_response = agent
+        .chat_stream_with_history(cancel_token.clone(), move |update| {
+            let (index, kind, text) = match update {
+                ChatStreamUpdate::Plain { index, text } => (index, BotStreamKind::Plain, text),
+                ChatStreamUpdate::Thinking { index, text } => {
+                    (index, BotStreamKind::Thinking, text)
+                }
+            };
+            stream_tx
+                .send(
+                    ComboEvent::PromptStream {
+                        name: stream_name.clone(),
+                        index,
+                        kind,
+                        text,
+                    }
+                    .into(),
+                )
+                .ok();
+        })
+        .await
+        .map_err(|e| format!("chat failed: {e}"))?;
+
+    // Extract Bash tool_use from response
+    let blocks = match &chat_response.message.content {
+        ChatContent::Multiple(blocks) => blocks.as_slice(),
+        ChatContent::Text(_) => &[],
+    };
+
+    let bash_tool_use = blocks
+        .iter()
+        .find_map(|block| {
+            if let ChatBlock::ToolUse(tool_use) = block
+                && tool_use.name == BASH_TOOL_NAME
+            {
+                return Some(tool_use.clone());
+            }
+            None
+        })
+        .ok_or_else(|| "LLM did not return a bash tool call for coco reply".to_string())?;
+
+    // Validate it's a coco reply command
+    if !is_coco_reply_command(&bash_tool_use.input) {
+        let command = bash_tool_use
+            .input
+            .get("command")
+            .and_then(|v| v.as_str())
+            .unwrap_or("<unknown>");
+        return Err(format!("expected coco reply command, got: {command}"));
+    }
+
+    // Auto-grant and execute the bash command
+    agent.grant_once(&bash_tool_use.id, BASH_TOOL_NAME);
+
+    // Send tool use event for UI feedback (thinking already streamed via PromptStream)
+    tx.send(
+        ComboEvent::ReplyToolUse {
+            name: combo_name.to_string(),
+            tool_use: bash_tool_use.clone(),
+            thinking: Vec::new(),
+            offload: true,
+        }
+        .into(),
+    )
+    .ok();
+
+    // Execute the bash command
+    let mut final_output: Option<Output> = None;
+    let tool_use_id = bash_tool_use.id.clone();
+    let _ = agent
+        .execute_with_output(
+            &bash_tool_use.id,
+            BASH_TOOL_NAME,
+            code_combo::Input::Starter(bash_tool_use.input.clone()),
+            cancel_token.clone(),
+            |out| {
+                if let Output::Success(output) = out {
+                    final_output = Some(Output::Success(output));
+                } else if let Output::Failure(output) = out {
+                    final_output = Some(Output::Failure(output));
+                }
+            },
+        )
+        .await
+        .map_err(|e| format!("bash execution failed: {e}"))?;
+
+    if cancel_token.is_cancelled() {
+        return Err("prompt reply cancelled".to_string());
+    }
+
+    // Parse the output and send result event
+    let (output, is_error) = match final_output {
+        Some(Output::Success(output)) => (output, false),
+        Some(Output::Failure(output)) => (output, true),
+        _ => {
+            return Err("bash command did not produce output".to_string());
+        }
+    };
+
+    // Send combo-specific result event for UI feedback (not AnswerEvent::ToolResult
+    // which would be intercepted by Chat and trigger another chat task)
+    tx.send(
+        ComboEvent::ReplyToolResult {
+            name: combo_name.to_string(),
+            tool_use_id,
+            is_error,
+            output: output.clone(),
+        }
+        .into(),
+    )
+    .ok();
+
+    if is_error {
+        return Err(format!("bash command failed: {:?}", output));
+    }
+
+    parse_coco_reply_output(&output, schemas)
+}
+
 async fn task_combo_execute(
     name: String,
     args: Vec<String>,
@@ -1680,63 +1917,80 @@ async fn task_combo_execute(
                             .into(),
                         )
                         .unwrap();
-                        let stream_tx = tx.clone();
-                        let stream_name = name.clone();
-                        let updates_seen = Arc::new(AtomicBool::new(false));
-                        let updates_seen_stream = updates_seen.clone();
-                        let reply = if cancel_token.is_cancelled() {
-                            Err("prompt reply cancelled".to_string())
-                        } else {
-                            agent
-                                .reply_prompt_stream_with_thinking(
-                                    &system_prompt,
-                                    schemas,
-                                    thinking.clone(),
-                                    cancel_token.clone(),
-                                    move |update| {
-                                        updates_seen_stream.store(true, Ordering::Relaxed);
-                                        let (index, kind, text) = match update {
-                                            ChatStreamUpdate::Plain { index, text } => {
-                                                (index, BotStreamKind::Plain, text)
-                                            }
-                                            ChatStreamUpdate::Thinking { index, text } => {
-                                                (index, BotStreamKind::Thinking, text)
-                                            }
-                                        };
-                                        stream_tx
-                                            .send(
-                                                ComboEvent::PromptStream {
-                                                    name: stream_name.clone(),
-                                                    index,
-                                                    kind,
-                                                    text,
-                                                }
-                                                .into(),
-                                            )
-                                            .ok();
-                                    },
-                                )
-                                .await
-                                .map_err(|err| err.to_string())
-                        };
-                        let streamed = updates_seen.load(Ordering::Relaxed);
-                        if let Ok(reply) = &reply {
-                            let thinking = if streamed {
-                                Vec::new()
-                            } else {
-                                reply.thinking.clone()
-                            };
-                            tx.send(
-                                ComboEvent::PromptReply {
-                                    name: name.clone(),
-                                    tool_use: reply.tool_use.clone(),
-                                    thinking,
-                                }
-                                .into(),
+
+                        // Check if offload_combo_reply is enabled for the current provider
+                        let response = if agent.offload_combo_reply() {
+                            // Offload path: use bash tool to call `coco reply`
+                            handle_offload_combo_reply(
+                                &mut agent,
+                                &schemas,
+                                &name,
+                                cancel_token.clone(),
+                                tx.clone(),
                             )
-                            .ok();
-                        }
-                        let response = reply.map(|reply| reply.response);
+                            .await
+                        } else {
+                            // Original path: use combo_reply tool
+                            let stream_tx = tx.clone();
+                            let stream_name = name.clone();
+                            let updates_seen = Arc::new(AtomicBool::new(false));
+                            let updates_seen_stream = updates_seen.clone();
+                            let reply = if cancel_token.is_cancelled() {
+                                Err("prompt reply cancelled".to_string())
+                            } else {
+                                agent
+                                    .reply_prompt_stream_with_thinking(
+                                        &system_prompt,
+                                        schemas,
+                                        thinking.clone(),
+                                        cancel_token.clone(),
+                                        move |update| {
+                                            updates_seen_stream.store(true, Ordering::Relaxed);
+                                            let (index, kind, text) = match update {
+                                                ChatStreamUpdate::Plain { index, text } => {
+                                                    (index, BotStreamKind::Plain, text)
+                                                }
+                                                ChatStreamUpdate::Thinking { index, text } => {
+                                                    (index, BotStreamKind::Thinking, text)
+                                                }
+                                            };
+                                            stream_tx
+                                                .send(
+                                                    ComboEvent::PromptStream {
+                                                        name: stream_name.clone(),
+                                                        index,
+                                                        kind,
+                                                        text,
+                                                    }
+                                                    .into(),
+                                                )
+                                                .ok();
+                                        },
+                                    )
+                                    .await
+                                    .map_err(|err| err.to_string())
+                            };
+                            let streamed = updates_seen.load(Ordering::Relaxed);
+                            if let Ok(reply) = &reply {
+                                let thinking = if streamed {
+                                    Vec::new()
+                                } else {
+                                    reply.thinking.clone()
+                                };
+                                tx.send(
+                                    ComboEvent::ReplyToolUse {
+                                        name: name.clone(),
+                                        tool_use: reply.tool_use.clone(),
+                                        thinking,
+                                        offload: false,
+                                    }
+                                    .into(),
+                                )
+                                .ok();
+                            }
+                            reply.map(|reply| reply.response)
+                        };
+
                         if let Err(err) = &response {
                             tx.send(
                                 ComboEvent::ReplyToolError {

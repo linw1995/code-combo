@@ -69,6 +69,11 @@ enum Commands {
         #[arg(trailing_var_arg = true)]
         prompt: Vec<String>,
     },
+    Reply {
+        /// Reply fields as --field=value (captures all trailing args)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        fields: Vec<String>,
+    },
     Record {
         /// Capture and emit wrapped JSON result
         #[arg(long)]
@@ -105,6 +110,7 @@ impl TryFrom<Commands> for ClientCommand {
             Commands::Metadata { fields } => Ok(ClientCommand::Metadata { fields }),
             Commands::Ask { prompt, schemas } => Ok(ClientCommand::Ask { prompt, schemas }),
             Commands::Tell { prompt } => Ok(ClientCommand::Tell { prompt }),
+            Commands::Reply { fields } => Ok(ClientCommand::Reply { fields }),
             Commands::Record {
                 wrap_result,
                 command,
@@ -194,10 +200,11 @@ async fn main() -> Result<()> {
             Commands::Metadata { .. }
             | Commands::Ask { .. }
             | Commands::Tell { .. }
+            | Commands::Reply { .. }
             | Commands::Record { .. }
             | Commands::Mcp { .. },
         ) => {
-            panic!("combo command should have been handled earlier");
+            panic!("client command should have been handled earlier");
         }
         None => {
             if args.restore {

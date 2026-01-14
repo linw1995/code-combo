@@ -763,6 +763,15 @@ impl Agent {
         }
     }
 
+    /// Check if the current provider has offload_combo_reply enabled.
+    pub fn offload_combo_reply(&self) -> bool {
+        let selected_model = self.selected_model();
+        match Self::select_provider_index(selected_model.as_deref(), &self.config.providers) {
+            Ok(idx) => self.config.providers[idx].offload_combo_reply,
+            Err(_) => false,
+        }
+    }
+
     fn selected_model(&self) -> Option<String> {
         self.model_override
             .clone()
