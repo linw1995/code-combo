@@ -116,6 +116,13 @@ pub enum ComboEvent {
         tool_use: ToolUse,
         thinking: Vec<String>,
     },
+    /// Result of offload combo reply bash execution
+    OffloadReplyResult {
+        name: String,
+        tool_use_id: String,
+        is_error: bool,
+        output: Final,
+    },
     Executed {
         name: String,
         starter: Starter,

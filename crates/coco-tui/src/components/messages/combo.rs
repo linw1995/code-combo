@@ -381,6 +381,16 @@ impl Combo {
                     self.push_offload_bash_tool_use(tool_use.clone());
                 }
             }
+            ComboEvent::OffloadReplyResult {
+                name,
+                tool_use_id,
+                is_error,
+                output,
+            } => {
+                if &self.state.name == name {
+                    self.forward_result_to_child(tool_use_id, *is_error, output.clone());
+                }
+            }
             ComboEvent::Executing { name, command_line } => {
                 if &self.state.name == name {
                     self.clear_child_focus();
@@ -951,10 +961,18 @@ impl Component for Combo {
     }
 
     fn handle_event(&mut self, event: &Event) {
-        if let Event::Combo(event) = event {
-            self.on_combo_event(event);
-        } else {
-            handle_component_event!(self, event);
+        match event {
+            Event::Combo(event) => {
+                self.on_combo_event(event);
+            }
+            Event::Answer(AnswerEvent::ToolResult { .. })
+            | Event::Answer(AnswerEvent::ToolOutput { .. }) => {
+                // Route tool events to the correct child component by id
+                self.messages.on_tool_event(event);
+            }
+            _ => {
+                handle_component_event!(self, event);
+            }
         }
     }
 

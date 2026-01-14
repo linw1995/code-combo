@@ -410,6 +410,9 @@ impl Chat<'static> {
             ComboEvent::OffloadReplyToolUse { .. } => {
                 self.set_processing();
             }
+            ComboEvent::OffloadReplyResult { .. } => {
+                // Result is handled by Combo component
+            }
         }
     }
 
@@ -1703,6 +1706,7 @@ async fn handle_offload_combo_reply(
 
     // Execute the bash command
     let mut final_output: Option<Output> = None;
+    let tool_use_id = bash_tool_use.id.clone();
     let _ = agent
         .execute_with_output(
             &bash_tool_use.id,
@@ -1724,16 +1728,31 @@ async fn handle_offload_combo_reply(
         return Err("prompt reply cancelled".to_string());
     }
 
-    // Parse the output
-    let output = match final_output {
-        Some(Output::Success(output)) => output,
-        Some(Output::Failure(output)) => {
-            return Err(format!("bash command failed: {:?}", output));
-        }
+    // Parse the output and send result event
+    let (output, is_error) = match final_output {
+        Some(Output::Success(output)) => (output, false),
+        Some(Output::Failure(output)) => (output, true),
         _ => {
             return Err("bash command did not produce output".to_string());
         }
     };
+
+    // Send combo-specific result event for UI feedback (not AnswerEvent::ToolResult
+    // which would be intercepted by Chat and trigger another chat task)
+    tx.send(
+        ComboEvent::OffloadReplyResult {
+            name: combo_name.to_string(),
+            tool_use_id,
+            is_error,
+            output: output.clone(),
+        }
+        .into(),
+    )
+    .ok();
+
+    if is_error {
+        return Err(format!("bash command failed: {:?}", output));
+    }
 
     parse_coco_reply_output(&output, schemas)
 }
