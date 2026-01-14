@@ -384,8 +384,11 @@ impl Chat<'static> {
                 self.set_combo_thinking_active(thinking.as_ref().is_some_and(|cfg| cfg.enabled));
                 self.set_processing();
             }
-            ComboEvent::PromptReply { .. } => {
+            ComboEvent::ReplyToolUse { offload: false, .. } => {
                 self.set_combo_thinking_active(false);
+                self.set_processing();
+            }
+            ComboEvent::ReplyToolUse { offload: true, .. } => {
                 self.set_processing();
             }
             ComboEvent::Executed { starter, .. } => {
@@ -407,10 +410,7 @@ impl Chat<'static> {
                     .push(Message::system(Plain::new(message.to_string()).into()));
                 global::trigger_schedule_session_save();
             }
-            ComboEvent::OffloadReplyToolUse { .. } => {
-                self.set_processing();
-            }
-            ComboEvent::OffloadReplyResult { .. } => {
+            ComboEvent::ReplyToolResult { .. } => {
                 // Result is handled by Combo component
             }
         }
@@ -1695,10 +1695,11 @@ async fn handle_offload_combo_reply(
 
     // Send tool use event for UI feedback
     tx.send(
-        ComboEvent::OffloadReplyToolUse {
+        ComboEvent::ReplyToolUse {
             name: combo_name.to_string(),
             tool_use: bash_tool_use.clone(),
             thinking,
+            offload: true,
         }
         .into(),
     )
@@ -1740,7 +1741,7 @@ async fn handle_offload_combo_reply(
     // Send combo-specific result event for UI feedback (not AnswerEvent::ToolResult
     // which would be intercepted by Chat and trigger another chat task)
     tx.send(
-        ComboEvent::OffloadReplyResult {
+        ComboEvent::ReplyToolResult {
             name: combo_name.to_string(),
             tool_use_id,
             is_error,
@@ -1971,10 +1972,11 @@ async fn task_combo_execute(
                                     reply.thinking.clone()
                                 };
                                 tx.send(
-                                    ComboEvent::PromptReply {
+                                    ComboEvent::ReplyToolUse {
                                         name: name.clone(),
                                         tool_use: reply.tool_use.clone(),
                                         thinking,
+                                        offload: false,
                                     }
                                     .into(),
                                 )

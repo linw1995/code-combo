@@ -105,19 +105,16 @@ pub enum ComboEvent {
         kind: BotStreamKind,
         text: String,
     },
-    PromptReply {
+    /// Reply tool use from prompt, with optional offload via bash
+    ReplyToolUse {
         name: String,
         tool_use: ToolUse,
         thinking: Vec<String>,
+        /// Whether this is an offload reply (executed via bash)
+        offload: bool,
     },
-    /// Offload combo reply via bash tool use
-    OffloadReplyToolUse {
-        name: String,
-        tool_use: ToolUse,
-        thinking: Vec<String>,
-    },
-    /// Result of offload combo reply bash execution
-    OffloadReplyResult {
+    /// Result of offload reply bash execution
+    ReplyToolResult {
         name: String,
         tool_use_id: String,
         is_error: bool,

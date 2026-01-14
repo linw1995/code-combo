@@ -353,10 +353,11 @@ impl Combo {
                         .append_stream_text(*index, *kind, text.clone());
                 }
             }
-            ComboEvent::PromptReply {
+            ComboEvent::ReplyToolUse {
                 name,
                 tool_use,
                 thinking,
+                offload,
             } => {
                 if &self.state.name == name {
                     self.messages.finalize_stream();
@@ -364,24 +365,14 @@ impl Combo {
                     for block in thinking {
                         self.push_prompt_thinking(block);
                     }
-                    self.push_prompt_reply(tool_use);
-                }
-            }
-            ComboEvent::OffloadReplyToolUse {
-                name,
-                tool_use,
-                thinking,
-            } => {
-                if &self.state.name == name {
-                    self.messages.finalize_stream();
-                    self.messages.reset_stream();
-                    for block in thinking {
-                        self.push_prompt_thinking(block);
+                    if *offload {
+                        self.push_offload_bash_tool_use(tool_use.clone());
+                    } else {
+                        self.push_prompt_reply(tool_use);
                     }
-                    self.push_offload_bash_tool_use(tool_use.clone());
                 }
             }
-            ComboEvent::OffloadReplyResult {
+            ComboEvent::ReplyToolResult {
                 name,
                 tool_use_id,
                 is_error,
