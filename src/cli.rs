@@ -15,9 +15,7 @@ pub enum ClientCommand {
         prompt: Vec<String>,
     },
     Reply {
-        /// Expected field names for validation (comma-separated)
-        expect_fields: Option<String>,
-        /// Reply fields as key=value pairs
+        /// Reply fields as --field=value format
         fields: Vec<String>,
     },
     Record {
@@ -57,10 +55,7 @@ pub async fn handle_client_command(
         ClientCommand::Tell { prompt } => crate::cmd::handle_tell(prompt.join(" "))
             .await
             .whatever_context("failed to handle tell"),
-        ClientCommand::Reply {
-            expect_fields,
-            fields,
-        } => crate::cmd::handle_reply(expect_fields, fields)
+        ClientCommand::Reply { fields } => crate::cmd::handle_reply(fields)
             .await
             .whatever_context("failed to handle reply"),
         ClientCommand::Record {

@@ -65,25 +65,10 @@ pub async fn handle_tell(prompt: String) -> Result<()> {
 }
 
 /// Handle the reply command for combo reply offload.
-/// Fields are provided as key=value pairs.
-/// If expect_fields is provided, validates that all expected fields are present.
-pub async fn handle_reply(expect_fields: Option<String>, fields: Vec<String>) -> Result<()> {
+/// Fields are provided as --field=value format.
+/// Validation is done by the parent process (TUI) which knows the required schemas.
+pub async fn handle_reply(fields: Vec<String>) -> Result<()> {
     let parsed_fields = parse_reply_fields(&fields)?;
-
-    // Validate expected fields if specified
-    if let Some(expected) = expect_fields {
-        let expected_names: Vec<&str> = expected.split(',').map(|s| s.trim()).collect();
-        let mut missing = Vec::new();
-        for name in &expected_names {
-            if !name.is_empty() && !parsed_fields.contains_key(*name) {
-                missing.push(*name);
-            }
-        }
-        if !missing.is_empty() {
-            eprintln!("Error: missing required fields: {}", missing.join(", "));
-            std::process::exit(1);
-        }
-    }
 
     // Output the fields as JSON for bash result parsing
     let output = serde_json::to_string(&parsed_fields)
@@ -97,11 +82,12 @@ pub async fn handle_reply(expect_fields: Option<String>, fields: Vec<String>) ->
 fn parse_reply_fields(fields: &[String]) -> Result<HashMap<String, String>> {
     let mut parsed = HashMap::new();
     for field in fields {
+        // Handle --field=value format
+        let field = field.strip_prefix("--").unwrap_or(field);
         let Some((key, value)) = field.split_once('=') else {
-            whatever!("invalid field format {field:?}, expected key=value");
+            whatever!("invalid field format {field:?}, expected --field=value");
         };
         let key = key.trim();
-        let value = value.trim();
         ensure_whatever!(!key.is_empty(), "field key cannot be empty");
         if parsed.contains_key(key) {
             whatever!("duplicate field key: {key}");

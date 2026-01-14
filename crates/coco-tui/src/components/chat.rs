@@ -1532,33 +1532,29 @@ fn shell_escape(value: &str) -> String {
 
 /// Build a directive prompt for LLM to use `coco reply` command.
 fn build_offload_reply_directive(schemas: &[code_combo::PromptSchema]) -> String {
-    let field_names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
-    let expect_fields = field_names.join(",");
+    let field_args: Vec<String> = schemas
+        .iter()
+        .map(|s| format!("--{}=<value>", s.name))
+        .collect();
 
     let field_descriptions: Vec<String> = schemas
         .iter()
-        .map(|s| format!("- {}: {}", s.name, s.description))
+        .map(|s| format!("- --{}=<value>: {}", s.name, s.description))
         .collect();
 
     format!(
         r#"You must respond by calling the bash tool to execute the `coco reply` command.
 Use this exact format:
 ```
-coco reply --expect-fields {expect_fields} {field_args}
+coco reply {field_args}
 ```
-
-Where each field is provided as `field_name=value`. The value should be properly shell-escaped if it contains special characters.
 
 Required fields:
 {field_list}
 
+The value should be properly shell-escaped if it contains special characters.
 Do not output any other text or explanation. Only call the bash tool with the coco reply command."#,
-        expect_fields = expect_fields,
-        field_args = field_names
-            .iter()
-            .map(|name| format!("{}=<value>", name))
-            .collect::<Vec<_>>()
-            .join(" "),
+        field_args = field_args.join(" "),
         field_list = field_descriptions.join("\n"),
     )
 }
@@ -1576,8 +1572,11 @@ fn is_coco_reply_command(input: &Value) -> bool {
         || trimmed.contains("/coco reply ")
 }
 
-/// Parse coco reply stdout output as JSON fields.
-fn parse_coco_reply_output(output: &Final) -> Result<String, String> {
+/// Parse coco reply stdout output as JSON fields and validate required schemas.
+fn parse_coco_reply_output(
+    output: &Final,
+    schemas: &[code_combo::PromptSchema],
+) -> Result<String, String> {
     match output {
         Final::Json(value) => {
             // BashOutput structure: { stdout, stderr, exit_code, timed_out }
@@ -1597,8 +1596,22 @@ fn parse_coco_reply_output(output: &Final) -> Result<String, String> {
                 .unwrap_or("")
                 .trim();
             // Validate it's valid JSON
-            let _: serde_json::Value = serde_json::from_str(stdout)
+            let parsed: serde_json::Value = serde_json::from_str(stdout)
                 .map_err(|e| format!("coco reply output is not valid JSON: {e}"))?;
+
+            // Validate all required fields are present
+            let obj = parsed
+                .as_object()
+                .ok_or_else(|| "coco reply output must be a JSON object".to_string())?;
+            let missing: Vec<&str> = schemas
+                .iter()
+                .filter(|s| !obj.contains_key(&s.name))
+                .map(|s| s.name.as_str())
+                .collect();
+            if !missing.is_empty() {
+                return Err(format!("missing required fields: {}", missing.join(", ")));
+            }
+
             Ok(stdout.to_string())
         }
         Final::Message(msg) => Err(format!("unexpected message output: {msg}")),
@@ -1708,7 +1721,7 @@ async fn handle_offload_combo_reply(
         }
     };
 
-    parse_coco_reply_output(&output)
+    parse_coco_reply_output(&output, schemas)
 }
 
 async fn task_combo_execute(
