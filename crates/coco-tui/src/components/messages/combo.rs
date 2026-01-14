@@ -220,6 +220,12 @@ impl Combo {
             .push(Message::bot(Thinking::new(thinking.to_string()).into()));
     }
 
+    fn push_offload_bash_tool_use(&mut self, tool_use: ToolUse) {
+        self.state.write().view = ComboView::Messages;
+        self.messages
+            .push(Message::bot(Tool::new(tool_use).into()).with_role_prefix(false));
+    }
+
     fn forward_output_to_child(&mut self, tool_use_id: &str, chunk: &OutputChunk) -> bool {
         let event = Event::Answer(AnswerEvent::ToolOutput {
             id: tool_use_id.to_string(),
@@ -359,6 +365,20 @@ impl Combo {
                         self.push_prompt_thinking(block);
                     }
                     self.push_prompt_reply(tool_use);
+                }
+            }
+            ComboEvent::OffloadReplyToolUse {
+                name,
+                tool_use,
+                thinking,
+            } => {
+                if &self.state.name == name {
+                    self.messages.finalize_stream();
+                    self.messages.reset_stream();
+                    for block in thinking {
+                        self.push_prompt_thinking(block);
+                    }
+                    self.push_offload_bash_tool_use(tool_use.clone());
                 }
             }
             ComboEvent::Executing { name, command_line } => {

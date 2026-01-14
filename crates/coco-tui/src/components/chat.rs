@@ -1647,11 +1647,24 @@ async fn handle_offload_combo_reply(
         .await
         .map_err(|e| format!("chat failed: {e}"))?;
 
-    // Extract Bash tool_use from response
+    // Extract Bash tool_use and thinking blocks from response
     let blocks = match &chat_response.message.content {
         ChatContent::Multiple(blocks) => blocks.as_slice(),
         ChatContent::Text(_) => &[],
     };
+
+    // Extract thinking blocks
+    let thinking: Vec<String> = blocks
+        .iter()
+        .filter_map(|block| {
+            if let ChatBlock::Thinking { thinking, .. } = block {
+                Some(thinking.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
     let bash_tool_use = blocks
         .iter()
         .find_map(|block| {
@@ -1682,6 +1695,7 @@ async fn handle_offload_combo_reply(
         ComboEvent::OffloadReplyToolUse {
             name: combo_name.to_string(),
             tool_use: bash_tool_use.clone(),
+            thinking,
         }
         .into(),
     )

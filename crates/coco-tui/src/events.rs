@@ -114,6 +114,7 @@ pub enum ComboEvent {
     OffloadReplyToolUse {
         name: String,
         tool_use: ToolUse,
+        thinking: Vec<String>,
     },
     Executed {
         name: String,
