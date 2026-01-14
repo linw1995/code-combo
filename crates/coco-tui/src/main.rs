@@ -69,6 +69,14 @@ enum Commands {
         #[arg(trailing_var_arg = true)]
         prompt: Vec<String>,
     },
+    Reply {
+        /// Expected field names for validation (comma-separated)
+        #[arg(long, value_name = "fields")]
+        expect_fields: Option<String>,
+        /// Reply fields as key=value pairs
+        #[arg(trailing_var_arg = true)]
+        fields: Vec<String>,
+    },
     Record {
         /// Capture and emit wrapped JSON result
         #[arg(long)]
@@ -105,6 +113,13 @@ impl TryFrom<Commands> for ClientCommand {
             Commands::Metadata { fields } => Ok(ClientCommand::Metadata { fields }),
             Commands::Ask { prompt, schemas } => Ok(ClientCommand::Ask { prompt, schemas }),
             Commands::Tell { prompt } => Ok(ClientCommand::Tell { prompt }),
+            Commands::Reply {
+                expect_fields,
+                fields,
+            } => Ok(ClientCommand::Reply {
+                expect_fields,
+                fields,
+            }),
             Commands::Record {
                 wrap_result,
                 command,
@@ -194,10 +209,11 @@ async fn main() -> Result<()> {
             Commands::Metadata { .. }
             | Commands::Ask { .. }
             | Commands::Tell { .. }
+            | Commands::Reply { .. }
             | Commands::Record { .. }
             | Commands::Mcp { .. },
         ) => {
-            panic!("combo command should have been handled earlier");
+            panic!("client command should have been handled earlier");
         }
         None => {
             if args.restore {

@@ -110,6 +110,11 @@ pub enum ComboEvent {
         tool_use: ToolUse,
         thinking: Vec<String>,
     },
+    /// Offload combo reply via bash tool use
+    OffloadReplyToolUse {
+        name: String,
+        tool_use: ToolUse,
+    },
     Executed {
         name: String,
         starter: Starter,

@@ -896,6 +896,14 @@ async fn run_session_server(
                     }
                     first_message = false;
                 }
+                Ok(ClientMessage::Reply(_)) => {
+                    // Reply messages are handled locally by `coco reply` command,
+                    // they should not be sent to the session server.
+                    return Err(InvalidSnafu {
+                        reason: "reply is not expected in combo session".to_string(),
+                    }
+                    .build());
+                }
                 Ok(ClientMessage::Mcp(_)) => {
                     return Err(InvalidSnafu {
                         reason: "mcp request is not allowed in combo session".to_string(),

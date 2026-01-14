@@ -14,6 +14,12 @@ pub enum ClientCommand {
     Tell {
         prompt: Vec<String>,
     },
+    Reply {
+        /// Expected field names for validation (comma-separated)
+        expect_fields: Option<String>,
+        /// Reply fields as key=value pairs
+        fields: Vec<String>,
+    },
     Record {
         wrap_result: bool,
         command: Vec<String>,
@@ -28,6 +34,7 @@ pub fn init_client_logging(program: &str, command: &ClientCommand) {
         ClientCommand::Metadata { .. } => "metadata",
         ClientCommand::Ask { .. } => "ask",
         ClientCommand::Tell { .. } => "tell",
+        ClientCommand::Reply { .. } => "reply",
         ClientCommand::Record { .. } => "record",
         ClientCommand::Mcp { .. } => "mcp",
     };
@@ -50,6 +57,12 @@ pub async fn handle_client_command(
         ClientCommand::Tell { prompt } => crate::cmd::handle_tell(prompt.join(" "))
             .await
             .whatever_context("failed to handle tell"),
+        ClientCommand::Reply {
+            expect_fields,
+            fields,
+        } => crate::cmd::handle_reply(expect_fields, fields)
+            .await
+            .whatever_context("failed to handle reply"),
         ClientCommand::Record {
             wrap_result,
             command,

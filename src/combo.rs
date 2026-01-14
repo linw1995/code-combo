@@ -22,8 +22,8 @@ pub use discovery::*;
 pub use session::{
     ClientMessage, ControlAction, MetadataPayload, MetadataResponse, PromptPayload, PromptSchema,
     RecordChunkPayload, RecordControl, RecordEndPayload, RecordSession, RecordStartPayload,
-    ServerConnection, ServerMessage, SessionClientError, SessionServerError, SessionSocketClient,
-    SessionSocketServer, ThinkingConfig,
+    ReplyPayload, ReplyValidation, ServerConnection, ServerMessage, SessionClientError,
+    SessionServerError, SessionSocketClient, SessionSocketServer, ThinkingConfig,
 };
 pub use session_env::{SessionEnv, SessionEnvBuilder, SessionEnvError};
 pub use starter::PromptResponseSender;
