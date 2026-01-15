@@ -188,29 +188,46 @@ where
         .err();
     };
 
-    // Load subagent's agent config
-    let subagent_agent_config = match AgentConfig::try_from_file(&subagent_config.path) {
-        Ok(Some(config)) => config,
-        Ok(None) => {
-            return Final::from(json!({
-                "success": false,
-                "response": "",
-                "turns": 0,
-                "error": format!(
-                    "Subagent config file not found: {}",
-                    subagent_config.path.display()
-                )
-            }))
-            .err();
+    // Load subagent's agent config (from file or inline)
+    let subagent_agent_config = if let Some(ref path) = subagent_config.path {
+        // Load from file
+        match AgentConfig::try_from_file(path) {
+            Ok(Some(config)) => config,
+            Ok(None) => {
+                return Final::from(json!({
+                    "success": false,
+                    "response": "",
+                    "turns": 0,
+                    "error": format!(
+                        "Subagent config file not found: {}",
+                        path.display()
+                    )
+                }))
+                .err();
+            }
+            Err(e) => {
+                return Final::from(json!({
+                    "success": false,
+                    "response": "",
+                    "turns": 0,
+                    "error": format!("Failed to load subagent config: {}", e)
+                }))
+                .err();
+            }
         }
-        Err(e) => {
-            return Final::from(json!({
-                "success": false,
-                "response": "",
-                "turns": 0,
-                "error": format!("Failed to load subagent config: {}", e)
-            }))
-            .err();
+    } else {
+        // Use inline config from SubagentConfig
+        AgentConfig {
+            name: Some(subagent_config.name.clone()),
+            description: subagent_config.description.clone(),
+            system_prompt: subagent_config.system_prompt.as_ref().map(|content| {
+                crate::agent::SystemPromptConfig::Inline {
+                    content: content.clone(),
+                    args: None,
+                }
+            }),
+            tools: subagent_config.tools.clone(),
+            ..Default::default()
         }
     };
 

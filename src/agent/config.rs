@@ -239,11 +239,22 @@ pub struct SubagentConfig {
     pub name: String,
 
     /// Path to subagent configuration file (relative to working directory).
-    pub path: PathBuf,
+    /// If not provided, uses inline system_prompt.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
 
     /// Subagent description.
     #[serde(default)]
     pub description: Option<String>,
+
+    /// Inline system prompt for the subagent.
+    /// Used when path is not provided.
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+
+    /// Tools available to this subagent.
+    #[serde(default)]
+    pub tools: Option<Vec<String>>,
 }
 
 /// Safe commands configuration.
@@ -399,7 +410,10 @@ path = "./agents/reviewer.toml"
         let subagents = config.subagents.expect("subagents should be present");
         assert_eq!(subagents.len(), 2);
         assert_eq!(subagents[0].name, "coder");
-        assert_eq!(subagents[0].path, PathBuf::from("./agents/coder.toml"));
+        assert_eq!(
+            subagents[0].path,
+            Some(PathBuf::from("./agents/coder.toml"))
+        );
         assert_eq!(
             subagents[0].description,
             Some("General software engineering tasks".to_string())
