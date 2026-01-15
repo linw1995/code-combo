@@ -121,7 +121,9 @@ impl Combo {
                 ..Default::default()
             }),
             command: None,
-            messages: Messages::default().with_role_merge_mode(RoleMergeMode::MergeSkipFirstUser),
+            messages: Messages::default()
+                .with_role_merge_mode(RoleMergeMode::MergeSkipFirstUser)
+                .with_compact_role(true),
             preview_lines: default_preview_lines(),
             is_focused: false,
             is_child_focused: false,
@@ -885,7 +887,9 @@ impl Persistable for Combo {
         let command = Self::build_command_highlight(&state.command_line);
         let preview_lines = StreamedLines::from_chunks(&state.output_chunks, Some(LIMIT));
         let mut loaded_messages = Messages::load(messages)?;
-        loaded_messages = loaded_messages.with_role_merge_mode(RoleMergeMode::MergeSkipFirstUser);
+        loaded_messages = loaded_messages
+            .with_role_merge_mode(RoleMergeMode::MergeSkipFirstUser)
+            .with_compact_role(true);
         let combo = Self {
             state: State::new(state),
             command,

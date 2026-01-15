@@ -55,6 +55,7 @@ pub struct Messages {
     stream_map: HashMap<usize, usize>,
     stream_dirty: bool,
     role_merge_mode: RoleMergeMode,
+    compact_role: bool,
 
     // scrolling
     viewport_height: u16,
@@ -75,6 +76,11 @@ impl Messages {
 
     pub fn with_role_merge_mode(mut self, mode: RoleMergeMode) -> Self {
         self.role_merge_mode = mode;
+        self
+    }
+
+    pub fn with_compact_role(mut self, compact: bool) -> Self {
+        self.compact_role = compact;
         self
     }
 
@@ -732,7 +738,22 @@ impl Messages {
         {
             let theme = global::theme();
             let mut block = Block::new().borders(Borders::LEFT);
-            block = if &Some(idx) == self.focus.read() {
+            let selected = &Some(idx) == self.focus.read();
+            block = if self.compact_role {
+                let role_style = match message.role() {
+                    Role::User => theme.ui.user_role,
+                    Role::Bot if message.is_thinking() => theme.ui.thinking_role,
+                    Role::Bot => theme.ui.bot_role,
+                    Role::System => theme.ui.message_border_inactive,
+                };
+                if selected {
+                    block
+                        .border_set(border::QUADRANT_INSIDE)
+                        .border_style(theme.ui.block_border_active)
+                } else {
+                    block.border_set(border::THICK).border_style(role_style)
+                }
+            } else if selected {
                 block
                     .border_set(border::THICK)
                     .border_style(theme.ui.block_border_active)
@@ -742,7 +763,7 @@ impl Messages {
                     .border_style(theme.ui.message_border_inactive)
             };
             let rect = chunks[idx - range.start];
-            message.draw(frame, block.inner(rect)).unwrap();
+            message.draw_compact(frame, block.inner(rect), self.compact_role)?;
             frame.render_widget(&block, rect);
         }
 
@@ -790,7 +811,7 @@ impl Messages {
     fn message_heights_for_inner_width(&self, inner_width: u16) -> Vec<usize> {
         self.messages
             .iter()
-            .map(|m| m.height(inner_width))
+            .map(|m| m.height_compact(inner_width, self.compact_role))
             .collect()
     }
 }

@@ -164,6 +164,26 @@ impl Message {
     pub fn content_as_mut_any(&mut self) -> &mut dyn Any {
         self.content.as_mut_any()
     }
+
+    pub fn height_compact(&self, width: u16, compact: bool) -> usize {
+        if let Some(thinking) = self.content.as_any().downcast_ref::<Thinking>()
+            && thinking.is_collapsed()
+        {
+            return 0;
+        }
+        let role_width = if compact {
+            2
+        } else {
+            match self.state.role {
+                Role::User => 8,
+                Role::Bot => 8,
+                Role::System => 2,
+            }
+        };
+        let bottom_padding = 1;
+        let content_height = self.content.height(width.saturating_sub(role_width));
+        content_height + bottom_padding
+    }
 }
 
 // Delegate Content trait to its inner content.
@@ -235,6 +255,12 @@ impl Component for Message {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        self.draw_compact(frame, area, false)
+    }
+}
+
+impl Message {
+    pub fn draw_compact(&mut self, frame: &mut Frame, area: Rect, compact: bool) -> Result<()> {
         use Constraint::*;
 
         if let Some(thinking) = self.content.as_any().downcast_ref::<Thinking>()
@@ -243,7 +269,7 @@ impl Component for Message {
             return Ok(());
         }
 
-        let area_content = if matches!(self.state.role, Role::System) {
+        let area_content = if matches!(self.state.role, Role::System) || compact {
             area.inner(Margin {
                 horizontal: 1,
                 vertical: 0,
