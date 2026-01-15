@@ -14,7 +14,7 @@ use crate::{
     session::{self, Session},
 };
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     User,
     Bot,
@@ -126,6 +126,10 @@ impl Message {
         self
     }
 
+    pub fn set_show_role_prefix(&mut self, show_role_prefix: bool) {
+        self.state.show_role_prefix = show_role_prefix;
+    }
+
     pub fn role(&self) -> &Role {
         &self.state.role
     }
@@ -160,6 +164,26 @@ impl Message {
     pub fn content_as_mut_any(&mut self) -> &mut dyn Any {
         self.content.as_mut_any()
     }
+
+    pub fn height_compact(&self, width: u16, compact: bool) -> usize {
+        if let Some(thinking) = self.content.as_any().downcast_ref::<Thinking>()
+            && thinking.is_collapsed()
+        {
+            return 0;
+        }
+        let role_width = if compact {
+            2
+        } else {
+            match self.state.role {
+                Role::User => 8,
+                Role::Bot => 8,
+                Role::System => 2,
+            }
+        };
+        let bottom_padding = 1;
+        let content_height = self.content.height(width.saturating_sub(role_width));
+        content_height + bottom_padding
+    }
 }
 
 // Delegate Content trait to its inner content.
@@ -171,14 +195,9 @@ impl Content for Message {
             return 0;
         }
         let role_width = match self.state.role {
-            Role::User => 7,
-            Role::Bot => 6,
+            Role::User => 8,
+            Role::Bot => 8,
             Role::System => 2, // margin width for system messages (no role prefix)
-        };
-        let role_width = if self.state.show_role_prefix {
-            role_width
-        } else {
-            2
         };
         let bottom_padding = 1;
         let content_height = self.content.height(width.saturating_sub(role_width));
@@ -192,8 +211,8 @@ impl Content for Message {
             return None;
         }
         let role_width = match self.state.role {
-            Role::User => 7,
-            Role::Bot => 6,
+            Role::User => 8,
+            Role::Bot => 8,
             Role::System => 2,
         };
         let content_width = width.saturating_sub(role_width);
@@ -236,6 +255,12 @@ impl Component for Message {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        self.draw_compact(frame, area, false)
+    }
+}
+
+impl Message {
+    pub fn draw_compact(&mut self, frame: &mut Frame, area: Rect, compact: bool) -> Result<()> {
         use Constraint::*;
 
         if let Some(thinking) = self.content.as_any().downcast_ref::<Thinking>()
@@ -244,10 +269,14 @@ impl Component for Message {
             return Ok(());
         }
 
-        let area_content =
-            if self.state.show_role_prefix && !matches!(self.state.role, Role::System) {
-                let [area_role, area_content] = Layout::horizontal([Length(8), Min(1)]).areas(area);
-
+        let area_content = if matches!(self.state.role, Role::System) || compact {
+            area.inner(Margin {
+                horizontal: 1,
+                vertical: 0,
+            })
+        } else {
+            let [area_role, area_content] = Layout::horizontal([Length(8), Min(1)]).areas(area);
+            if self.state.show_role_prefix {
                 let theme = global::theme();
                 let is_thinking = self.is_thinking();
                 let paragraph = Paragraph::new(Line::from(match self.state.role {
@@ -257,14 +286,9 @@ impl Component for Message {
                     _ => unreachable!(),
                 }));
                 frame.render_widget(paragraph, area_role);
-
-                area_content
-            } else {
-                area.inner(Margin {
-                    horizontal: 1,
-                    vertical: 0,
-                })
-            };
+            }
+            area_content
+        };
         self.content.draw(frame, area_content)?;
 
         Ok(())
