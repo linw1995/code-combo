@@ -280,15 +280,8 @@ impl Agent {
             Some(&agent_config),
         );
 
-        // Apply agent tools as base
-        if let Some(tools) = agent_config.tools.as_deref() {
-            executor.apply_tool_policies(Some(tools), None);
-        }
-
-        // Apply config.toml allow/deny on top (existing behavior)
-        executor.apply_tool_policies(config.allow_tools.as_deref(), config.deny_tools.as_deref());
-
-        // Register run_task tool if subagents are configured
+        // Register run_task tool only if subagents are configured
+        // Must be done before apply_tool_policies so it can be retained
         if let Some(ref subagents) = agent_config.subagents
             && !subagents.is_empty()
         {
@@ -300,6 +293,14 @@ impl Agent {
             let run_task_tool = RunTaskTool::new(run_task_context);
             executor.register_tool(std::sync::Arc::new(run_task_tool));
         }
+
+        // Apply agent tools as base
+        if let Some(tools) = agent_config.tools.as_deref() {
+            executor.apply_tool_policies(Some(tools), None);
+        }
+
+        // Apply config.toml allow/deny on top (existing behavior)
+        executor.apply_tool_policies(config.allow_tools.as_deref(), config.deny_tools.as_deref());
 
         // Build system prompt from agent config
         let system_prompt = build_system_prompt_from_config(
