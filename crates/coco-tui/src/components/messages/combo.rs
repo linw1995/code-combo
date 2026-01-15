@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use coco_highlight::Lang;
 use code_combo::{OutputChunk, StreamKind, ToolUse, tools::Final};
 
+use super::RoleMergeMode;
 use super::fold::FoldState;
 use super::streaming::StreamedLines;
 use crate::{
@@ -120,7 +121,7 @@ impl Combo {
                 ..Default::default()
             }),
             command: None,
-            messages: Messages::default(),
+            messages: Messages::default().with_role_merge_mode(RoleMergeMode::MergeSkipFirstUser),
             preview_lines: default_preview_lines(),
             is_focused: false,
             is_child_focused: false,
@@ -195,7 +196,7 @@ impl Combo {
         self.state.write().view = ComboView::Messages;
         let executing = tool_use.clone();
         self.messages
-            .push(Message::user(Tool::new(tool_use).into()).with_role_prefix(false));
+            .push(Message::user(Tool::new(tool_use).into()));
         self.messages
             .apply_action_to_last(&Action::Tool(ToolAction::GrantSession(executing)));
         self.has_child_output = false;
@@ -204,14 +205,13 @@ impl Combo {
     fn push_prompt(&mut self, prompt: &str) {
         self.state.write().view = ComboView::Messages;
         self.messages
-            .push(Message::user(Plain::new(prompt.to_string()).into()).with_role_prefix(false));
+            .push(Message::user(Plain::new(prompt.to_string()).into()));
     }
 
     fn push_prompt_reply(&mut self, tool_use: &ToolUse) {
         self.state.write().view = ComboView::Messages;
         let params = PromptReply::new(tool_use);
-        self.messages
-            .push(Message::bot(params.into()).with_role_prefix(false));
+        self.messages.push(Message::bot(params.into()));
     }
 
     fn push_prompt_thinking(&mut self, thinking: &str) {
@@ -222,8 +222,7 @@ impl Combo {
 
     fn push_offload_bash_tool_use(&mut self, tool_use: ToolUse) {
         self.state.write().view = ComboView::Messages;
-        self.messages
-            .push(Message::bot(Tool::new(tool_use).into()).with_role_prefix(false));
+        self.messages.push(Message::bot(Tool::new(tool_use).into()));
     }
 
     fn forward_output_to_child(&mut self, tool_use_id: &str, chunk: &OutputChunk) -> bool {
@@ -885,10 +884,12 @@ impl Persistable for Combo {
         let (state, messages): (Inner, Session) = session::load_related(session)?;
         let command = Self::build_command_highlight(&state.command_line);
         let preview_lines = StreamedLines::from_chunks(&state.output_chunks, Some(LIMIT));
+        let mut loaded_messages = Messages::load(messages)?;
+        loaded_messages = loaded_messages.with_role_merge_mode(RoleMergeMode::MergeSkipFirstUser);
         let combo = Self {
             state: State::new(state),
             command,
-            messages: Messages::load(messages)?,
+            messages: loaded_messages,
             preview_lines,
             is_focused: false,
             is_child_focused: false,

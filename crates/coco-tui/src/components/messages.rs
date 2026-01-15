@@ -36,6 +36,15 @@ pub use plain::Plain;
 pub use thinking::Thinking;
 pub use tool::Tool;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RoleMergeMode {
+    #[default]
+    None,
+    Merge,
+    SkipFirstUser,
+    MergeSkipFirstUser,
+}
+
 #[derive(Default, ComponentExt)]
 #[component(type_id = "messages")]
 pub struct Messages {
@@ -45,6 +54,7 @@ pub struct Messages {
     last_focus_range: Option<Range<u16>>,
     stream_map: HashMap<usize, usize>,
     stream_dirty: bool,
+    role_merge_mode: RoleMergeMode,
 
     // scrolling
     viewport_height: u16,
@@ -61,6 +71,11 @@ impl Messages {
         if current > max_offset {
             *self.offset.write() = max_offset;
         }
+    }
+
+    pub fn with_role_merge_mode(mut self, mode: RoleMergeMode) -> Self {
+        self.role_merge_mode = mode;
+        self
     }
 
     pub fn extend(&mut self, iter: impl Iterator<Item = Message>) {
@@ -256,6 +271,7 @@ impl Messages {
     }
 
     pub fn draw_inline(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        self.apply_role_merge();
         let scrollbar_width = 0;
         let inner_width = Self::inner_width(area.width, scrollbar_width);
         let heights = self.message_heights_for_inner_width(inner_width);
@@ -662,6 +678,37 @@ impl Messages {
         Ok(())
     }
 
+    fn apply_role_merge(&mut self) {
+        if matches!(self.role_merge_mode, RoleMergeMode::None) {
+            return;
+        }
+
+        let messages = self.messages.write_untracked();
+        let mut prev_role: Option<Role> = None;
+        let mut prev_is_thinking = false;
+        for (idx, message) in messages.iter_mut().enumerate() {
+            let current_role = *message.role();
+            let current_is_thinking = message.is_thinking();
+            let is_same_display_role =
+                prev_role == Some(current_role) && prev_is_thinking == current_is_thinking;
+            let should_show = match self.role_merge_mode {
+                RoleMergeMode::None => true,
+                RoleMergeMode::Merge => !is_same_display_role,
+                RoleMergeMode::SkipFirstUser => !(idx == 0 && current_role == Role::User),
+                RoleMergeMode::MergeSkipFirstUser => {
+                    if idx == 0 && current_role == Role::User {
+                        false
+                    } else {
+                        !is_same_display_role
+                    }
+                }
+            };
+            message.set_show_role_prefix(should_show);
+            prev_role = Some(current_role);
+            prev_is_thinking = current_is_thinking;
+        }
+    }
+
     fn actual_draw(
         &mut self,
         frame: &mut Frame,
@@ -824,6 +871,7 @@ impl Component for Messages {
     fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
         use Constraint::{Length, Min};
 
+        self.apply_role_merge();
         let scrollbar_width = 2;
         let inner_width = Self::inner_width(area.width, scrollbar_width);
         let heights = self.message_heights_for_inner_width(inner_width);
@@ -1302,7 +1350,7 @@ mod tests {
             .into_iter(),
         );
 
-        let mut terminal = Terminal::new(TestBackend::new(16, 4)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(16, 5)).unwrap();
         terminal
             .draw(|frame| app.draw(frame, frame.area()).unwrap())
             .unwrap();
@@ -1342,5 +1390,177 @@ mod tests {
 
         let max_offset = app.total_height.saturating_sub(app.viewport_height);
         assert_eq!(app.offset.get(), max_offset);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn role_merge_consecutive_same_role() {
+        let mut app = Messages::default().with_role_merge_mode(RoleMergeMode::Merge);
+        app.extend(
+            [
+                Message::user(Plain::new("Hello".to_string()).into()),
+                Message::user(Plain::new("World".to_string()).into()),
+            ]
+            .into_iter(),
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(17, 5)).unwrap();
+        terminal
+            .draw(|frame| app.draw(frame, frame.area()).unwrap())
+            .unwrap();
+
+        let mut expected = Buffer::with_lines(vec![
+            "                 ",
+            "│ User:  Hello   ",
+            "│                ",
+            "│        World   ",
+            "│                ",
+        ]);
+        let border_style = theme().ui.message_border_inactive;
+        expected.set_style(Rect::new(0, 1, 1, 4), border_style);
+        let role_style = theme().ui.user_role;
+        expected.set_style(Rect::new(1, 1, 7, 1), role_style);
+        let text_style = theme().ui.text;
+        expected.set_style(Rect::new(9, 1, 5, 1), text_style);
+        expected.set_style(Rect::new(9, 3, 5, 1), text_style);
+
+        assert_eq!(terminal.backend().buffer(), &expected);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn role_merge_skip_first_user() {
+        let mut app = Messages::default().with_role_merge_mode(RoleMergeMode::MergeSkipFirstUser);
+        app.extend(
+            [
+                Message::user(Plain::new("Hello".to_string()).into()),
+                Message::bot(Plain::new("Hi".to_string()).into()),
+            ]
+            .into_iter(),
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(17, 5)).unwrap();
+        terminal
+            .draw(|frame| app.draw(frame, frame.area()).unwrap())
+            .unwrap();
+
+        let mut expected = Buffer::with_lines(vec![
+            "                 ",
+            "│        Hello   ",
+            "│                ",
+            "│ Bot:   Hi      ",
+            "│                ",
+        ]);
+        let border_style = theme().ui.message_border_inactive;
+        expected.set_style(Rect::new(0, 1, 1, 4), border_style);
+        let role_style = theme().ui.bot_role;
+        expected.set_style(Rect::new(1, 3, 6, 1), role_style);
+        let text_style = theme().ui.text;
+        expected.set_style(Rect::new(9, 1, 5, 1), text_style);
+        expected.set_style(Rect::new(9, 3, 2, 1), text_style);
+
+        assert_eq!(terminal.backend().buffer(), &expected);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn role_merge_skip_first_user_with_consecutive_bots() {
+        let mut app = Messages::default().with_role_merge_mode(RoleMergeMode::MergeSkipFirstUser);
+        app.extend(
+            [
+                Message::user(Plain::new("Hello".to_string()).into()),
+                Message::bot(Plain::new("One".to_string()).into()),
+                Message::bot(Plain::new("Two".to_string()).into()),
+            ]
+            .into_iter(),
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(17, 7)).unwrap();
+        terminal
+            .draw(|frame| app.draw(frame, frame.area()).unwrap())
+            .unwrap();
+
+        let mut expected = Buffer::with_lines(vec![
+            "                 ",
+            "│        Hello   ",
+            "│                ",
+            "│ Bot:   One     ",
+            "│                ",
+            "│        Two     ",
+            "│                ",
+        ]);
+        let border_style = theme().ui.message_border_inactive;
+        expected.set_style(Rect::new(0, 1, 1, 6), border_style);
+        let role_style = theme().ui.bot_role;
+        expected.set_style(Rect::new(1, 3, 6, 1), role_style);
+        let text_style = theme().ui.text;
+        expected.set_style(Rect::new(9, 1, 5, 1), text_style);
+        expected.set_style(Rect::new(9, 3, 3, 1), text_style);
+        expected.set_style(Rect::new(9, 5, 3, 1), text_style);
+
+        assert_eq!(terminal.backend().buffer(), &expected);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn role_merge_thinking_then_bot_not_merged() {
+        let mut app = Messages::default().with_role_merge_mode(RoleMergeMode::MergeSkipFirstUser);
+        app.extend(
+            [
+                Message::user(Plain::new("Hello".to_string()).into()),
+                Message::bot(Thinking::new("hmm".to_string()).into()),
+                Message::bot(Plain::new("Reply".to_string()).into()),
+            ]
+            .into_iter(),
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(17, 7)).unwrap();
+        terminal
+            .draw(|frame| app.draw(frame, frame.area()).unwrap())
+            .unwrap();
+
+        let mut expected = Buffer::with_lines(vec![
+            "                 ",
+            "│        Hello   ",
+            "│                ",
+            "│ Think: hmm     ",
+            "│                ",
+            "│ Bot:   Reply   ",
+            "│                ",
+        ]);
+        let border_style = theme().ui.message_border_inactive;
+        expected.set_style(Rect::new(0, 1, 1, 6), border_style);
+        let thinking_role_style = theme().ui.thinking_role;
+        expected.set_style(Rect::new(1, 3, 8, 1), thinking_role_style);
+        let bot_role_style = theme().ui.bot_role;
+        expected.set_style(Rect::new(1, 5, 6, 1), bot_role_style);
+        let text_style = theme().ui.text;
+        expected.set_style(Rect::new(9, 1, 5, 1), text_style);
+        let thinking_text_style = theme().ui.text.add_modifier(ratatui::style::Modifier::DIM);
+        expected.set_style(Rect::new(9, 3, 3, 1), thinking_text_style);
+        expected.set_style(Rect::new(9, 5, 5, 1), text_style);
+
+        assert_eq!(terminal.backend().buffer(), &expected);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn role_merge_skip_first_user_bot_first() {
+        let mut app = Messages::default().with_role_merge_mode(RoleMergeMode::MergeSkipFirstUser);
+        app.extend([Message::bot(Plain::new("Reply".to_string()).into())].into_iter());
+
+        let mut terminal = Terminal::new(TestBackend::new(17, 3)).unwrap();
+        terminal
+            .draw(|frame| app.draw(frame, frame.area()).unwrap())
+            .unwrap();
+
+        let mut expected = Buffer::with_lines(vec![
+            "                 ",
+            "│ Bot:   Reply   ",
+            "│                ",
+        ]);
+        let border_style = theme().ui.message_border_inactive;
+        expected.set_style(Rect::new(0, 1, 1, 2), border_style);
+        let role_style = theme().ui.bot_role;
+        expected.set_style(Rect::new(1, 1, 6, 1), role_style);
+        let text_style = theme().ui.text;
+        expected.set_style(Rect::new(9, 1, 5, 1), text_style);
+
+        assert_eq!(terminal.backend().buffer(), &expected);
     }
 }
