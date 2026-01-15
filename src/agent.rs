@@ -16,7 +16,10 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use crate::{Config, PromptSchema, ProviderConfig, Result, ResultDisplayExt, ThinkingConfig};
+use crate::{
+    Config, PromptSchema, ProviderConfig, Result, ResultDisplayExt, ThinkingConfig,
+    tools::{RunTaskContext, RunTaskTool},
+};
 use executor::PermissionControl;
 use prompt::{build_system_prompt_from_config, build_system_prompt_from_config_async};
 
@@ -284,6 +287,19 @@ impl Agent {
 
         // Apply config.toml allow/deny on top (existing behavior)
         executor.apply_tool_policies(config.allow_tools.as_deref(), config.deny_tools.as_deref());
+
+        // Register run_task tool if subagents are configured
+        if let Some(ref subagents) = agent_config.subagents
+            && !subagents.is_empty()
+        {
+            let run_task_context = RunTaskContext {
+                subagents: subagents.clone(),
+                config: config.clone(),
+                executor: executor.clone(),
+            };
+            let run_task_tool = RunTaskTool::new(run_task_context);
+            executor.register_tool(std::sync::Arc::new(run_task_tool));
+        }
 
         // Build system prompt from agent config
         let system_prompt = build_system_prompt_from_config(

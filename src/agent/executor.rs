@@ -123,6 +123,12 @@ fn bash_permission_key(input: &Input<'_>) -> Option<String> {
 }
 
 impl Executor {
+    /// Register a new tool dynamically.
+    pub fn register_tool(&mut self, tool: Arc<dyn Tool>) {
+        let name = tool.name().to_string();
+        self.tools.insert(name, tool);
+    }
+
     pub fn set_auto_accept_edits(&mut self, enabled: bool) {
         self.auto_accept_edits = enabled;
     }

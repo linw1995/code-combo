@@ -17,6 +17,7 @@ macro_rules! err_msg {
 mod bash;
 mod list;
 mod read;
+mod run_task;
 mod str_replace;
 
 use crate::{AppliedTextEdit, TextEdit};
@@ -25,6 +26,9 @@ pub use bash::{BASH_TOOL_NAME, BashInput, BashOutput, BashTool, prepare_mcp_envs
 pub use list::{DEFAULT_ENTRY_LIMIT, LIST_TOOL_NAME, ListInput, ListTool, MAX_ENTRY_LIMIT};
 pub use read::{
     DEFAULT_LINE_LIMIT, DEFAULT_LINE_OFFSET, MAX_LINE_LIMIT, READ_TOOL_NAME, ReadInput, ReadTool,
+};
+pub use run_task::{
+    RUN_TASK_TOOL_NAME, RunTaskContext, RunTaskInput, RunTaskOutput, RunTaskTool, run_task,
 };
 pub use str_replace::{STR_REPLACE_TOOL_NAME, StrReplaceInput, StrReplaceTool};
 

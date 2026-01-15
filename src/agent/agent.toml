@@ -1,6 +1,6 @@
 [agent]
 # Builtin available tools
-tools = ["bash", "read", "list", "str_replace"]
+tools = ["bash", "read", "list", "str_replace", "run_task"]
 
 # Builtin system prompt (inline content)
 [agent.system_prompt]
