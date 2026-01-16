@@ -1935,26 +1935,38 @@ async fn task_combo_execute(
                             .await
                         } else {
                             // Original path: use combo_reply tool
-                            let stream_tx = tx.clone();
-                            let stream_name = name.clone();
-                            let updates_seen = Arc::new(AtomicBool::new(false));
-                            let updates_seen_stream = updates_seen.clone();
+                            let disable_stream = agent.disable_stream_for_current_model();
+                            let mut streamed_thinking = false;
                             let reply = if cancel_token.is_cancelled() {
                                 Err("prompt reply cancelled".to_string())
-                            } else {
+                            } else if disable_stream {
                                 agent
+                                    .reply_prompt_with_thinking(
+                                        &system_prompt,
+                                        schemas,
+                                        thinking.clone(),
+                                    )
+                                    .await
+                                    .map_err(|err| err.to_string())
+                            } else {
+                                let stream_tx = tx.clone();
+                                let stream_name = name.clone();
+                                let thinking_seen = Arc::new(AtomicBool::new(false));
+                                let thinking_seen_stream = thinking_seen.clone();
+                                let reply = agent
                                     .reply_prompt_stream_with_thinking(
                                         &system_prompt,
                                         schemas,
                                         thinking.clone(),
                                         cancel_token.clone(),
                                         move |update| {
-                                            updates_seen_stream.store(true, Ordering::Relaxed);
                                             let (index, kind, text) = match update {
                                                 ChatStreamUpdate::Plain { index, text } => {
                                                     (index, BotStreamKind::Plain, text)
                                                 }
                                                 ChatStreamUpdate::Thinking { index, text } => {
+                                                    thinking_seen_stream
+                                                        .store(true, Ordering::Relaxed);
                                                     (index, BotStreamKind::Thinking, text)
                                                 }
                                             };
@@ -1972,11 +1984,12 @@ async fn task_combo_execute(
                                         },
                                     )
                                     .await
-                                    .map_err(|err| err.to_string())
+                                    .map_err(|err| err.to_string());
+                                streamed_thinking = thinking_seen.load(Ordering::Relaxed);
+                                reply
                             };
-                            let streamed = updates_seen.load(Ordering::Relaxed);
                             if let Ok(reply) = &reply {
-                                let thinking = if streamed {
+                                let thinking = if streamed_thinking {
                                     Vec::new()
                                 } else {
                                     reply.thinking.clone()
@@ -2253,23 +2266,38 @@ async fn task_chat(mut agent: Agent, content: ChatContent, cancel_token: Cancell
     tx.send(Event::Ask(AskEvent::Bot)).unwrap();
     tx.send(AnswerEvent::BotStreamReset.into()).ok();
 
-    let stream_tx = tx.clone();
-    let updates_seen = Arc::new(AtomicBool::new(false));
-    let updates_seen_stream = updates_seen.clone();
-    let chat_resp = agent
-        .chat_stream(msg, cancel_token.clone(), move |update| {
-            updates_seen_stream.store(true, Ordering::Relaxed);
-            let (index, kind, text) = match update {
-                ChatStreamUpdate::Plain { index, text } => (index, BotStreamKind::Plain, text),
-                ChatStreamUpdate::Thinking { index, text } => {
-                    (index, BotStreamKind::Thinking, text)
-                }
-            };
-            stream_tx
-                .send(AnswerEvent::BotStream { index, kind, text }.into())
-                .ok();
-        })
-        .await;
+    let disable_stream = agent.disable_stream_for_current_model();
+    let mut streamed_plain = false;
+    let mut streamed_thinking = false;
+    let chat_resp = if disable_stream {
+        agent.chat(msg).await
+    } else {
+        let stream_tx = tx.clone();
+        let plain_seen = Arc::new(AtomicBool::new(false));
+        let thinking_seen = Arc::new(AtomicBool::new(false));
+        let plain_seen_stream = plain_seen.clone();
+        let thinking_seen_stream = thinking_seen.clone();
+        let resp = agent
+            .chat_stream(msg, cancel_token.clone(), move |update| {
+                let (index, kind, text) = match update {
+                    ChatStreamUpdate::Plain { index, text } => {
+                        plain_seen_stream.store(true, Ordering::Relaxed);
+                        (index, BotStreamKind::Plain, text)
+                    }
+                    ChatStreamUpdate::Thinking { index, text } => {
+                        thinking_seen_stream.store(true, Ordering::Relaxed);
+                        (index, BotStreamKind::Thinking, text)
+                    }
+                };
+                stream_tx
+                    .send(AnswerEvent::BotStream { index, kind, text }.into())
+                    .ok();
+            })
+            .await;
+        streamed_plain = plain_seen.load(Ordering::Relaxed);
+        streamed_thinking = thinking_seen.load(Ordering::Relaxed);
+        resp
+    };
 
     let chat_resp = match chat_resp {
         Ok(resp) => resp,
@@ -2290,8 +2318,14 @@ async fn task_chat(mut agent: Agent, content: ChatContent, cancel_token: Cancell
         }
     };
 
-    let streamed = updates_seen.load(Ordering::Relaxed);
-    handle_chat_response(agent, cancel_token, chat_resp, streamed).await;
+    handle_chat_response(
+        agent,
+        cancel_token,
+        chat_resp,
+        streamed_plain,
+        streamed_thinking,
+    )
+    .await;
 }
 
 async fn task_chat_with_history(mut agent: Agent, cancel_token: CancellationToken) {
@@ -2303,23 +2337,38 @@ async fn task_chat_with_history(mut agent: Agent, cancel_token: CancellationToke
     tx.send(Event::Ask(AskEvent::Bot)).unwrap();
     tx.send(AnswerEvent::BotStreamReset.into()).ok();
 
-    let stream_tx = tx.clone();
-    let updates_seen = Arc::new(AtomicBool::new(false));
-    let updates_seen_stream = updates_seen.clone();
-    let chat_resp = agent
-        .chat_stream_with_history(cancel_token.clone(), move |update| {
-            updates_seen_stream.store(true, Ordering::Relaxed);
-            let (index, kind, text) = match update {
-                ChatStreamUpdate::Plain { index, text } => (index, BotStreamKind::Plain, text),
-                ChatStreamUpdate::Thinking { index, text } => {
-                    (index, BotStreamKind::Thinking, text)
-                }
-            };
-            stream_tx
-                .send(AnswerEvent::BotStream { index, kind, text }.into())
-                .ok();
-        })
-        .await;
+    let disable_stream = agent.disable_stream_for_current_model();
+    let mut streamed_plain = false;
+    let mut streamed_thinking = false;
+    let chat_resp = if disable_stream {
+        agent.chat_with_history().await
+    } else {
+        let stream_tx = tx.clone();
+        let plain_seen = Arc::new(AtomicBool::new(false));
+        let thinking_seen = Arc::new(AtomicBool::new(false));
+        let plain_seen_stream = plain_seen.clone();
+        let thinking_seen_stream = thinking_seen.clone();
+        let resp = agent
+            .chat_stream_with_history(cancel_token.clone(), move |update| {
+                let (index, kind, text) = match update {
+                    ChatStreamUpdate::Plain { index, text } => {
+                        plain_seen_stream.store(true, Ordering::Relaxed);
+                        (index, BotStreamKind::Plain, text)
+                    }
+                    ChatStreamUpdate::Thinking { index, text } => {
+                        thinking_seen_stream.store(true, Ordering::Relaxed);
+                        (index, BotStreamKind::Thinking, text)
+                    }
+                };
+                stream_tx
+                    .send(AnswerEvent::BotStream { index, kind, text }.into())
+                    .ok();
+            })
+            .await;
+        streamed_plain = plain_seen.load(Ordering::Relaxed);
+        streamed_thinking = thinking_seen.load(Ordering::Relaxed);
+        resp
+    };
 
     let chat_resp = match chat_resp {
         Ok(resp) => resp,
@@ -2340,21 +2389,28 @@ async fn task_chat_with_history(mut agent: Agent, cancel_token: CancellationToke
         }
     };
 
-    let streamed = updates_seen.load(Ordering::Relaxed);
-    handle_chat_response(agent, cancel_token, chat_resp, streamed).await;
+    handle_chat_response(
+        agent,
+        cancel_token,
+        chat_resp,
+        streamed_plain,
+        streamed_thinking,
+    )
+    .await;
 }
 
 async fn handle_chat_response(
     agent: Agent,
     cancel_token: CancellationToken,
     chat_resp: ChatResponse,
-    streamed: bool,
+    streamed_plain: bool,
+    streamed_thinking: bool,
 ) {
     let tx = global::event_tx();
     let mut to_execute: Vec<code_combo::ToolUse> = vec![];
     let mut bot_messages = match chat_resp.message.content {
         ChatContent::Text(text) => {
-            if streamed {
+            if streamed_plain {
                 Vec::new()
             } else {
                 vec![BotMessage::Plain(text)]
@@ -2372,14 +2428,14 @@ async fn handle_chat_response(
                 .into_iter()
                 .filter_map(|m| match m {
                     code_combo::Block::Text { text } => {
-                        if streamed {
+                        if streamed_plain {
                             None
                         } else {
                             Some(BotMessage::Plain(text))
                         }
                     }
                     code_combo::Block::Thinking { thinking, .. } => {
-                        if streamed {
+                        if streamed_thinking {
                             None
                         } else {
                             Some(BotMessage::Thinking(thinking))

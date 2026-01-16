@@ -11,7 +11,7 @@ use snafu::Whatever;
 use ::anthropic as anthropic_api;
 use ::openai as openai_api;
 
-use crate::{ProviderConfig, ProviderKind, Result, ResultDisplayExt};
+use crate::{ProviderConfig, ProviderKind, RequestOptions, Result, ResultDisplayExt};
 
 pub use types::*;
 
@@ -53,9 +53,12 @@ impl Client {
         conversations: Vec<Message>,
         tools: Vec<Tool>,
         thinking: Option<Thinking>,
+        request_options: &RequestOptions,
     ) -> Result<MessagesResponse> {
         match self {
             Client::Anthropic(client) => {
+                let temperature = request_options.temperature.map(f64::from);
+                let max_tokens = request_options.max_tokens;
                 let response = client
                     .messages()
                     .maybe_system_prompt(system_prompt)
@@ -67,16 +70,24 @@ impl Client {
                     )
                     .tools(tools.into_iter().map(anthropic_api::Tool::from).collect())
                     .maybe_thinking(thinking.map(anthropic_api::Thinking::from))
+                    .maybe_temperature(temperature)
+                    .maybe_max_tokens(max_tokens)
                     .call()
                     .await
                     .whatever_context_display("failed to send messages")?;
                 Ok(response.into())
             }
-            Client::OpenAI(client) => {
-                openai::messages(client, system_prompt, conversations, tools, None, thinking)
-                    .await
-                    .whatever_context_display("failed to send messages")
-            }
+            Client::OpenAI(client) => openai::messages(
+                client,
+                system_prompt,
+                conversations,
+                tools,
+                None,
+                thinking,
+                request_options,
+            )
+            .await
+            .whatever_context_display("failed to send messages"),
         }
     }
 
@@ -86,9 +97,12 @@ impl Client {
         conversations: Vec<Message>,
         tools: Vec<Tool>,
         thinking: Option<Thinking>,
+        request_options: &RequestOptions,
     ) -> Result<MessagesStream> {
         match self {
             Client::Anthropic(client) => {
+                let temperature = request_options.temperature.map(f64::from);
+                let max_tokens = request_options.max_tokens;
                 let stream = client
                     .messages_stream()
                     .maybe_system_prompt(system_prompt)
@@ -100,6 +114,8 @@ impl Client {
                     )
                     .tools(tools.into_iter().map(anthropic_api::Tool::from).collect())
                     .maybe_thinking(thinking.map(anthropic_api::Thinking::from))
+                    .maybe_temperature(temperature)
+                    .maybe_max_tokens(max_tokens)
                     .call()
                     .await
                     .whatever_context_display("failed to send messages stream")?;
@@ -114,6 +130,7 @@ impl Client {
                     tools,
                     None,
                     thinking,
+                    request_options,
                 )
                 .await
                 .whatever_context_display("failed to send messages stream")?;
@@ -129,9 +146,12 @@ impl Client {
         tools: Vec<Tool>,
         tool_choice: ToolChoice,
         thinking: Option<Thinking>,
+        request_options: &RequestOptions,
     ) -> Result<MessagesResponse> {
         match self {
             Client::Anthropic(client) => {
+                let temperature = request_options.temperature.map(f64::from);
+                let max_tokens = request_options.max_tokens;
                 let response = client
                     .messages_with_tool_choice(
                         system_prompt,
@@ -142,6 +162,8 @@ impl Client {
                         tools.into_iter().map(anthropic_api::Tool::from).collect(),
                         tool_choice.into(),
                         thinking.map(anthropic_api::Thinking::from),
+                        temperature,
+                        max_tokens,
                     )
                     .await
                     .whatever_context_display("failed to request tool choice")?;
@@ -154,6 +176,7 @@ impl Client {
                 tools,
                 Some(tool_choice),
                 thinking,
+                request_options,
             )
             .await
             .whatever_context_display("failed to request tool choice"),
@@ -167,9 +190,12 @@ impl Client {
         tools: Vec<Tool>,
         tool_choice: ToolChoice,
         thinking: Option<Thinking>,
+        request_options: &RequestOptions,
     ) -> Result<MessagesStream> {
         match self {
             Client::Anthropic(client) => {
+                let temperature = request_options.temperature.map(f64::from);
+                let max_tokens = request_options.max_tokens;
                 let stream = client
                     .messages_stream_with_tool_choice(
                         system_prompt,
@@ -180,6 +206,8 @@ impl Client {
                         tools.into_iter().map(anthropic_api::Tool::from).collect(),
                         tool_choice.into(),
                         thinking.map(anthropic_api::Thinking::from),
+                        temperature,
+                        max_tokens,
                     )
                     .await
                     .whatever_context_display("failed to request tool choice stream")?;
@@ -194,6 +222,7 @@ impl Client {
                     tools,
                     Some(tool_choice),
                     thinking,
+                    request_options,
                 )
                 .await
                 .whatever_context_display("failed to request tool choice stream")?;

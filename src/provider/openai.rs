@@ -10,6 +10,7 @@ use snafu::Whatever;
 
 use ::openai as openai_api;
 
+use crate::RequestOptions;
 use crate::provider::types::{
     Block, Content, ContentBlockDelta, Message, MessageDelta, MessagesResponse,
     MessagesStreamEvent, Role, StopReason, StreamErrorDetail, Thinking, Tool, ToolChoice, ToolUse,
@@ -38,8 +39,16 @@ pub async fn messages(
     tools: Vec<Tool>,
     tool_choice: Option<ToolChoice>,
     thinking: Option<Thinking>,
+    request_options: &RequestOptions,
 ) -> Result<MessagesResponse, Whatever> {
-    let request = build_request(system_prompt, conversations, tools, tool_choice, thinking)?;
+    let request = build_request(
+        system_prompt,
+        conversations,
+        tools,
+        tool_choice,
+        thinking,
+        request_options,
+    )?;
     let response = client.chat_completions(request).await?;
     Ok(response_into_messages(response))
 }
@@ -51,8 +60,16 @@ pub async fn messages_stream(
     tools: Vec<Tool>,
     tool_choice: Option<ToolChoice>,
     thinking: Option<Thinking>,
+    request_options: &RequestOptions,
 ) -> Result<OpenAIStream, Whatever> {
-    let request = build_request(system_prompt, conversations, tools, tool_choice, thinking)?;
+    let request = build_request(
+        system_prompt,
+        conversations,
+        tools,
+        tool_choice,
+        thinking,
+        request_options,
+    )?;
     let stream = client.chat_completions_stream(request).await?;
     Ok(OpenAIStream::new(stream))
 }
@@ -63,6 +80,7 @@ fn build_request(
     tools: Vec<Tool>,
     tool_choice: Option<ToolChoice>,
     thinking: Option<Thinking>,
+    request_options: &RequestOptions,
 ) -> Result<openai_api::ChatCompletionRequest, Whatever> {
     let mut messages = Vec::new();
     if let Some(system_prompt) = system_prompt
@@ -77,7 +95,10 @@ fn build_request(
             name: None,
         });
     }
-    messages.extend(convert_messages(conversations)?);
+    messages.extend(convert_messages(
+        conversations,
+        request_options.include_reasoning_content,
+    )?);
     let tools = tools
         .into_iter()
         .map(|tool| openai_api::Tool {
@@ -101,6 +122,8 @@ fn build_request(
         messages,
         tools,
         tool_choice,
+        temperature: request_options.temperature,
+        max_tokens: request_options.max_tokens,
         stream: None,
         stream_options: None,
         reasoning_effort,
@@ -120,7 +143,10 @@ fn convert_tool_choice(choice: ToolChoice) -> openai_api::ToolChoice {
     }
 }
 
-fn convert_messages(conversations: Vec<Message>) -> Result<Vec<openai_api::ChatMessage>, Whatever> {
+fn convert_messages(
+    conversations: Vec<Message>,
+    include_reasoning_content: bool,
+) -> Result<Vec<openai_api::ChatMessage>, Whatever> {
     let mut output = Vec::new();
     for message in conversations {
         match message.role {
@@ -128,7 +154,7 @@ fn convert_messages(conversations: Vec<Message>) -> Result<Vec<openai_api::ChatM
                 convert_user_message(message.content, &mut output)?;
             }
             Role::Assistant => {
-                convert_assistant_message(message.content, &mut output)?;
+                convert_assistant_message(message.content, include_reasoning_content, &mut output)?;
             }
         }
     }
@@ -196,10 +222,12 @@ fn convert_user_message(
 
 fn convert_assistant_message(
     content: Content,
+    include_reasoning_content: bool,
     output: &mut Vec<openai_api::ChatMessage>,
 ) -> Result<(), Whatever> {
     let mut text = String::new();
     let mut tool_calls = Vec::new();
+    let mut reasoning = String::new();
     match content {
         Content::Text(value) => {
             if !value.is_empty() {
@@ -230,17 +258,29 @@ fn convert_assistant_message(
                             },
                         });
                     }
-                    Block::Thinking { .. } => (),
+                    Block::Thinking { thinking, .. } => {
+                        if include_reasoning_content {
+                            if !reasoning.is_empty() {
+                                reasoning.push('\n');
+                            }
+                            reasoning.push_str(&thinking);
+                        }
+                    }
                     Block::ToolResult { .. } => (),
                 }
             }
         }
     }
-    if !text.is_empty() || !tool_calls.is_empty() {
+    let reasoning_content = if include_reasoning_content && !reasoning.is_empty() {
+        Some(reasoning)
+    } else {
+        None
+    };
+    if !text.is_empty() || !tool_calls.is_empty() || reasoning_content.is_some() {
         output.push(openai_api::ChatMessage {
             role: openai_api::Role::Assistant,
             content: if text.is_empty() { None } else { Some(text) },
-            reasoning_content: None,
+            reasoning_content,
             tool_calls: if tool_calls.is_empty() {
                 None
             } else {
@@ -529,5 +569,70 @@ impl From<openai_api::ErrorDetail> for StreamErrorDetail {
             r#type: value.r#type,
             code: value.code,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Content, Message, RequestOptions, Role, build_request};
+
+    #[test]
+    fn build_request_includes_reasoning_content() {
+        let request_options = RequestOptions {
+            include_reasoning_content: true,
+            ..RequestOptions::default()
+        };
+        let message = Message {
+            role: Role::Assistant,
+            content: Content::Multiple(vec![
+                super::Block::Thinking {
+                    thinking: "Reasoning".to_string(),
+                    signature: None,
+                },
+                super::Block::Text {
+                    text: "Answer".to_string(),
+                },
+            ]),
+        };
+        let request = build_request(
+            None,
+            vec![message],
+            Vec::new(),
+            None,
+            None,
+            &request_options,
+        )
+        .expect("build request");
+        let assistant = request
+            .messages
+            .iter()
+            .find(|msg| matches!(msg.role, super::openai_api::Role::Assistant))
+            .expect("assistant message");
+        assert_eq!(assistant.reasoning_content.as_deref(), Some("Reasoning"));
+        assert_eq!(assistant.content.as_deref(), Some("Answer"));
+    }
+
+    #[test]
+    fn build_request_omits_reasoning_content_by_default() {
+        let message = Message {
+            role: Role::Assistant,
+            content: Content::Multiple(vec![super::Block::Thinking {
+                thinking: "Hidden".to_string(),
+                signature: None,
+            }]),
+        };
+        let request = build_request(
+            None,
+            vec![message],
+            Vec::new(),
+            None,
+            None,
+            &RequestOptions::default(),
+        )
+        .expect("build request");
+        assert!(!request.messages.iter().any(|msg| {
+            matches!(msg.role, super::openai_api::Role::Assistant)
+                && msg.reasoning_content.as_deref() == Some("Hidden")
+        }));
     }
 }
