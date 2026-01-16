@@ -1931,14 +1931,25 @@ async fn task_combo_execute(
                             .await
                         } else {
                             // Original path: use combo_reply tool
-                            let stream_tx = tx.clone();
-                            let stream_name = name.clone();
-                            let updates_seen = Arc::new(AtomicBool::new(false));
-                            let updates_seen_stream = updates_seen.clone();
+                            let disable_stream = agent.disable_stream_for_current_model();
+                            let mut streamed = false;
                             let reply = if cancel_token.is_cancelled() {
                                 Err("prompt reply cancelled".to_string())
-                            } else {
+                            } else if disable_stream {
                                 agent
+                                    .reply_prompt_with_thinking(
+                                        &system_prompt,
+                                        schemas,
+                                        thinking.clone(),
+                                    )
+                                    .await
+                                    .map_err(|err| err.to_string())
+                            } else {
+                                let stream_tx = tx.clone();
+                                let stream_name = name.clone();
+                                let updates_seen = Arc::new(AtomicBool::new(false));
+                                let updates_seen_stream = updates_seen.clone();
+                                let reply = agent
                                     .reply_prompt_stream_with_thinking(
                                         &system_prompt,
                                         schemas,
@@ -1968,9 +1979,10 @@ async fn task_combo_execute(
                                         },
                                     )
                                     .await
-                                    .map_err(|err| err.to_string())
+                                    .map_err(|err| err.to_string());
+                                streamed = updates_seen.load(Ordering::Relaxed);
+                                reply
                             };
-                            let streamed = updates_seen.load(Ordering::Relaxed);
                             if let Ok(reply) = &reply {
                                 let thinking = if streamed {
                                     Vec::new()
@@ -2249,23 +2261,31 @@ async fn task_chat(mut agent: Agent, content: ChatContent, cancel_token: Cancell
     tx.send(Event::Ask(AskEvent::Bot)).unwrap();
     tx.send(AnswerEvent::BotStreamReset.into()).ok();
 
-    let stream_tx = tx.clone();
-    let updates_seen = Arc::new(AtomicBool::new(false));
-    let updates_seen_stream = updates_seen.clone();
-    let chat_resp = agent
-        .chat_stream(msg, cancel_token.clone(), move |update| {
-            updates_seen_stream.store(true, Ordering::Relaxed);
-            let (index, kind, text) = match update {
-                ChatStreamUpdate::Plain { index, text } => (index, BotStreamKind::Plain, text),
-                ChatStreamUpdate::Thinking { index, text } => {
-                    (index, BotStreamKind::Thinking, text)
-                }
-            };
-            stream_tx
-                .send(AnswerEvent::BotStream { index, kind, text }.into())
-                .ok();
-        })
-        .await;
+    let disable_stream = agent.disable_stream_for_current_model();
+    let mut streamed = false;
+    let chat_resp = if disable_stream {
+        agent.chat(msg).await
+    } else {
+        let stream_tx = tx.clone();
+        let updates_seen = Arc::new(AtomicBool::new(false));
+        let updates_seen_stream = updates_seen.clone();
+        let resp = agent
+            .chat_stream(msg, cancel_token.clone(), move |update| {
+                updates_seen_stream.store(true, Ordering::Relaxed);
+                let (index, kind, text) = match update {
+                    ChatStreamUpdate::Plain { index, text } => (index, BotStreamKind::Plain, text),
+                    ChatStreamUpdate::Thinking { index, text } => {
+                        (index, BotStreamKind::Thinking, text)
+                    }
+                };
+                stream_tx
+                    .send(AnswerEvent::BotStream { index, kind, text }.into())
+                    .ok();
+            })
+            .await;
+        streamed = updates_seen.load(Ordering::Relaxed);
+        resp
+    };
 
     let chat_resp = match chat_resp {
         Ok(resp) => resp,
@@ -2286,7 +2306,6 @@ async fn task_chat(mut agent: Agent, content: ChatContent, cancel_token: Cancell
         }
     };
 
-    let streamed = updates_seen.load(Ordering::Relaxed);
     handle_chat_response(agent, cancel_token, chat_resp, streamed).await;
 }
 
@@ -2299,23 +2318,31 @@ async fn task_chat_with_history(mut agent: Agent, cancel_token: CancellationToke
     tx.send(Event::Ask(AskEvent::Bot)).unwrap();
     tx.send(AnswerEvent::BotStreamReset.into()).ok();
 
-    let stream_tx = tx.clone();
-    let updates_seen = Arc::new(AtomicBool::new(false));
-    let updates_seen_stream = updates_seen.clone();
-    let chat_resp = agent
-        .chat_stream_with_history(cancel_token.clone(), move |update| {
-            updates_seen_stream.store(true, Ordering::Relaxed);
-            let (index, kind, text) = match update {
-                ChatStreamUpdate::Plain { index, text } => (index, BotStreamKind::Plain, text),
-                ChatStreamUpdate::Thinking { index, text } => {
-                    (index, BotStreamKind::Thinking, text)
-                }
-            };
-            stream_tx
-                .send(AnswerEvent::BotStream { index, kind, text }.into())
-                .ok();
-        })
-        .await;
+    let disable_stream = agent.disable_stream_for_current_model();
+    let mut streamed = false;
+    let chat_resp = if disable_stream {
+        agent.chat_with_history().await
+    } else {
+        let stream_tx = tx.clone();
+        let updates_seen = Arc::new(AtomicBool::new(false));
+        let updates_seen_stream = updates_seen.clone();
+        let resp = agent
+            .chat_stream_with_history(cancel_token.clone(), move |update| {
+                updates_seen_stream.store(true, Ordering::Relaxed);
+                let (index, kind, text) = match update {
+                    ChatStreamUpdate::Plain { index, text } => (index, BotStreamKind::Plain, text),
+                    ChatStreamUpdate::Thinking { index, text } => {
+                        (index, BotStreamKind::Thinking, text)
+                    }
+                };
+                stream_tx
+                    .send(AnswerEvent::BotStream { index, kind, text }.into())
+                    .ok();
+            })
+            .await;
+        streamed = updates_seen.load(Ordering::Relaxed);
+        resp
+    };
 
     let chat_resp = match chat_resp {
         Ok(resp) => resp,
@@ -2336,7 +2363,6 @@ async fn task_chat_with_history(mut agent: Agent, cancel_token: CancellationToke
         }
     };
 
-    let streamed = updates_seen.load(Ordering::Relaxed);
     handle_chat_response(agent, cancel_token, chat_resp, streamed).await;
 }
 
