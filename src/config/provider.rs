@@ -24,6 +24,8 @@ pub struct ModelRequestConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disable_stream: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offload_combo_reply: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<usize>,
@@ -36,6 +38,7 @@ pub struct RequestOptions {
     pub tool_choice_fallback: bool,
     pub include_reasoning_content: bool,
     pub disable_stream: bool,
+    pub offload_combo_reply: Option<bool>,
     pub temperature: Option<f32>,
     pub max_tokens: Option<usize>,
 }
@@ -56,6 +59,9 @@ impl RequestOptions {
         }
         if let Some(value) = override_config.disable_stream {
             self.disable_stream = value;
+        }
+        if let Some(value) = override_config.offload_combo_reply {
+            self.offload_combo_reply = Some(value);
         }
         if override_config.temperature.is_some() {
             self.temperature = override_config.temperature;

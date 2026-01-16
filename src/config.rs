@@ -640,6 +640,7 @@ safe_commands_mode = \"override\"\n\
         let config = Config::default();
         let options = config.request_options_for_model("kimi-k2-thinking");
         assert!(options.include_reasoning_content);
+        assert_eq!(options.offload_combo_reply, Some(true));
         assert_eq!(options.temperature, Some(1.0));
         assert_eq!(options.max_tokens, Some(16000));
     }

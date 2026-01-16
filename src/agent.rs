@@ -564,6 +564,7 @@ impl Agent {
     ) -> Result<PromptReply> {
         ensure_whatever!(!schemas.is_empty(), "schemas cannot be empty");
         let request_options = self.request_options_for_current_model();
+        let use_tool_choice_fallback = should_use_tool_choice_fallback(&request_options);
         ensure_whatever!(
             !request_options.disable_tools,
             "reply tool disabled by request options"
@@ -572,8 +573,10 @@ impl Agent {
         let (_, client) = self.pick_provider()?;
         let messages = {
             let mut history = self.messages.lock().await;
-            let new_message = build_reply_prompt_message(&schemas);
-            history.push(new_message);
+            if use_tool_choice_fallback {
+                let new_message = build_reply_prompt_message(&schemas);
+                history.push(new_message);
+            }
             history.clone()
         };
         let messages = self.prepare_messages_for_request(messages, &request_options);
@@ -667,6 +670,7 @@ impl Agent {
     {
         ensure_whatever!(!schemas.is_empty(), "schemas cannot be empty");
         let request_options = self.request_options_for_current_model();
+        let use_tool_choice_fallback = should_use_tool_choice_fallback(&request_options);
         ensure_whatever!(
             !request_options.disable_tools,
             "reply tool disabled by request options"
@@ -675,8 +679,10 @@ impl Agent {
         let (_, client) = self.pick_provider()?;
         let messages = {
             let mut history = self.messages.lock().await;
-            let new_message = build_reply_prompt_message(&schemas);
-            history.push(new_message);
+            if use_tool_choice_fallback {
+                let new_message = build_reply_prompt_message(&schemas);
+                history.push(new_message);
+            }
             history.clone()
         };
         let messages = self.prepare_messages_for_request(messages, &request_options);
@@ -833,7 +839,14 @@ impl Agent {
     pub fn offload_combo_reply(&self) -> bool {
         let selected_model = self.selected_model();
         match Self::select_provider_index(selected_model.as_deref(), &self.config.providers) {
-            Ok(idx) => self.config.providers[idx].offload_combo_reply,
+            Ok(idx) => {
+                let provider = &self.config.providers[idx];
+                let model = Self::resolve_model(provider, selected_model);
+                let options = self.config.request_options_for_model(&model);
+                options
+                    .offload_combo_reply
+                    .unwrap_or(provider.offload_combo_reply)
+            }
             Err(_) => false,
         }
     }
@@ -1089,6 +1102,10 @@ Required fields: {fields}."
     )
 }
 
+fn should_use_tool_choice_fallback(request_options: &RequestOptions) -> bool {
+    request_options.disable_tool_choice && request_options.tool_choice_fallback
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1186,5 +1203,16 @@ mod tests {
             Block::Thinking { thinking, .. } => assert_eq!(thinking, "Reasoning"),
             other => panic!("unexpected block: {other:?}"),
         }
+    }
+
+    #[test]
+    fn tool_choice_fallback_requires_disable() {
+        let mut options = RequestOptions {
+            tool_choice_fallback: true,
+            ..Default::default()
+        };
+        assert!(!should_use_tool_choice_fallback(&options));
+        options.disable_tool_choice = true;
+        assert!(should_use_tool_choice_fallback(&options));
     }
 }
