@@ -1744,6 +1744,10 @@ async fn handle_offload_combo_reply(
         }
     };
 
+    agent
+        .append_message(build_tool_result_message(&tool_use_id, is_error, &output))
+        .await;
+
     // Send combo-specific result event for UI feedback (not AnswerEvent::ToolResult
     // which would be intercepted by Chat and trigger another chat task)
     tx.send(
