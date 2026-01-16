@@ -27,10 +27,10 @@ use super::super::streaming::StreamedLines;
 use super::{Component, Content, ContentComponent};
 use crate::components::CacheInvalidation;
 use crate::{
-    actions::Action,
+    actions::{Action, ToolAction},
     components::{Persistable, ShortcutHints},
     error::*,
-    events::{AnswerEvent, Event},
+    events::{AnswerEvent, AskEvent, Event},
     global::{self, State},
     session::{self, Session},
     widgets::Paragraph,
@@ -45,11 +45,13 @@ struct Inner {
     display_state: FoldState,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ExecState {
-    #[default]
-    Initial,
+    Initial {
+        #[serde(default)]
+        requiring_confirmation: bool,
+    },
     Executing {
         chunks: Vec<OutputChunk>,
     },
@@ -57,6 +59,14 @@ enum ExecState {
         output: RunTaskOutput,
         chunks: Vec<OutputChunk>,
     },
+}
+
+impl Default for ExecState {
+    fn default() -> Self {
+        Self::Initial {
+            requiring_confirmation: false,
+        }
+    }
 }
 
 const OUTPUT_PREVIEW_LINES: usize = 8;
@@ -110,7 +120,9 @@ impl<'a> RunTask<'a> {
                 output,
                 chunks: Vec::new(),
             },
-            None => ExecState::Initial,
+            None => ExecState::Initial {
+                requiring_confirmation: false,
+            },
         };
 
         let header = build_header(&input);
@@ -137,7 +149,7 @@ impl<'a> RunTask<'a> {
         let theme = global::theme();
 
         match &self.state.exec_state {
-            ExecState::Initial => Paragraph::new(Vec::<Line>::new()),
+            ExecState::Initial { .. } => Paragraph::new(Vec::<Line>::new()),
             ExecState::Executing { .. } => {
                 if self.preview_lines.is_empty() {
                     return Paragraph::new(vec![Line::from(Span::styled(
@@ -223,13 +235,32 @@ impl<'a> RunTask<'a> {
         }
     }
 
+    fn requiring_confirmation(&self) -> bool {
+        matches!(
+            &self.state.exec_state,
+            ExecState::Initial {
+                requiring_confirmation: true
+            }
+        )
+    }
+
+    fn set_requiring_confirmation(&mut self, value: bool) {
+        let mut state = self.state.write();
+        if let ExecState::Initial {
+            requiring_confirmation,
+        } = &mut state.exec_state
+        {
+            *requiring_confirmation = value;
+        }
+    }
+
     fn push_chunk(&mut self, chunk: OutputChunk) {
         let chunk_for_state = chunk.clone();
         let mut state = self.state.write();
         match &mut state.exec_state {
             ExecState::Executing { chunks } => chunks.push(chunk_for_state),
             ExecState::Finished { chunks, .. } => chunks.push(chunk_for_state),
-            ExecState::Initial => {
+            ExecState::Initial { .. } => {
                 state.exec_state = ExecState::Executing {
                     chunks: vec![chunk_for_state],
                 };
@@ -247,7 +278,7 @@ impl<'a> RunTask<'a> {
                 let chunks = match &mut state.exec_state {
                     ExecState::Executing { chunks } => std::mem::take(chunks),
                     ExecState::Finished { chunks, .. } => std::mem::take(chunks),
-                    ExecState::Initial => Vec::new(),
+                    ExecState::Initial { .. } => Vec::new(),
                 };
                 state.exec_state = ExecState::Finished { output, chunks };
                 state.display_state = FoldState::Preview;
@@ -263,7 +294,7 @@ impl<'a> RunTask<'a> {
                 !output.response.is_empty() || !chunks.is_empty()
             }
             ExecState::Executing { chunks } => !chunks.is_empty(),
-            ExecState::Initial => false,
+            ExecState::Initial { .. } => false,
         }
     }
 
@@ -299,6 +330,13 @@ impl<'a> Content for RunTask<'a> {
     }
 
     fn shortcut_hints(&self) -> ShortcutHints {
+        if self.requiring_confirmation() {
+            let mut hints = ShortcutHints::default();
+            hints.push_visible(&[("Run", "CR"), ("Allow in Session", "A")]);
+            hints.push_visible(&[("Cancel", "Esc")]);
+            return hints;
+        }
+
         if !self.has_output_content() {
             return ShortcutHints::default();
         }
@@ -350,7 +388,7 @@ impl Persistable for RunTask<'static> {
             ExecState::Executing { chunks } | ExecState::Finished { chunks, .. } => {
                 StreamedLines::from_chunks(chunks, Some(OUTPUT_PREVIEW_LINES))
             }
-            ExecState::Initial => StreamedLines::new(Some(OUTPUT_PREVIEW_LINES)),
+            ExecState::Initial { .. } => StreamedLines::new(Some(OUTPUT_PREVIEW_LINES)),
         };
         let header = build_header(&state.input);
         let mut component = Self {
@@ -379,6 +417,10 @@ impl Component for RunTask<'static> {
 
     fn handle_event(&mut self, event: &Event) {
         match event {
+            Event::Ask(AskEvent::ToolUsePermission(_)) => {
+                self.set_requiring_confirmation(true);
+                self.state.write().display_state.preview();
+            }
             Event::Answer(AnswerEvent::ToolOutput { id, chunk }) => {
                 if id != &self.state.tool_use.id {
                     return;
@@ -390,6 +432,7 @@ impl Component for RunTask<'static> {
                 if let Err(err) = self.update_output(Some(output.to_owned())) {
                     warn!(?err, "failed to update run_task output");
                 };
+                self.set_requiring_confirmation(false);
             }
             _ => {
                 handle_component_event!(self, event);
@@ -398,15 +441,47 @@ impl Component for RunTask<'static> {
     }
 
     fn handle_key_event(&mut self, key: &KeyEvent) {
-        if let (KeyModifiers::NONE, KeyCode::Char('z')) = (key.modifiers, key.code) {
-            if !self.has_output_content() {
-                return;
+        match (key.modifiers, key.code) {
+            (KeyModifiers::NONE, KeyCode::Char('z')) => {
+                if !self.has_output_content() {
+                    return;
+                }
+                let mut state = self.state.write();
+                state.display_state = match state.display_state {
+                    FoldState::Expanded => FoldState::Collapsed,
+                    FoldState::Collapsed | FoldState::Preview => FoldState::Expanded,
+                };
             }
-            let mut state = self.state.write();
-            state.display_state = match state.display_state {
-                FoldState::Expanded => FoldState::Collapsed,
-                FoldState::Collapsed | FoldState::Preview => FoldState::Expanded,
-            };
+            (KeyModifiers::NONE, KeyCode::Enter) => {
+                if !self.requiring_confirmation() {
+                    return;
+                }
+                self.state.write().display_state.preview();
+                global::action_tx()
+                    .send(ToolAction::Grant(self.state.tool_use.to_owned()).into())
+                    .unwrap();
+                self.set_requiring_confirmation(false);
+            }
+            (KeyModifiers::NONE, KeyCode::Char('a') | KeyCode::Char('A')) => {
+                if !self.requiring_confirmation() {
+                    return;
+                }
+                self.state.write().display_state.preview();
+                global::action_tx()
+                    .send(ToolAction::GrantSession(self.state.tool_use.to_owned()).into())
+                    .unwrap();
+                self.set_requiring_confirmation(false);
+            }
+            (KeyModifiers::NONE, KeyCode::Esc) => {
+                if !self.requiring_confirmation() {
+                    return;
+                }
+                global::action_tx()
+                    .send(ToolAction::Cancel(self.state.tool_use.to_owned()).into())
+                    .unwrap();
+                self.set_requiring_confirmation(false);
+            }
+            _ => (),
         }
     }
 
