@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::{
-    Config, PromptSchema, ProviderConfig, Result, ResultDisplayExt, ThinkingConfig,
+    Config, PromptSchema, ProviderConfig, RequestOptions, Result, ResultDisplayExt, ThinkingConfig,
     tools::{RunTaskContext, RunTaskTool},
 };
 use executor::PermissionControl;
@@ -407,6 +407,7 @@ impl Agent {
     }
 
     pub async fn chat(&mut self, message: Message) -> Result<ChatResponse> {
+        let request_options = self.request_options_for_current_model();
         let (_, client) = self.pick_provider()?;
         let thinking = self.thinking_payload();
 
@@ -415,14 +416,16 @@ impl Agent {
             messages.push(message);
             messages.clone()
         };
-        let messages = self.prepare_messages_for_request(messages);
+        let messages = self.prepare_messages_for_request(messages, &request_options);
+        let tools = self.provider_tools_for_request(&request_options);
 
         let response = client
             .messages(
                 Some(&self.system_prompt),
                 messages,
-                self.executor.provider_tools(),
+                tools,
                 thinking,
+                &request_options,
             )
             .await
             .inspect_err(|err| {
@@ -446,17 +449,20 @@ impl Agent {
     }
 
     pub async fn chat_with_history(&mut self) -> Result<ChatResponse> {
+        let request_options = self.request_options_for_current_model();
         let (_, client) = self.pick_provider()?;
         let thinking = self.thinking_payload();
 
         let messages = self.messages.lock().await.clone();
-        let messages = self.prepare_messages_for_request(messages);
+        let messages = self.prepare_messages_for_request(messages, &request_options);
+        let tools = self.provider_tools_for_request(&request_options);
         let response = client
             .messages(
                 Some(&self.system_prompt),
                 messages,
-                self.executor.provider_tools(),
+                tools,
                 thinking,
+                &request_options,
             )
             .await
             .inspect_err(|err| {
@@ -488,7 +494,8 @@ impl Agent {
     where
         F: FnMut(ChatStreamUpdate) + Send,
     {
-        self.chat_stream_internal(Some(message), cancel_token, on_update)
+        let request_options = self.request_options_for_current_model();
+        self.chat_stream_internal(Some(message), cancel_token, on_update, &request_options)
             .await
     }
 
@@ -500,7 +507,8 @@ impl Agent {
     where
         F: FnMut(ChatStreamUpdate) + Send,
     {
-        self.chat_stream_internal(None, cancel_token, on_update)
+        let request_options = self.request_options_for_current_model();
+        self.chat_stream_internal(None, cancel_token, on_update, &request_options)
             .await
     }
 
@@ -509,6 +517,7 @@ impl Agent {
         message: Option<Message>,
         cancel_token: CancellationToken,
         mut on_update: F,
+        request_options: &RequestOptions,
     ) -> Result<ChatResponse>
     where
         F: FnMut(ChatStreamUpdate) + Send,
@@ -523,14 +532,16 @@ impl Agent {
             }
             messages.clone()
         };
-        let messages = self.prepare_messages_for_request(messages);
+        let messages = self.prepare_messages_for_request(messages, request_options);
+        let tools = self.provider_tools_for_request(request_options);
 
         let mut stream = client
             .messages_stream(
                 Some(&self.system_prompt),
                 messages,
-                self.executor.provider_tools(),
+                tools,
                 thinking,
+                request_options,
             )
             .await
             .inspect_err(|err| {
@@ -585,15 +596,23 @@ impl Agent {
         thinking: Option<ThinkingConfig>,
     ) -> Result<PromptReply> {
         ensure_whatever!(!schemas.is_empty(), "schemas cannot be empty");
+        let request_options = self.request_options_for_current_model();
+        let use_tool_choice_fallback = should_use_tool_choice_fallback(&request_options);
+        ensure_whatever!(
+            !request_options.disable_tools,
+            "reply tool disabled by request options"
+        );
         let reply_tool = build_reply_tool(&schemas)?;
         let (_, client) = self.pick_provider()?;
         let messages = {
             let mut history = self.messages.lock().await;
-            let new_message = build_reply_prompt_message(&schemas);
-            history.push(new_message);
+            if use_tool_choice_fallback {
+                let new_message = build_reply_prompt_message(&schemas);
+                history.push(new_message);
+            }
             history.clone()
         };
-        let messages = self.prepare_messages_for_request(messages);
+        let messages = self.prepare_messages_for_request(messages, &request_options);
         let tool_choice = ToolChoice::tool(PROMPT_REPLY_TOOL_NAME, None);
         let system_prompt = system_prompt.trim();
         let system_prompt = if system_prompt.is_empty() {
@@ -602,16 +621,34 @@ impl Agent {
             Some(system_prompt)
         };
         let thinking = self.thinking_payload_with_override(thinking.as_ref());
-        let response = client
-            .messages_with_tool_choice(
-                system_prompt,
-                messages,
-                vec![reply_tool],
-                tool_choice,
-                thinking,
-            )
-            .await
-            .whatever_context_display("failed to request prompt reply")?;
+        let response = if request_options.disable_tool_choice {
+            ensure_whatever!(
+                request_options.tool_choice_fallback,
+                "tool_choice disabled without prompt fallback"
+            );
+            client
+                .messages(
+                    system_prompt,
+                    messages,
+                    vec![reply_tool],
+                    thinking,
+                    &request_options,
+                )
+                .await
+                .whatever_context_display("failed to request prompt reply")?
+        } else {
+            client
+                .messages_with_tool_choice(
+                    system_prompt,
+                    messages,
+                    vec![reply_tool],
+                    tool_choice,
+                    thinking,
+                    &request_options,
+                )
+                .await
+                .whatever_context_display("failed to request prompt reply")?
+        };
         let stop_reason = response.stop_reason.clone();
         if !response.content.is_empty() {
             let mut history = self.messages.lock().await;
@@ -665,15 +702,23 @@ impl Agent {
         F: FnMut(ChatStreamUpdate) + Send,
     {
         ensure_whatever!(!schemas.is_empty(), "schemas cannot be empty");
+        let request_options = self.request_options_for_current_model();
+        let use_tool_choice_fallback = should_use_tool_choice_fallback(&request_options);
+        ensure_whatever!(
+            !request_options.disable_tools,
+            "reply tool disabled by request options"
+        );
         let reply_tool = build_reply_tool(&schemas)?;
         let (_, client) = self.pick_provider()?;
         let messages = {
             let mut history = self.messages.lock().await;
-            let new_message = build_reply_prompt_message(&schemas);
-            history.push(new_message);
+            if use_tool_choice_fallback {
+                let new_message = build_reply_prompt_message(&schemas);
+                history.push(new_message);
+            }
             history.clone()
         };
-        let messages = self.prepare_messages_for_request(messages);
+        let messages = self.prepare_messages_for_request(messages, &request_options);
         let tool_choice = ToolChoice::tool(PROMPT_REPLY_TOOL_NAME, None);
         let system_prompt = system_prompt.trim();
         let system_prompt = if system_prompt.is_empty() {
@@ -682,19 +727,40 @@ impl Agent {
             Some(system_prompt)
         };
         let thinking = self.thinking_payload_with_override(thinking.as_ref());
-        let mut stream = client
-            .messages_stream_with_tool_choice(
-                system_prompt,
-                messages,
-                vec![reply_tool],
-                tool_choice,
-                thinking,
-            )
-            .await
-            .inspect_err(|err| {
-                warn!("send prompt reply stream error: {err:?}");
-            })
-            .whatever_context_display("failed to request prompt reply stream")?;
+        let mut stream = if request_options.disable_tool_choice {
+            ensure_whatever!(
+                request_options.tool_choice_fallback,
+                "tool_choice disabled without prompt fallback"
+            );
+            client
+                .messages_stream(
+                    system_prompt,
+                    messages,
+                    vec![reply_tool],
+                    thinking,
+                    &request_options,
+                )
+                .await
+                .inspect_err(|err| {
+                    warn!("send prompt reply stream error: {err:?}");
+                })
+                .whatever_context_display("failed to request prompt reply stream")?
+        } else {
+            client
+                .messages_stream_with_tool_choice(
+                    system_prompt,
+                    messages,
+                    vec![reply_tool],
+                    tool_choice,
+                    thinking,
+                    &request_options,
+                )
+                .await
+                .inspect_err(|err| {
+                    warn!("send prompt reply stream error: {err:?}");
+                })
+                .whatever_context_display("failed to request prompt reply stream")?
+        };
 
         let mut accumulator = StreamAccumulator::new();
         while let Some(event) = tokio::select! {
@@ -776,6 +842,10 @@ impl Agent {
         self.thinking_enabled
     }
 
+    pub fn disable_stream_for_current_model(&self) -> bool {
+        self.request_options_for_current_model().disable_stream
+    }
+
     pub fn current_model(&self) -> String {
         let selected_model = self.selected_model();
         match Self::select_provider_index(selected_model.as_deref(), &self.config.providers) {
@@ -802,7 +872,14 @@ impl Agent {
     pub fn offload_combo_reply(&self) -> bool {
         let selected_model = self.selected_model();
         match Self::select_provider_index(selected_model.as_deref(), &self.config.providers) {
-            Ok(idx) => self.config.providers[idx].offload_combo_reply,
+            Ok(idx) => {
+                let provider = &self.config.providers[idx];
+                let model = Self::resolve_model(provider, selected_model);
+                let options = self.config.request_options_for_model(&model);
+                options
+                    .offload_combo_reply
+                    .unwrap_or(provider.offload_combo_reply)
+            }
             Err(_) => false,
         }
     }
@@ -865,6 +942,29 @@ impl Agent {
         Some(Thinking::enabled(budget_tokens))
     }
 
+    fn request_options_for_current_model(&self) -> RequestOptions {
+        let selected_model = self.selected_model();
+        match Self::select_provider_index(selected_model.as_deref(), &self.config.providers) {
+            Ok(idx) => {
+                let provider = &self.config.providers[idx];
+                let model = Self::resolve_model(provider, selected_model);
+                self.config.request_options_for_model(&model)
+            }
+            Err(_) => RequestOptions::default(),
+        }
+    }
+
+    fn provider_tools_for_request(
+        &self,
+        request_options: &RequestOptions,
+    ) -> Vec<crate::provider::Tool> {
+        if request_options.disable_tools {
+            Vec::new()
+        } else {
+            self.executor.provider_tools()
+        }
+    }
+
     fn strip_thinking_block(message: &Message) -> Option<Message> {
         let content = match &message.content {
             Content::Multiple(blocks) => {
@@ -894,8 +994,12 @@ impl Agent {
             .collect()
     }
 
-    fn prepare_messages_for_request(&mut self, messages: Vec<Message>) -> Vec<Message> {
-        if self.thinking_cleanup_pending {
+    fn prepare_messages_for_request(
+        &mut self,
+        messages: Vec<Message>,
+        request_options: &RequestOptions,
+    ) -> Vec<Message> {
+        if self.thinking_cleanup_pending && !request_options.include_reasoning_content {
             self.thinking_cleanup_pending = false;
             Self::strip_thinking_blocks(&messages)
         } else {
@@ -1031,6 +1135,10 @@ Required fields: {fields}."
     )
 }
 
+fn should_use_tool_choice_fallback(request_options: &RequestOptions) -> bool {
+    request_options.disable_tool_choice && request_options.tool_choice_fallback
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1128,5 +1236,16 @@ mod tests {
             Block::Thinking { thinking, .. } => assert_eq!(thinking, "Reasoning"),
             other => panic!("unexpected block: {other:?}"),
         }
+    }
+
+    #[test]
+    fn tool_choice_fallback_requires_disable() {
+        let mut options = RequestOptions {
+            tool_choice_fallback: true,
+            ..Default::default()
+        };
+        assert!(!should_use_tool_choice_fallback(&options));
+        options.disable_tool_choice = true;
+        assert!(should_use_tool_choice_fallback(&options));
     }
 }

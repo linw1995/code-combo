@@ -2,6 +2,7 @@ mod agent;
 mod bash;
 mod env;
 mod mcp;
+mod presets;
 mod provider;
 mod ui;
 
@@ -25,7 +26,7 @@ pub use env::EnvString;
 pub use mcp::{
     McpConfig, McpServerCommandConfig, McpServerConfig, McpServerConnection, McpServerHttpConfig,
 };
-pub use provider::{ProviderConfig, ProviderKind};
+pub use provider::{ModelRequestConfig, ProviderConfig, ProviderKind, RequestOptions};
 pub use ui::{MarkdownRenderEngine, UI};
 
 type BoxError = Box<dyn StdError + Send + Sync>;
@@ -51,6 +52,8 @@ pub struct Config {
     pub ui: UI,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub providers: Vec<ProviderConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_presets: Vec<ModelRequestConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_tools: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -90,6 +93,22 @@ impl Config {
 
     pub fn combo_dir(&self) -> PathBuf {
         self.config_dir.join("combos")
+    }
+
+    pub fn request_options_for_model(&self, model: &str) -> RequestOptions {
+        let mut options = RequestOptions::default();
+        let builtin = presets::builtin_model_presets();
+        apply_model_presets(&mut options, &builtin, model);
+        apply_model_presets(&mut options, &self.model_presets, model);
+        options
+    }
+}
+
+fn apply_model_presets(options: &mut RequestOptions, presets: &[ModelRequestConfig], model: &str) {
+    for preset in presets {
+        if preset.model == model {
+            options.apply_override(preset);
+        }
     }
 }
 
@@ -393,7 +412,8 @@ fn table_name_from_table(table: &toml::value::Table, path: &str) -> Result<Strin
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, MarkdownRenderEngine, McpServerConnection, SafeCommandsMode, merge_config_values,
+        Config, MarkdownRenderEngine, McpServerConnection, ModelRequestConfig, SafeCommandsMode,
+        merge_config_values,
     };
 
     fn base_config() -> String {
@@ -613,5 +633,31 @@ safe_commands_mode = \"override\"\n\
         .join("\n");
         let override_value: toml::Value = toml::from_str(&override_str).expect("parse override");
         assert!(merge_config_values(&mut base_value, override_value).is_err());
+    }
+
+    #[test]
+    fn request_options_apply_builtin_presets() {
+        let config = Config::default();
+        let options = config.request_options_for_model("kimi-k2-thinking");
+        assert!(options.include_reasoning_content);
+        assert_eq!(options.offload_combo_reply, Some(true));
+        assert_eq!(options.temperature, Some(1.0));
+        assert_eq!(options.max_tokens, Some(16000));
+    }
+
+    #[test]
+    fn request_options_config_overrides_builtin() {
+        let mut config = Config::default();
+        config.model_presets.push(ModelRequestConfig {
+            model: "deepseek-reasoner".to_string(),
+            disable_tool_choice: Some(false),
+            tool_choice_fallback: Some(false),
+            max_tokens: Some(2048),
+            ..ModelRequestConfig::default()
+        });
+        let options = config.request_options_for_model("deepseek-reasoner");
+        assert!(!options.disable_tool_choice);
+        assert!(!options.tool_choice_fallback);
+        assert_eq!(options.max_tokens, Some(2048));
     }
 }
