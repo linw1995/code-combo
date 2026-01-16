@@ -91,6 +91,16 @@ pub enum SubagentEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         output_summary: Option<String>,
     },
+    /// Permission request for tool execution.
+    AskPermission {
+        /// Tool use ID.
+        id: String,
+        /// Tool name.
+        name: String,
+        /// Brief input summary.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input_summary: Option<String>,
+    },
 }
 
 /// Configuration needed to create and run subagent instances.
@@ -282,11 +292,18 @@ where
         }
     };
 
-    // Clone config for the subagent
+    // Clone config and executor for the subagent
     let subagent_base_config = ctx.config.clone();
+    let mut parent_executor = ctx.executor.clone();
 
     // Drop lock before async operations
     drop(ctx);
+
+    // Apply tool restrictions to the parent executor (for permission checks)
+    if let Some(ref tools) = subagent_agent_config.tools {
+        debug!(tools = ?tools, "Applying tool restrictions for subagent");
+        parent_executor.apply_tool_policies(Some(tools), None);
+    }
 
     // Override model if subagent has one configured
     if let Some(ref model) = subagent_agent_config.default_model {
@@ -300,10 +317,10 @@ where
     // Wrap callback in Arc<Mutex<Box>> to break type recursion in execute_subagent
     let on_event_boxed: SubagentEventCallback = Arc::new(std::sync::Mutex::new(Box::new(on_event)));
 
-    // Execute subagent with tool restrictions
+    // Execute subagent with parent executor (for permission inheritance)
     let result = execute_subagent(
         subagent_base_config,
-        subagent_agent_config.tools.clone(),
+        parent_executor,
         subagent_system_prompt,
         input.prompt,
         cancel_token,
@@ -313,6 +330,12 @@ where
 
     match result {
         Ok(output) => {
+            debug!(
+                success = output.success,
+                turns = output.turns,
+                response_len = output.response.len(),
+                "run_task completed, returning result to main agent"
+            );
             let json_output = serde_json::to_value(&output)
                 .unwrap_or_else(|_| json!({"success": false, "error": "Serialization failed"}));
             if output.success {
@@ -321,13 +344,16 @@ where
                 Final::from(json_output).err()
             }
         }
-        Err(e) => Final::from(json!({
-            "success": false,
-            "response": "",
-            "turns": 0,
-            "error": e
-        }))
-        .err(),
+        Err(e) => {
+            debug!(error = %e, "run_task failed");
+            Final::from(json!({
+                "success": false,
+                "response": "",
+                "turns": 0,
+                "error": e
+            }))
+            .err()
+        }
     }
 }
 
@@ -354,7 +380,7 @@ fn build_subagent_system_prompt(config: &AgentConfig, input: &RunTaskInput) -> S
 /// cause compiler recursion limit issues.
 fn execute_subagent(
     config: Config,
-    allowed_tools: Option<Vec<String>>,
+    executor: Executor,
     system_prompt: String,
     initial_prompt: String,
     cancel_token: CancellationToken,
@@ -363,6 +389,8 @@ fn execute_subagent(
     use crate::agent::Agent;
 
     Box::pin(async move {
+        // Clone executor for tool execution (already has tool restrictions applied)
+        let mut tool_executor = executor;
         // Helper to get current timestamp
         let now_ms = || {
             std::time::SystemTime::now()
@@ -465,11 +493,6 @@ fn execute_subagent(
         let mut subagent = Agent::new(config);
         subagent.set_system_prompt(&system_prompt);
 
-        // Apply tool restrictions if specified
-        if let Some(tools) = allowed_tools {
-            subagent.apply_tool_policies(Some(&tools), None);
-        }
-
         // Send initial message
         let user_message = Message::user(Content::Text(initial_prompt));
 
@@ -488,6 +511,8 @@ fn execute_subagent(
         // Check if we need tool execution
         let mut stop_reason = response.stop_reason;
         let mut current_message = response.message;
+
+        debug!(?stop_reason, turns, "Subagent initial response");
 
         while matches!(stop_reason, Some(StopReason::ToolUse)) && turns < max_turns {
             if cancel_token.is_cancelled() {
@@ -522,43 +547,104 @@ fn execute_subagent(
                     output_summary: None,
                 });
 
-                // Clone Arc for the execute_with_output callback
+                // Clone info for the execute_with_output callback
                 let on_event_for_exec = on_event.clone();
+                let tool_id_for_perm = tool_use.id.clone();
+                let tool_name_for_perm = tool_use.name.clone();
+                let input_summary_for_perm = input_summary.clone();
+                let permission_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let permission_requested_clone = permission_requested.clone();
+
+                // Capture tool output result
+                let tool_output_result: Arc<std::sync::Mutex<Option<(Content, bool)>>> =
+                    Arc::new(std::sync::Mutex::new(None));
+                let tool_output_clone = tool_output_result.clone();
+
                 let input = crate::tools::Input::Starter(tool_use.input.clone());
-                let exec_result = subagent
-                    .executor()
-                    .clone()
+                let exec_result = tool_executor
                     .execute_with_output(
                         &tool_use.id,
                         &tool_use.name,
                         input,
                         cancel_token.clone(),
-                        |output| {
-                            if let crate::agent::Output::ToolOutput(chunk) = output
-                                && let Ok(mut f) = on_event_for_exec.lock()
-                            {
-                                (*f)(&SubagentEvent::Output(chunk));
+                        |output| match &output {
+                            crate::agent::Output::ToolOutput(chunk) => {
+                                if let Ok(mut f) = on_event_for_exec.lock() {
+                                    (*f)(&SubagentEvent::Output(chunk.clone()));
+                                }
                             }
+                            crate::agent::Output::AskPermission => {
+                                permission_requested_clone
+                                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                                if let Ok(mut f) = on_event_for_exec.lock() {
+                                    (*f)(&SubagentEvent::AskPermission {
+                                        id: tool_id_for_perm.clone(),
+                                        name: tool_name_for_perm.clone(),
+                                        input_summary: Some(input_summary_for_perm.clone()),
+                                    });
+                                }
+                            }
+                            crate::agent::Output::Success(final_output)
+                            | crate::agent::Output::Failure(final_output) => {
+                                let is_success = matches!(output, crate::agent::Output::Success(_));
+                                let content = match final_output {
+                                    crate::tools::Final::Json(v) => Content::Text(v.to_string()),
+                                    crate::tools::Final::Message(t) => Content::Text(t.clone()),
+                                };
+                                if let Ok(mut guard) = tool_output_clone.lock() {
+                                    *guard = Some((content, is_success));
+                                }
+                            }
+                            _ => {}
                         },
                     )
                     .await;
 
-                let (result_content, status, output_summary) = match exec_result {
-                    Ok(ExecuteStatus::Completed) => (
-                        Content::Text("Tool executed successfully".into()),
-                        ToolStatus::Completed,
-                        Some("Success".to_string()),
-                    ),
-                    Ok(ExecuteStatus::Cancelled) => (
-                        Content::Text("Tool execution cancelled".into()),
-                        ToolStatus::Cancelled,
-                        Some("Cancelled".to_string()),
-                    ),
-                    Err(ref e) => (
-                        Content::Text(format!("Tool error: {}", e)),
+                // Check if permission was requested (tool not actually executed)
+                let needs_permission =
+                    permission_requested.load(std::sync::atomic::Ordering::SeqCst);
+
+                // Get captured tool output
+                let captured_output = tool_output_result.lock().ok().and_then(|g| g.clone());
+
+                let (result_content, status, output_summary) = if needs_permission {
+                    (
+                        Content::Text("Permission required for this operation".into()),
                         ToolStatus::Failed,
-                        Some(format!("Error: {}", e)),
-                    ),
+                        Some("Permission required".to_string()),
+                    )
+                } else if let Some((content, is_success)) = captured_output {
+                    (
+                        content,
+                        if is_success {
+                            ToolStatus::Completed
+                        } else {
+                            ToolStatus::Failed
+                        },
+                        Some(if is_success {
+                            "Success".to_string()
+                        } else {
+                            "Failed".to_string()
+                        }),
+                    )
+                } else {
+                    match exec_result {
+                        Ok(ExecuteStatus::Completed) => (
+                            Content::Text("Tool executed successfully".into()),
+                            ToolStatus::Completed,
+                            Some("Success".to_string()),
+                        ),
+                        Ok(ExecuteStatus::Cancelled) => (
+                            Content::Text("Tool execution cancelled".into()),
+                            ToolStatus::Cancelled,
+                            Some("Cancelled".to_string()),
+                        ),
+                        Err(ref e) => (
+                            Content::Text(format!("Tool error: {}", e)),
+                            ToolStatus::Failed,
+                            Some(format!("Error: {}", e)),
+                        ),
+                    }
                 };
 
                 // Emit tool call end
@@ -588,7 +674,15 @@ fn execute_subagent(
             final_response = extract_text_response(&next_response.message);
             stop_reason = next_response.stop_reason;
             current_message = next_response.message;
+
+            debug!(?stop_reason, turns, "Subagent continuation response");
         }
+
+        debug!(
+            turns,
+            response_len = final_response.len(),
+            "Subagent execution completed, exiting loop"
+        );
 
         // Flush any remaining buffered content before returning
         flush_buffers();

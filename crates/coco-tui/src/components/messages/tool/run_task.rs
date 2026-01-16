@@ -410,6 +410,46 @@ impl<'a> RunTask<'a> {
                 drop(state);
                 self.rebuild_output();
             }
+            SubagentEvent::AskPermission {
+                id,
+                name,
+                input_summary,
+            } => {
+                // Subagent tool requested permission - show as awaiting state
+                let tool_state = SubagentToolState {
+                    id: id.clone(),
+                    name: name.clone(),
+                    status: ToolStatus::Failed, // Show as failed since permission was denied
+                    input_summary: input_summary.clone(),
+                    output_summary: Some("Permission required".to_string()),
+                };
+
+                let mut state = self.state.write();
+                match &mut state.exec_state {
+                    ExecState::Executing { active_tools, .. } => {
+                        if let Some(existing) = active_tools.iter_mut().find(|t| t.id == *id) {
+                            *existing = tool_state;
+                        } else {
+                            active_tools.push(tool_state);
+                        }
+                    }
+                    ExecState::Initial { .. } => {
+                        state.exec_state = ExecState::Executing {
+                            chunks: Vec::new(),
+                            active_tools: vec![tool_state],
+                        };
+                    }
+                    ExecState::Finished { tool_history, .. } => {
+                        if let Some(existing) = tool_history.iter_mut().find(|t| t.id == *id) {
+                            *existing = tool_state;
+                        } else {
+                            tool_history.push(tool_state);
+                        }
+                    }
+                }
+                drop(state);
+                self.rebuild_output();
+            }
         }
     }
 

@@ -337,7 +337,18 @@ impl Executor {
                     event = event_rx.recv() => {
                         match event {
                             Some(e) => on_output(Output::SubagentOutput(e)),
-                            None => break, // Channel closed, task finished
+                            None => {
+                                // Channel closed, wait for task to complete and get result
+                                match task_handle.await {
+                                    Ok(output) => {
+                                        on_output(output.into());
+                                    }
+                                    Err(e) => {
+                                        on_output(Output::Failure(Final::from(format!("Task panicked: {}", e))));
+                                    }
+                                }
+                                break;
+                            }
                         }
                     }
                     result = &mut task_handle => {
