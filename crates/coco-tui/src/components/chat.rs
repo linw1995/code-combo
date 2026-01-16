@@ -1,5 +1,5 @@
 use coco_macro::ComponentExt;
-use code_combo::tools::Final;
+use code_combo::tools::{BashInput, Final};
 use code_combo::{
     Agent, Block as ChatBlock, ChatResponse, ChatStreamUpdate, Config, Content as ChatContent,
     Message as ChatMessage, Output, RuntimeOverrides, SessionEnv, Starter, StarterCommand,
@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::prelude::*;
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -1576,6 +1576,8 @@ enum ComboReplyError {
     ChatFailed { message: String },
     #[snafu(display("LLM did not return a bash tool call for coco reply"))]
     MissingBashToolUse,
+    #[snafu(display("failed to parse bash tool input: {message}"))]
+    InvalidBashInput { message: String },
     #[snafu(display("expected coco reply command, got: {command}"))]
     UnexpectedCommand { command: String },
     #[snafu(display("bash execution failed: {message}"))]
@@ -1601,6 +1603,7 @@ impl ComboReplyError {
         matches!(
             self,
             ComboReplyError::MissingBashToolUse
+                | ComboReplyError::InvalidBashInput { .. }
                 | ComboReplyError::UnexpectedCommand { .. }
                 | ComboReplyError::ReplyCommandFailed { .. }
                 | ComboReplyError::ReplyOutputInvalidJson { .. }
@@ -1615,17 +1618,50 @@ fn should_retry_offload_combo_reply(error: &ComboReplyError) -> bool {
     error.should_retry()
 }
 
-/// Check if a bash tool_use input contains a `coco reply` command.
-fn is_coco_reply_command(input: &Value) -> bool {
-    let Some(command) = input.get("command").and_then(|v| v.as_str()) else {
+fn is_env_assignment(token: &str) -> bool {
+    let Some((key, _value)) = token.split_once('=') else {
         return false;
     };
-    let trimmed = command.trim();
-    // Check if command starts with "coco reply" (with possible path prefix)
-    trimmed == "coco reply"
-        || trimmed.starts_with("coco reply ")
-        || trimmed.ends_with("/coco reply")
-        || trimmed.contains("/coco reply ")
+    if key.is_empty() {
+        return false;
+    }
+    if key.starts_with('-') {
+        return false;
+    }
+    key.chars()
+        .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+/// Check if a command string starts with `coco reply` (allowing env assignments).
+fn is_coco_reply_command(command: &str) -> bool {
+    let mut parts = command.split_whitespace();
+    let mut token = match parts.next() {
+        Some(token) => token,
+        None => return false,
+    };
+
+    loop {
+        if token == "env" {
+            token = match parts.next() {
+                Some(next) => next,
+                None => return false,
+            };
+            continue;
+        }
+        if is_env_assignment(token) {
+            token = match parts.next() {
+                Some(next) => next,
+                None => return false,
+            };
+            continue;
+        }
+        break;
+    }
+
+    let command_token = token;
+    let reply_token = parts.next();
+    let is_coco = command_token == "coco" || command_token.ends_with("/coco");
+    is_coco && matches!(reply_token, Some("reply"))
 }
 
 /// Parse coco reply stdout output as JSON fields and validate required schemas.
@@ -1688,6 +1724,7 @@ async fn handle_offload_combo_reply_with_retry(
     agent: &mut Agent,
     schemas: &[code_combo::PromptSchema],
     combo_name: &str,
+    session_socket_path: &Path,
     cancel_token: CancellationToken,
     tx: tokio::sync::mpsc::UnboundedSender<Event>,
 ) -> Result<String, ComboReplyError> {
@@ -1706,6 +1743,7 @@ async fn handle_offload_combo_reply_with_retry(
             agent,
             schemas,
             combo_name,
+            session_socket_path,
             cancel_token.clone(),
             tx.clone(),
             &directive,
@@ -1729,6 +1767,7 @@ async fn handle_offload_combo_reply(
     agent: &mut Agent,
     schemas: &[code_combo::PromptSchema],
     combo_name: &str,
+    session_socket_path: &Path,
     cancel_token: CancellationToken,
     tx: tokio::sync::mpsc::UnboundedSender<Event>,
     directive: &str,
@@ -1790,17 +1829,30 @@ async fn handle_offload_combo_reply(
         })
         .ok_or(ComboReplyError::MissingBashToolUse)?;
 
+    let mut bash_input: BashInput =
+        serde_json::from_value(bash_tool_use.input.clone()).map_err(|err| {
+            ComboReplyError::InvalidBashInput {
+                message: err.to_string(),
+            }
+        })?;
+
     // Validate it's a coco reply command
-    if !is_coco_reply_command(&bash_tool_use.input) {
-        let command = bash_tool_use
-            .input
-            .get("command")
-            .and_then(|v| v.as_str())
-            .unwrap_or("<unknown>");
+    if !is_coco_reply_command(&bash_input.command) {
         return Err(ComboReplyError::UnexpectedCommand {
-            command: command.to_string(),
+            command: bash_input.command.clone(),
         });
     }
+
+    if !bash_input.command.contains("COCO_SESSION_SOCK=") {
+        let socket_path = session_socket_path.to_string_lossy();
+        let escaped_path = shell_escape(socket_path.as_ref());
+        let command = bash_input.command.trim_start();
+        bash_input.command = format!("COCO_SESSION_SOCK={} {}", escaped_path, command);
+    }
+    let bash_input_value =
+        serde_json::to_value(&bash_input).map_err(|err| ComboReplyError::InvalidBashInput {
+            message: err.to_string(),
+        })?;
 
     // Auto-grant and execute the bash command
     agent.grant_once(&bash_tool_use.id, BASH_TOOL_NAME);
@@ -1824,7 +1876,7 @@ async fn handle_offload_combo_reply(
         .execute_with_output(
             &bash_tool_use.id,
             BASH_TOOL_NAME,
-            code_combo::Input::Starter(bash_tool_use.input.clone()),
+            code_combo::Input::Starter(bash_input_value),
             cancel_token.clone(),
             |out| {
                 if let Output::Success(output) = out {
@@ -1915,6 +1967,7 @@ async fn task_combo_execute(
     let session_env = SessionEnv::builder()
         .build()
         .expect("failed to build session");
+    let session_socket_path = session_env.socket_path().to_path_buf();
     let mcp_envs = match code_combo::tools::prepare_mcp_envs().await {
         Ok(envs) => envs,
         Err(err) => {
@@ -2037,6 +2090,7 @@ async fn task_combo_execute(
                                 &mut agent,
                                 &schemas,
                                 &name,
+                                &session_socket_path,
                                 cancel_token.clone(),
                                 tx.clone(),
                             )
@@ -2762,6 +2816,9 @@ mod tests {
     fn should_retry_offload_combo_reply_matches_model_errors() {
         let retryable = [
             ComboReplyError::MissingBashToolUse,
+            ComboReplyError::InvalidBashInput {
+                message: "bad input".to_string(),
+            },
             ComboReplyError::UnexpectedCommand {
                 command: "ls".to_string(),
             },

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::Path, path::PathBuf, sync::Arc};
+use std::{path::Path, path::PathBuf, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
@@ -110,11 +110,11 @@ pub struct ThinkingConfig {
 }
 
 /// Payload for combo reply via bash command offload.
-/// Contains the field values extracted by the LLM.
+/// Contains raw `--field=value` args for server-side parsing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReplyPayload {
-    /// Field name to value mapping
-    pub fields: HashMap<String, String>,
+    /// Raw field args, e.g. "--message=hello"
+    pub fields: Vec<String>,
 }
 
 /// Server response to validate reply fields against required schemas.
@@ -123,6 +123,8 @@ pub struct ReplyValidation {
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response: Option<String>,
 }
 
 #[derive(Debug, Snafu)]

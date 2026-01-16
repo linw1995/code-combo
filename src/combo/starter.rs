@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     io::ErrorKind,
     path::{Path, PathBuf},
     pin::Pin,
@@ -12,7 +13,7 @@ use futures_util::StreamExt;
 use snafu::prelude::*;
 use time::OffsetDateTime;
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{Mutex as AsyncMutex, mpsc, oneshot},
     task::{self, JoinHandle},
 };
 use tokio_util::sync::CancellationToken;
@@ -20,9 +21,9 @@ use tracing::{debug, info, warn};
 
 use crate::tools::{BASH_TOOL_NAME, BashInput, BashOutput, Final};
 use crate::{
-    ClientMessage, Combo, ComboMetadata, ControlAction, MetadataPayload, MetadataResponse,
-    PromptPayload, PromptSchema, RecordControl, RecordEndPayload, ServerMessage, SessionEnv,
-    SessionSocketServer, StreamKind, ThinkingConfig, ToolUse,
+    ClientMessage, Combo, ComboMetadata, MetadataPayload, MetadataResponse, PromptPayload,
+    PromptSchema, RecordEndPayload, ReplyValidation, ServerConnection, ServerMessage, SessionEnv,
+    SessionServerError, SessionSocketServer, StreamKind, ThinkingConfig, ToolUse,
     exec::{ChunkConfig, ExecCommand, OutputChunk, ProcessEvent},
 };
 use serde_json::json;
@@ -114,9 +115,23 @@ impl std::fmt::Debug for PromptResponseSender {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 struct SessionState {
     metadata: Option<MetadataPayload>,
+    pending_reply_schemas: Option<Vec<PromptSchema>>,
+    event_index: usize,
+}
+
+impl SessionState {
+    fn next_event_index(&mut self) -> usize {
+        let index = self.event_index;
+        self.event_index = self.event_index.saturating_add(1);
+        index
+    }
+
+    fn bump_event_index(&mut self) {
+        self.event_index = self.event_index.saturating_add(1);
+    }
 }
 
 #[derive(Debug)]
@@ -283,6 +298,45 @@ fn resolve_prompt_thinking(
         enabled: true,
         budget_tokens,
     })
+}
+
+fn parse_reply_fields(
+    fields: &[String],
+    schemas: &[PromptSchema],
+) -> Result<HashMap<String, String>, String> {
+    let mut parsed = HashMap::new();
+    let schema_names: HashSet<&str> = schemas.iter().map(|schema| schema.name.as_str()).collect();
+
+    for field in fields {
+        let field = field.strip_prefix("--").unwrap_or(field);
+        let Some((key, value)) = field.split_once('=') else {
+            return Err(format!(
+                "invalid field format {field:?}, expected --field=value"
+            ));
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            return Err("field key cannot be empty".to_string());
+        }
+        if !schema_names.contains(key) {
+            return Err(format!("unexpected field key: {key}"));
+        }
+        if parsed.contains_key(key) {
+            return Err(format!("duplicate field key: {key}"));
+        }
+        parsed.insert(key.to_string(), value.to_string());
+    }
+
+    let missing: Vec<&str> = schemas
+        .iter()
+        .filter(|schema| !parsed.contains_key(&schema.name))
+        .map(|schema| schema.name.as_str())
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!("missing required fields: {}", missing.join(", ")));
+    }
+
+    Ok(parsed)
 }
 
 fn record_output(record: &RecordedCommand) -> BashOutput {
@@ -643,70 +697,90 @@ async fn spawn_session_server(
     })
 }
 
-async fn run_session_server(
-    server: SessionSocketServer,
+async fn clear_pending_reply(state: &Arc<AsyncMutex<SessionState>>) {
+    let mut guard = state.lock().await;
+    guard.pending_reply_schemas = None;
+}
+
+async fn handle_session_connection(
+    mut conn: ServerConnection,
     discovery: bool,
     event_tx: mpsc::Sender<StarterEvent>,
-    mut shutdown_rx: oneshot::Receiver<()>,
-) -> Result<SessionState, StarterError> {
-    let mut state = SessionState::default();
-    let mut metadata_seen = false;
+    state: Arc<AsyncMutex<SessionState>>,
+    cancel_token: CancellationToken,
+) -> Result<(), StarterError> {
     let mut first_message = true;
-    let mut event_index: usize = 0;
+    let mut current_record: Option<RecordedCommand> = None;
 
     loop {
-        let accept = tokio::select! {
-            _ = &mut shutdown_rx => break,
-            accept = server.accept() => accept,
+        let message = tokio::select! {
+            _ = cancel_token.cancelled() => break,
+            message = conn.read_client_message() => message,
         };
-        let mut conn = accept.context(AcceptSessionConnectionSnafu)?;
 
-        let mut current_record: Option<RecordedCommand> = None;
+        let message = match message {
+            Ok(message) => message,
+            Err(err) => {
+                if matches!(&err, SessionServerError::Receive { source, .. } if source.kind() == ErrorKind::UnexpectedEof)
+                {
+                    break;
+                }
+                return Err(InvalidSnafu {
+                    reason: format!("failed to read session message: {err}"),
+                }
+                .build());
+            }
+        };
 
-        loop {
-            let message = tokio::select! {
-                _ = &mut shutdown_rx => {
-                    if !metadata_seen {
-                        return Err(InvalidSnafu {
-                            reason: "metadata not received from session".to_string(),
-                        }
-                        .build());
+        match message {
+            ClientMessage::Metadata(payload) => {
+                if !first_message {
+                    let _ = conn.interrupt().await;
+                    return Err(InvalidSnafu {
+                        reason: "metadata must be the first and only metadata message".to_string(),
                     }
-                    return Ok(state);
-                },
-                message = conn.read_client_message() => message,
-            };
-
-            match message {
-                Ok(ClientMessage::Metadata(payload)) => {
-                    if !first_message || metadata_seen {
-                        let _ = conn
-                            .send_server_message(&ServerMessage::RecordControl(RecordControl {
-                                action: ControlAction::Interrupt,
-                            }))
-                            .await;
+                    .build());
+                }
+                {
+                    let mut guard = state.lock().await;
+                    if guard.metadata.is_some() {
+                        let _ = conn.interrupt().await;
                         return Err(InvalidSnafu {
                             reason: "metadata must be the first and only metadata message"
                                 .to_string(),
                         }
                         .build());
                     }
-                    metadata_seen = true;
-                    state.metadata = Some(payload);
-                    let _ = conn
-                        .send_server_message(&ServerMessage::Metadata(MetadataResponse {
-                            discovery,
-                        }))
-                        .await;
-                    first_message = false;
+                    guard.metadata = Some(payload);
                 }
-                Ok(ClientMessage::RecordStart(payload)) => {
-                    if discovery || !metadata_seen {
-                        let _ = conn
-                            .send_server_message(&ServerMessage::RecordControl(RecordControl {
-                                action: ControlAction::Interrupt,
-                            }))
-                            .await;
+                conn.send_server_message(&ServerMessage::Metadata(MetadataResponse { discovery }))
+                    .await
+                    .map_err(|err| {
+                        InvalidSnafu {
+                            reason: format!("failed to send metadata response: {err}"),
+                        }
+                        .build()
+                    })?;
+                first_message = false;
+            }
+            ClientMessage::RecordStart(payload) => {
+                if discovery {
+                    let _ = conn.interrupt().await;
+                    return Err(InvalidSnafu {
+                        reason: "record commands are not allowed in discovery or before metadata"
+                            .to_string(),
+                    }
+                    .build());
+                }
+                let (record_index, name) = {
+                    let mut guard = state.lock().await;
+                    let metadata_name = guard
+                        .metadata
+                        .as_ref()
+                        .map(|metadata| metadata.name.clone());
+                    if metadata_name.is_none() {
+                        drop(guard);
+                        let _ = conn.interrupt().await;
                         return Err(InvalidSnafu {
                             reason:
                                 "record commands are not allowed in discovery or before metadata"
@@ -714,216 +788,329 @@ async fn run_session_server(
                         }
                         .build());
                     }
-                    let record_index = event_index;
-                    event_index = event_index.saturating_add(1);
-                    let name = state
-                        .metadata
-                        .as_ref()
-                        .map(|metadata| metadata.name.as_str())
-                        .unwrap_or("combo");
-                    let tool_use_id = format!("combo_record_{name}_{record_index}");
-                    let input = BashInput::new(payload.command.join(" "));
-                    let tool_use = ToolUse {
-                        id: tool_use_id.clone(),
-                        name: BASH_TOOL_NAME.to_string(),
-                        input: serde_json::to_value(&input).unwrap_or_else(|_| {
-                            json!({
-                                "command": input.command,
-                                "timeout": input.timeout,
-                            })
-                        }),
-                    };
-                    current_record = Some(RecordedCommand {
-                        tool_use_id: tool_use_id.clone(),
-                        stdout: Vec::new(),
-                        stderr: Vec::new(),
-                        exit_code: None,
-                    });
-                    let _ = conn
-                        .send_server_message(&ServerMessage::RecordControl(RecordControl {
-                            action: ControlAction::Allow,
-                        }))
-                        .await;
-                    event_tx
-                        .send(StarterEvent::RecordStart { tool_use })
-                        .await
-                        .ok();
-                    first_message = false;
-                }
-                Ok(ClientMessage::RecordChunk(chunk)) => {
-                    if discovery {
-                        let _ = conn
-                            .send_server_message(&ServerMessage::RecordControl(RecordControl {
-                                action: ControlAction::Interrupt,
-                            }))
-                            .await;
-                        return Err(InvalidSnafu {
-                            reason: "record chunk is not allowed during discovery".to_string(),
-                        }
-                        .build());
-                    }
-                    let stream = chunk.stream;
-                    let lines = chunk.lines;
-                    let Some(record) = current_record.as_mut() else {
-                        continue;
-                    };
-                    let tool_use_id = record.tool_use_id.clone();
-
-                    match stream {
-                        StreamKind::Stdout => record.stdout.extend(lines.clone()),
-                        StreamKind::Stderr => record.stderr.extend(lines.clone()),
-                    }
-                    event_tx
-                        .send(StarterEvent::RecordOutput {
-                            tool_use_id,
-                            chunk: OutputChunk {
-                                timestamp: OffsetDateTime::now_utc().unix_timestamp(),
-                                stream,
-                                lines,
-                            },
+                    let record_index = guard.next_event_index();
+                    (record_index, metadata_name.unwrap())
+                };
+                let tool_use_id = format!("combo_record_{name}_{record_index}");
+                let input = BashInput::new(payload.command.join(" "));
+                let tool_use = ToolUse {
+                    id: tool_use_id.clone(),
+                    name: BASH_TOOL_NAME.to_string(),
+                    input: serde_json::to_value(&input).unwrap_or_else(|_| {
+                        json!({
+                            "command": input.command,
+                            "timeout": input.timeout,
                         })
-                        .await
-                        .ok();
-                }
-                Ok(ClientMessage::RecordEnd(RecordEndPayload {
-                    exit_code,
-                    stdout,
-                    stderr,
-                    ..
-                })) => {
-                    if discovery {
-                        let _ = conn
-                            .send_server_message(&ServerMessage::RecordControl(RecordControl {
-                                action: ControlAction::Interrupt,
-                            }))
-                            .await;
-                        return Err(InvalidSnafu {
-                            reason: "record end is not allowed during discovery".to_string(),
-                        }
-                        .build());
+                    }),
+                };
+                current_record = Some(RecordedCommand {
+                    tool_use_id: tool_use_id.clone(),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    exit_code: None,
+                });
+                let _ = conn.allow().await;
+                event_tx
+                    .send(StarterEvent::RecordStart { tool_use })
+                    .await
+                    .ok();
+                first_message = false;
+            }
+            ClientMessage::RecordChunk(chunk) => {
+                if discovery {
+                    let _ = conn.interrupt().await;
+                    return Err(InvalidSnafu {
+                        reason: "record chunk is not allowed during discovery".to_string(),
                     }
-                    let Some(mut record) = current_record.take() else {
-                        continue;
-                    };
+                    .build());
+                }
+                let stream = chunk.stream;
+                let lines = chunk.lines;
+                let Some(record) = current_record.as_mut() else {
+                    continue;
+                };
+                let tool_use_id = record.tool_use_id.clone();
 
-                    if let Some(stdout) = stdout {
-                        record.stdout.push(stdout);
-                    }
-                    if let Some(stderr) = stderr {
-                        record.stderr.push(stderr);
-                    }
-                    record.exit_code = exit_code;
-                    let tool_use_id = record.tool_use_id.clone();
-                    let output = record_output(&record);
-                    let is_error = output.exit_code != 0;
-                    let output_value =
-                        serde_json::to_value(&output).expect("failed to encode record output");
-                    event_tx
-                        .send(StarterEvent::RecordEnd {
-                            tool_use_id,
-                            is_error,
-                            output: Final::from(output_value),
-                        })
-                        .await
-                        .ok();
+                match stream {
+                    StreamKind::Stdout => record.stdout.extend(lines.clone()),
+                    StreamKind::Stderr => record.stderr.extend(lines.clone()),
                 }
-                Ok(ClientMessage::Prompt(payload)) => {
-                    if !metadata_seen {
+                event_tx
+                    .send(StarterEvent::RecordOutput {
+                        tool_use_id,
+                        chunk: OutputChunk {
+                            timestamp: OffsetDateTime::now_utc().unix_timestamp(),
+                            stream,
+                            lines,
+                        },
+                    })
+                    .await
+                    .ok();
+            }
+            ClientMessage::RecordEnd(RecordEndPayload {
+                exit_code,
+                stdout,
+                stderr,
+                ..
+            }) => {
+                if discovery {
+                    let _ = conn.interrupt().await;
+                    return Err(InvalidSnafu {
+                        reason: "record end is not allowed during discovery".to_string(),
+                    }
+                    .build());
+                }
+                let Some(mut record) = current_record.take() else {
+                    continue;
+                };
+
+                if let Some(stdout) = stdout {
+                    record.stdout.push(stdout);
+                }
+                if let Some(stderr) = stderr {
+                    record.stderr.push(stderr);
+                }
+                record.exit_code = exit_code;
+                let tool_use_id = record.tool_use_id.clone();
+                let output = record_output(&record);
+                let is_error = output.exit_code != 0;
+                let output_value =
+                    serde_json::to_value(&output).expect("failed to encode record output");
+                event_tx
+                    .send(StarterEvent::RecordEnd {
+                        tool_use_id,
+                        is_error,
+                        output: Final::from(output_value),
+                    })
+                    .await
+                    .ok();
+            }
+            ClientMessage::Prompt(payload) => {
+                let metadata = { state.lock().await.metadata.clone() };
+                if metadata.is_none() {
+                    return Err(InvalidSnafu {
+                        reason: "prompt is not allowed before metadata".to_string(),
+                    }
+                    .build());
+                }
+                if payload.reply {
+                    if discovery {
                         return Err(InvalidSnafu {
-                            reason: "prompt is not allowed before metadata".to_string(),
+                            reason: "prompt reply is not allowed during discovery".to_string(),
                         }
                         .build());
                     }
-                    if payload.reply {
-                        if discovery {
+                    if payload.schemas.is_empty() {
+                        return Err(InvalidSnafu {
+                            reason: "prompt reply requires schemas".to_string(),
+                        }
+                        .build());
+                    }
+                    {
+                        let mut guard = state.lock().await;
+                        if guard.pending_reply_schemas.is_some() {
                             return Err(InvalidSnafu {
-                                reason: "prompt reply is not allowed during discovery".to_string(),
+                                reason: "prompt reply already in progress".to_string(),
                             }
                             .build());
                         }
-                        if payload.schemas.is_empty() {
-                            return Err(InvalidSnafu {
-                                reason: "prompt reply requires schemas".to_string(),
-                            }
-                            .build());
+                        guard.pending_reply_schemas = Some(payload.schemas.clone());
+                    }
+                    let (response_tx, response_rx) = oneshot::channel();
+                    let responder = PromptResponseSender::new(response_tx);
+                    let thinking = resolve_prompt_thinking(metadata.as_ref(), &payload);
+                    if event_tx
+                        .send(StarterEvent::PromptRequest {
+                            prompt: payload.prompt,
+                            schemas: payload.schemas,
+                            thinking,
+                            responder,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        clear_pending_reply(&state).await;
+                        return Err(InvalidSnafu {
+                            reason: "prompt responder is not available".to_string(),
                         }
-                        let (response_tx, response_rx) = oneshot::channel();
-                        let responder = PromptResponseSender::new(response_tx);
-                        let thinking = resolve_prompt_thinking(state.metadata.as_ref(), &payload);
-                        event_tx
-                            .send(StarterEvent::PromptRequest {
-                                prompt: payload.prompt,
-                                schemas: payload.schemas,
-                                thinking,
-                                responder,
-                            })
-                            .await
-                            .map_err(|_| {
-                                InvalidSnafu {
-                                    reason: "prompt responder is not available".to_string(),
-                                }
-                                .build()
-                            })?;
-                        event_index = event_index.saturating_add(1);
-                        let response = response_rx.await.map_err(|_| {
-                            InvalidSnafu {
+                        .build());
+                    }
+                    {
+                        let mut guard = state.lock().await;
+                        guard.bump_event_index();
+                    }
+                    let response = match response_rx.await {
+                        Ok(response) => response,
+                        Err(_) => {
+                            clear_pending_reply(&state).await;
+                            return Err(InvalidSnafu {
                                 reason: "prompt responder dropped response".to_string(),
                             }
-                            .build()
-                        })?;
-                        let response = response.map_err(|err| {
-                            InvalidSnafu {
+                            .build());
+                        }
+                    };
+                    let response = match response {
+                        Ok(response) => response,
+                        Err(err) => {
+                            clear_pending_reply(&state).await;
+                            return Err(InvalidSnafu {
                                 reason: format!("prompt responder failed: {err}"),
+                            }
+                            .build());
+                        }
+                    };
+                    clear_pending_reply(&state).await;
+                    conn.send_server_message(&ServerMessage::PromptResponse(response))
+                        .await
+                        .map_err(|err| {
+                            InvalidSnafu {
+                                reason: format!("failed to send prompt response: {err}"),
                             }
                             .build()
                         })?;
-                        conn.send_server_message(&ServerMessage::PromptResponse(response))
-                            .await
-                            .map_err(|err| {
-                                InvalidSnafu {
-                                    reason: format!("failed to send prompt response: {err}"),
-                                }
-                                .build()
-                            })?;
-                    } else if !discovery {
-                        event_tx
-                            .send(StarterEvent::Prompt {
-                                prompt: payload.prompt,
-                            })
-                            .await
-                            .ok();
-                        event_index = event_index.saturating_add(1);
+                } else if !discovery {
+                    event_tx
+                        .send(StarterEvent::Prompt {
+                            prompt: payload.prompt,
+                        })
+                        .await
+                        .ok();
+                    {
+                        let mut guard = state.lock().await;
+                        guard.bump_event_index();
                     }
-                    first_message = false;
                 }
-                Ok(ClientMessage::Reply(_)) => {
-                    // Reply messages are handled locally by `coco reply` command,
-                    // they should not be sent to the session server.
-                    return Err(InvalidSnafu {
-                        reason: "reply is not expected in combo session".to_string(),
+                first_message = false;
+            }
+            ClientMessage::Reply(payload) => {
+                if discovery {
+                    let _ = conn
+                        .send_server_message(&ServerMessage::ReplyValidation(ReplyValidation {
+                            success: false,
+                            error: Some("reply is not allowed during discovery".to_string()),
+                            response: None,
+                        }))
+                        .await;
+                    continue;
+                }
+                let schemas = { state.lock().await.pending_reply_schemas.clone() };
+                let Some(schemas) = schemas else {
+                    let _ = conn
+                        .send_server_message(&ServerMessage::ReplyValidation(ReplyValidation {
+                            success: false,
+                            error: Some("reply is not expected in combo session".to_string()),
+                            response: None,
+                        }))
+                        .await;
+                    continue;
+                };
+                let parsed = match parse_reply_fields(&payload.fields, &schemas) {
+                    Ok(parsed) => parsed,
+                    Err(err) => {
+                        let _ = conn
+                            .send_server_message(&ServerMessage::ReplyValidation(ReplyValidation {
+                                success: false,
+                                error: Some(err),
+                                response: None,
+                            }))
+                            .await;
+                        continue;
                     }
-                    .build());
-                }
-                Ok(ClientMessage::Mcp(_)) => {
-                    return Err(InvalidSnafu {
-                        reason: "mcp request is not allowed in combo session".to_string(),
+                };
+                let response = match serde_json::to_string(&parsed) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        let _ = conn
+                            .send_server_message(&ServerMessage::ReplyValidation(ReplyValidation {
+                                success: false,
+                                error: Some(format!("failed to serialize reply output: {err}")),
+                                response: None,
+                            }))
+                            .await;
+                        continue;
                     }
-                    .build());
-                }
-                Err(err) => {
-                    if !metadata_seen {
-                        return Err(InvalidSnafu {
-                            reason: format!("failed before receiving metadata: {err}"),
-                        }
-                        .build());
+                };
+                conn.send_server_message(&ServerMessage::ReplyValidation(ReplyValidation {
+                    success: true,
+                    error: None,
+                    response: Some(response),
+                }))
+                .await
+                .map_err(|err| {
+                    InvalidSnafu {
+                        reason: format!("failed to send reply validation: {err}"),
                     }
-                    break;
+                    .build()
+                })?;
+                first_message = false;
+            }
+            ClientMessage::Mcp(_) => {
+                return Err(InvalidSnafu {
+                    reason: "mcp request is not allowed in combo session".to_string(),
                 }
+                .build());
             }
         }
     }
 
-    if !metadata_seen {
+    Ok(())
+}
+
+async fn run_session_server(
+    server: SessionSocketServer,
+    discovery: bool,
+    event_tx: mpsc::Sender<StarterEvent>,
+    mut shutdown_rx: oneshot::Receiver<()>,
+) -> Result<SessionState, StarterError> {
+    let state = Arc::new(AsyncMutex::new(SessionState::default()));
+    let cancel_token = CancellationToken::new();
+    let (error_tx, mut error_rx) = mpsc::unbounded_channel();
+    let mut handles: Vec<JoinHandle<()>> = Vec::new();
+    let mut fatal_error: Option<StarterError> = None;
+
+    loop {
+        tokio::select! {
+            _ = &mut shutdown_rx => break,
+            Some(err) = error_rx.recv() => {
+                fatal_error = Some(err);
+                break;
+            }
+            accept = server.accept() => {
+                let conn = accept.context(AcceptSessionConnectionSnafu)?;
+                let task_state = state.clone();
+                let task_event_tx = event_tx.clone();
+                let task_cancel = cancel_token.clone();
+                let task_error_tx = error_tx.clone();
+                handles.push(tokio::spawn(async move {
+                    if let Err(err) = handle_session_connection(
+                        conn,
+                        discovery,
+                        task_event_tx,
+                        task_state,
+                        task_cancel,
+                    )
+                    .await
+                    {
+                        let _ = task_error_tx.send(err);
+                    }
+                }));
+            }
+        }
+    }
+
+    cancel_token.cancel();
+    for handle in handles {
+        if let Err(err) = handle.await {
+            warn!(?err, "session connection task failed");
+        }
+    }
+
+    if let Some(err) = fatal_error {
+        return Err(err);
+    }
+
+    let state = state.lock().await.clone();
+    if state.metadata.is_none() {
         return Err(InvalidSnafu {
             reason: "metadata not received from session".to_string(),
         }
@@ -1303,6 +1490,45 @@ mod tests {
         assert_eq!(prompt_text.as_deref(), Some("Please do the thing"));
 
         Ok(())
+    }
+
+    #[test]
+    fn parse_reply_fields_accepts_required_fields() {
+        let schemas = vec![
+            PromptSchema {
+                name: "message".to_string(),
+                description: "reply message".to_string(),
+            },
+            PromptSchema {
+                name: "status".to_string(),
+                description: "status".to_string(),
+            },
+        ];
+        let fields = vec!["--message=hello".to_string(), "--status=ok".to_string()];
+
+        let parsed = parse_reply_fields(&fields, &schemas).expect("expected parse success");
+        assert_eq!(parsed.get("message"), Some(&"hello".to_string()));
+        assert_eq!(parsed.get("status"), Some(&"ok".to_string()));
+    }
+
+    #[test]
+    fn parse_reply_fields_rejects_unknown_or_missing_fields() {
+        let schemas = vec![PromptSchema {
+            name: "message".to_string(),
+            description: "reply message".to_string(),
+        }];
+        let fields = vec!["--extra=value".to_string()];
+
+        let err = parse_reply_fields(&fields, &schemas).expect_err("expected parse failure");
+        assert!(err.contains("unexpected field key"));
+
+        let fields = vec!["--message=hello".to_string(), "--extra=value".to_string()];
+        let err = parse_reply_fields(&fields, &schemas).expect_err("expected parse failure");
+        assert!(err.contains("unexpected field key"));
+
+        let fields = Vec::new();
+        let err = parse_reply_fields(&fields, &schemas).expect_err("expected parse failure");
+        assert!(err.contains("missing required fields"));
     }
 
     #[tokio::test]
