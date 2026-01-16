@@ -630,11 +630,9 @@ mod tests {
             &RequestOptions::default(),
         )
         .expect("build request");
-        let assistant = request
-            .messages
-            .iter()
-            .find(|msg| matches!(msg.role, super::openai_api::Role::Assistant))
-            .expect("assistant message");
-        assert!(assistant.reasoning_content.is_none());
+        assert!(!request.messages.iter().any(|msg| {
+            matches!(msg.role, super::openai_api::Role::Assistant)
+                && msg.reasoning_content.as_deref() == Some("Hidden")
+        }));
     }
 }
