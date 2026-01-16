@@ -12,7 +12,8 @@ use crate::{
     AppliedTextEdit, OutputChunk, TextEdit, error,
     tools::{
         self, BASH_TOOL_NAME, BashInput, BashTool, Final, LIST_TOOL_NAME, ListTool, READ_TOOL_NAME,
-        ReadTool, STR_REPLACE_TOOL_NAME, StrReplaceTool, Tool, run_bash_chunked,
+        RUN_TASK_TOOL_NAME, ReadTool, RunTaskTool, STR_REPLACE_TOOL_NAME, StrReplaceTool,
+        SubagentEvent, Tool, run_bash_chunked, run_task,
     },
 };
 
@@ -82,6 +83,7 @@ pub enum Output {
     Failure(Final),
     TextEdit(TextEdit),
     ToolOutput(OutputChunk),
+    SubagentOutput(SubagentEvent),
     Denied,
     AskPermission,
 }
@@ -123,6 +125,12 @@ fn bash_permission_key(input: &Input<'_>) -> Option<String> {
 }
 
 impl Executor {
+    /// Register a new tool dynamically.
+    pub fn register_tool(&mut self, tool: Arc<dyn Tool>) {
+        let name = tool.name().to_string();
+        self.tools.insert(name, tool);
+    }
+
     pub fn set_auto_accept_edits(&mut self, enabled: bool) {
         self.auto_accept_edits = enabled;
     }
@@ -282,6 +290,92 @@ impl Executor {
                 return Ok(ExecuteStatus::Completed);
             }
         }
+
+        // Special handling for run_task tool to support streaming SubagentEvents
+        if name == RUN_TASK_TOOL_NAME
+            && let Some(run_task_tool) = tool
+                .as_any()
+                .and_then(|any| any.downcast_ref::<RunTaskTool>())
+        {
+            // Extract the JSON value from input to make it 'static
+            let input_value = match input {
+                Input::Starter(v) => v,
+                _ => {
+                    on_output(Output::Failure(Final::from(
+                        "run_task requires Starter input",
+                    )));
+                    return Ok(ExecuteStatus::Completed);
+                }
+            };
+
+            let ctx = run_task_tool.context();
+
+            // Use a channel to bridge the 'static requirement of run_task
+            // with the non-'static on_output callback
+            let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+            // Spawn the run_task future with owned input
+            let task_cancel = cancel_token.clone();
+            let task_handle = tokio::spawn(async move {
+                run_task(
+                    ctx,
+                    Input::Starter(input_value),
+                    task_cancel,
+                    move |event| {
+                        let _ = event_tx.send(event.clone());
+                    },
+                )
+                .await
+            });
+
+            // Pin the task handle outside the loop
+            let mut task_handle = std::pin::pin!(task_handle);
+
+            // Forward events while the task runs
+            loop {
+                tokio::select! {
+                    event = event_rx.recv() => {
+                        match event {
+                            Some(e) => on_output(Output::SubagentOutput(e)),
+                            None => {
+                                // Channel closed, wait for task to complete and get result
+                                match task_handle.await {
+                                    Ok(output) => {
+                                        on_output(output.into());
+                                    }
+                                    Err(e) => {
+                                        on_output(Output::Failure(Final::from(format!("Task panicked: {}", e))));
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    result = &mut task_handle => {
+                        // Task completed, drain remaining events
+                        while let Ok(e) = event_rx.try_recv() {
+                            on_output(Output::SubagentOutput(e));
+                        }
+                        match result {
+                            Ok(output) => {
+                                on_output(output.into());
+                            }
+                            Err(e) => {
+                                on_output(Output::Failure(Final::from(format!("Task panicked: {}", e))));
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+
+            if cancel_token.is_cancelled() {
+                return Ok(ExecuteStatus::Cancelled);
+            } else {
+                return Ok(ExecuteStatus::Completed);
+            }
+        }
+        // Fall through to generic execution if downcast fails
 
         let output = tokio::select! {
             _ = cancel_token.cancelled() => {

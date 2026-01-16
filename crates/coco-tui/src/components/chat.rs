@@ -2562,6 +2562,16 @@ async fn task_tool_use(mut agent: Agent, tool_use: ToolUse, cancel_token: Cancel
                     .unwrap();
                 }
                 Output::Denied => (),
+                Output::SubagentOutput(event) => {
+                    tx.send(
+                        AnswerEvent::SubagentEvent {
+                            id: id.clone(),
+                            event,
+                        }
+                        .into(),
+                    )
+                    .unwrap();
+                }
             },
         )
         .await;

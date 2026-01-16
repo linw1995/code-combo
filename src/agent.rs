@@ -18,6 +18,7 @@ use tracing::warn;
 
 use crate::{
     Config, PromptSchema, ProviderConfig, RequestOptions, Result, ResultDisplayExt, ThinkingConfig,
+    tools::{RunTaskContext, RunTaskTool},
 };
 use executor::PermissionControl;
 use prompt::{build_system_prompt_from_config, build_system_prompt_from_config_async};
@@ -279,6 +280,20 @@ impl Agent {
             Some(&agent_config),
         );
 
+        // Register run_task tool only if subagents are configured
+        // Must be done before apply_tool_policies so it can be retained
+        if let Some(ref subagents) = agent_config.subagents
+            && !subagents.is_empty()
+        {
+            let run_task_context = RunTaskContext {
+                subagents: subagents.clone(),
+                config: config.clone(),
+                executor: executor.clone(),
+            };
+            let run_task_tool = RunTaskTool::new(run_task_context);
+            executor.register_tool(std::sync::Arc::new(run_task_tool));
+        }
+
         // Apply agent tools as base
         if let Some(tools) = agent_config.tools.as_deref() {
             executor.apply_tool_policies(Some(tools), None);
@@ -313,6 +328,24 @@ impl Agent {
 
     pub fn set_system_prompt(&mut self, system_prompt: &str) {
         self.system_prompt = system_prompt.to_string()
+    }
+
+    /// Apply tool policies to restrict available tools.
+    ///
+    /// This is useful for subagents that should only have access to a subset of tools.
+    pub fn apply_tool_policies(
+        &mut self,
+        allow_tools: Option<&[String]>,
+        deny_tools: Option<&[String]>,
+    ) {
+        self.executor.apply_tool_policies(allow_tools, deny_tools);
+    }
+
+    /// Get the executor for tool execution.
+    ///
+    /// This is useful for subagents that need to execute tools directly.
+    pub fn executor(&self) -> &Executor {
+        &self.executor
     }
 
     /// Setup system prompt asynchronously from configuration and AGENTS.md files.

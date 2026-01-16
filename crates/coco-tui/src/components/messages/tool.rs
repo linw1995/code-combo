@@ -1,7 +1,9 @@
 use coco_macro::{ComponentExt, ContentComponentExt};
 use code_combo::{
     ToolUse,
-    tools::{BASH_TOOL_NAME, LIST_TOOL_NAME, READ_TOOL_NAME, STR_REPLACE_TOOL_NAME},
+    tools::{
+        BASH_TOOL_NAME, LIST_TOOL_NAME, READ_TOOL_NAME, RUN_TASK_TOOL_NAME, STR_REPLACE_TOOL_NAME,
+    },
 };
 use crossterm::event::KeyEvent;
 use ratatui::{
@@ -31,11 +33,13 @@ mod bash;
 mod list;
 mod raw;
 mod read;
+mod run_task;
 mod str_replace;
 use bash::Bash;
 use list::List;
 use raw::Raw;
 use read::Read;
+use run_task::RunTask;
 use str_replace::StrReplace;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -83,6 +87,16 @@ impl Tool {
                 }
             },
             STR_REPLACE_TOOL_NAME => Some(StrReplace::new(&tool_use).into()),
+            RUN_TASK_TOOL_NAME => match RunTask::try_new().tool_use(&tool_use).call() {
+                Ok(widget) => Some(widget.into()),
+                Err(err) => {
+                    warn!(
+                        ?err,
+                        "failed to create RunTask component, falling back to default"
+                    );
+                    None
+                }
+            },
             _ => None,
         }
         .unwrap_or_else(|| Raw::new(tool_use.clone()).into());
@@ -195,6 +209,7 @@ impl Persistable for Tool {
             READ_TOOL_NAME => Read::load(child)?.into(),
             LIST_TOOL_NAME => List::load(child)?.into(),
             STR_REPLACE_TOOL_NAME => StrReplace::load(child)?.into(),
+            RUN_TASK_TOOL_NAME => RunTask::load(child)?.into(),
             _ => Raw::load(child)?.into(),
         };
         Ok(Self {
