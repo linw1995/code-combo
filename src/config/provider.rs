@@ -26,6 +26,10 @@ pub struct ModelRequestConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offload_combo_reply: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can_reason: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<usize>,
@@ -39,6 +43,8 @@ pub struct RequestOptions {
     pub include_reasoning_content: bool,
     pub disable_stream: bool,
     pub offload_combo_reply: Option<bool>,
+    pub context_window: Option<usize>,
+    pub can_reason: Option<bool>,
     pub temperature: Option<f32>,
     pub max_tokens: Option<usize>,
 }
@@ -62,6 +68,12 @@ impl RequestOptions {
         }
         if let Some(value) = override_config.offload_combo_reply {
             self.offload_combo_reply = Some(value);
+        }
+        if let Some(value) = override_config.context_window {
+            self.context_window = Some(value);
+        }
+        if let Some(value) = override_config.can_reason {
+            self.can_reason = Some(value);
         }
         if override_config.temperature.is_some() {
             self.temperature = override_config.temperature;

@@ -2,12 +2,16 @@
 model = "deepseek-chat"
 disable_tool_choice = true
 tool_choice_fallback = true
+context_window = 128000
+can_reason = false
 max_tokens = 4000
 
 [[model_presets]]
 model = "deepseek-reasoner"
 disable_tool_choice = true
 tool_choice_fallback = true
+context_window = 128000
+can_reason = true
 max_tokens = 32000
 
 [[model_presets]]
@@ -20,20 +24,28 @@ max_tokens = 16000
 [[model_presets]]
 model = "glm-4.7"
 max_tokens = 131072
+context_window = 204800
+can_reason = true
 include_reasoning_content = true
 offload_combo_reply = true
 
 [[model_presets]]
 model = "glm-4.6"
 max_tokens = 131072
+context_window = 204800
+can_reason = true
 offload_combo_reply = true
 
 [[model_presets]]
 model = "glm-4.5"
 max_tokens = 98304
+context_window = 131072
+can_reason = true
 offload_combo_reply = true
 
 [[model_presets]]
 model = "glm-4.5-air"
 max_tokens = 98304
+context_window = 131072
+can_reason = true
 offload_combo_reply = true
