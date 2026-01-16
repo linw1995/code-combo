@@ -57,7 +57,8 @@ impl Client {
     ) -> Result<MessagesResponse> {
         match self {
             Client::Anthropic(client) => {
-                let _ = request_options;
+                let temperature = request_options.temperature.map(f64::from);
+                let max_tokens = request_options.max_tokens;
                 let response = client
                     .messages()
                     .maybe_system_prompt(system_prompt)
@@ -69,6 +70,8 @@ impl Client {
                     )
                     .tools(tools.into_iter().map(anthropic_api::Tool::from).collect())
                     .maybe_thinking(thinking.map(anthropic_api::Thinking::from))
+                    .maybe_temperature(temperature)
+                    .maybe_max_tokens(max_tokens)
                     .call()
                     .await
                     .whatever_context_display("failed to send messages")?;
@@ -98,7 +101,8 @@ impl Client {
     ) -> Result<MessagesStream> {
         match self {
             Client::Anthropic(client) => {
-                let _ = request_options;
+                let temperature = request_options.temperature.map(f64::from);
+                let max_tokens = request_options.max_tokens;
                 let stream = client
                     .messages_stream()
                     .maybe_system_prompt(system_prompt)
@@ -110,6 +114,8 @@ impl Client {
                     )
                     .tools(tools.into_iter().map(anthropic_api::Tool::from).collect())
                     .maybe_thinking(thinking.map(anthropic_api::Thinking::from))
+                    .maybe_temperature(temperature)
+                    .maybe_max_tokens(max_tokens)
                     .call()
                     .await
                     .whatever_context_display("failed to send messages stream")?;
@@ -144,7 +150,8 @@ impl Client {
     ) -> Result<MessagesResponse> {
         match self {
             Client::Anthropic(client) => {
-                let _ = request_options;
+                let temperature = request_options.temperature.map(f64::from);
+                let max_tokens = request_options.max_tokens;
                 let response = client
                     .messages_with_tool_choice(
                         system_prompt,
@@ -155,6 +162,8 @@ impl Client {
                         tools.into_iter().map(anthropic_api::Tool::from).collect(),
                         tool_choice.into(),
                         thinking.map(anthropic_api::Thinking::from),
+                        temperature,
+                        max_tokens,
                     )
                     .await
                     .whatever_context_display("failed to request tool choice")?;
@@ -185,7 +194,8 @@ impl Client {
     ) -> Result<MessagesStream> {
         match self {
             Client::Anthropic(client) => {
-                let _ = request_options;
+                let temperature = request_options.temperature.map(f64::from);
+                let max_tokens = request_options.max_tokens;
                 let stream = client
                     .messages_stream_with_tool_choice(
                         system_prompt,
@@ -196,6 +206,8 @@ impl Client {
                         tools.into_iter().map(anthropic_api::Tool::from).collect(),
                         tool_choice.into(),
                         thinking.map(anthropic_api::Thinking::from),
+                        temperature,
+                        max_tokens,
                     )
                     .await
                     .whatever_context_display("failed to request tool choice stream")?;

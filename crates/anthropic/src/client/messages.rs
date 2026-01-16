@@ -815,14 +815,22 @@ mod tests {
         #[tokio::test]
         #[snafu::report]
         async fn simple_messages() -> Result<(), Whatever> {
-            let cli = test_client();
-            let TestMetadata {
-                base_url, model, ..
-            } = test_md();
+            let Some(TestMetadata {
+                base_url,
+                model,
+                token,
+            }) = test_md()
+            else {
+                eprintln!(
+                    "skipping anthropic networking test: missing ANTHROPIC_BASE_URL/ANTHROPIC_MODEL/ANTHROPIC_API_KEY"
+                );
+                return Ok(());
+            };
+            let cli = test_client(&token)?;
 
             let msgs = vec![Message::user("Hello!".into())];
             let resp = messages(
-                cli,
+                &cli,
                 &base_url,
                 MessagesRequest::builder()
                     .messages(msgs)
