@@ -330,6 +330,24 @@ impl Agent {
         self.system_prompt = system_prompt.to_string()
     }
 
+    /// Apply tool policies to restrict available tools.
+    ///
+    /// This is useful for subagents that should only have access to a subset of tools.
+    pub fn apply_tool_policies(
+        &mut self,
+        allow_tools: Option<&[String]>,
+        deny_tools: Option<&[String]>,
+    ) {
+        self.executor.apply_tool_policies(allow_tools, deny_tools);
+    }
+
+    /// Get the executor for tool execution.
+    ///
+    /// This is useful for subagents that need to execute tools directly.
+    pub fn executor(&self) -> &Executor {
+        &self.executor
+    }
+
     /// Setup system prompt asynchronously from configuration and AGENTS.md files.
     ///
     /// This method builds the system prompt by:

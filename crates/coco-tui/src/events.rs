@@ -1,4 +1,7 @@
-use code_combo::{OutputChunk, Starter, TextEdit, ThinkingConfig, ToolUse, tools::Final};
+use code_combo::{
+    OutputChunk, Starter, TextEdit, ThinkingConfig, ToolUse,
+    tools::{Final, SubagentEvent},
+};
 use crossterm::event::{KeyEvent, MouseEvent};
 
 #[derive(Debug, Clone)]
@@ -55,6 +58,11 @@ pub enum AnswerEvent {
         is_error: bool,
         is_user_cancelled: bool,
         output: Final,
+    },
+    /// Subagent event (for run_task tool).
+    SubagentEvent {
+        id: String,
+        event: SubagentEvent,
     },
 }
 

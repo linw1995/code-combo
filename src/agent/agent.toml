@@ -61,6 +61,8 @@ coco mcp <server> <tool> [arguments]
 **Arguments:** Explain any required or optional arguments.
 
 If no suitable MCP tool exists, clearly state that.
+
+Dont execute commands without `-h`.
 """
 
 # Inline safe commands use the same schema as safe_commands.toml.

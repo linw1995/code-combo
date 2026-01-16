@@ -1,3 +1,5 @@
+use std::any::Any;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -28,7 +30,8 @@ pub use read::{
     DEFAULT_LINE_LIMIT, DEFAULT_LINE_OFFSET, MAX_LINE_LIMIT, READ_TOOL_NAME, ReadInput, ReadTool,
 };
 pub use run_task::{
-    RUN_TASK_TOOL_NAME, RunTaskContext, RunTaskInput, RunTaskOutput, RunTaskTool, run_task,
+    RUN_TASK_TOOL_NAME, RunTaskContext, RunTaskInput, RunTaskOutput, RunTaskTool, SubagentEvent,
+    ToolStatus, run_task,
 };
 pub use str_replace::{STR_REPLACE_TOOL_NAME, StrReplaceInput, StrReplaceTool};
 
@@ -49,6 +52,12 @@ pub trait Tool: Send + Sync {
 
     /// Execute the tool with a JSON input, producing JSON output
     async fn execute<'a>(&self, input: Input<'a>) -> ExecuteResult;
+
+    /// Returns self as Any for downcasting to concrete types.
+    /// Tools that need special handling in executor should override this.
+    fn as_any(&self) -> Option<&dyn Any> {
+        None
+    }
 }
 
 #[derive(Debug)]

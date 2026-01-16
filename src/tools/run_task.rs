@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -25,6 +26,8 @@ use crate::{
 };
 
 pub const RUN_TASK_TOOL_NAME: &str = "run_task";
+
+type SubagentEventCallback = Arc<std::sync::Mutex<Box<dyn FnMut(&SubagentEvent) + Send>>>;
 
 /// Input parameters for the run_task tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +54,45 @@ pub struct RunTaskOutput {
     pub error: Option<String>,
 }
 
+/// Status of a tool execution within the subagent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolStatus {
+    /// Tool is starting execution.
+    Starting,
+    /// Tool is currently executing.
+    Executing,
+    /// Tool completed successfully.
+    Completed,
+    /// Tool execution failed.
+    Failed,
+    /// Tool execution was cancelled.
+    Cancelled,
+}
+
+/// Event emitted during subagent execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SubagentEvent {
+    /// Regular output chunk (stdout/stderr).
+    Output(OutputChunk),
+    /// Tool execution status update.
+    ToolUse {
+        /// Tool use ID.
+        id: String,
+        /// Tool name.
+        name: String,
+        /// Current status.
+        status: ToolStatus,
+        /// Brief input summary (for Starting/Executing).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input_summary: Option<String>,
+        /// Brief output summary (for Completed/Failed).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_summary: Option<String>,
+    },
+}
+
 /// Configuration needed to create and run subagent instances.
 #[derive(Clone)]
 pub struct RunTaskContext {
@@ -73,6 +115,11 @@ impl RunTaskTool {
         Self {
             context: Arc::new(Mutex::new(context)),
         }
+    }
+
+    /// Get the shared context for streaming execution.
+    pub fn context(&self) -> Arc<Mutex<RunTaskContext>> {
+        self.context.clone()
     }
 
     /// Build tool description including available subagents.
@@ -134,17 +181,21 @@ impl Tool for RunTaskTool {
         )
         .await
     }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
 }
 
-/// Execute the run_task tool with chunked output support.
+/// Execute the run_task tool with subagent event support.
 pub async fn run_task<F>(
     context: Arc<Mutex<RunTaskContext>>,
     input: Input<'_>,
     cancel_token: CancellationToken,
-    mut on_chunk: F,
+    on_event: F,
 ) -> ExecuteResult
 where
-    F: FnMut(&OutputChunk) + Send,
+    F: FnMut(&SubagentEvent) + Send + 'static,
 {
     let Input::Starter(input) = input else {
         return err_msg!("Input should be Starter variant");
@@ -231,10 +282,8 @@ where
         }
     };
 
-    // Create subagent instance
-    // Clone config and executor for the subagent
+    // Clone config for the subagent
     let subagent_base_config = ctx.config.clone();
-    let subagent_executor = ctx.executor.clone();
 
     // Drop lock before async operations
     drop(ctx);
@@ -248,15 +297,17 @@ where
     // Build subagent system prompt
     let subagent_system_prompt = build_subagent_system_prompt(&subagent_agent_config, &input);
 
-    // Create a minimal Agent-like executor for the subagent
-    // For now, we'll use a simplified execution loop
+    // Wrap callback in Arc<Mutex<Box>> to break type recursion in execute_subagent
+    let on_event_boxed: SubagentEventCallback = Arc::new(std::sync::Mutex::new(Box::new(on_event)));
+
+    // Execute subagent with tool restrictions
     let result = execute_subagent(
         subagent_base_config,
-        subagent_executor,
+        subagent_agent_config.tools.clone(),
         subagent_system_prompt,
         input.prompt,
         cancel_token,
-        &mut on_chunk,
+        on_event_boxed,
     )
     .await;
 
@@ -298,155 +349,256 @@ fn build_subagent_system_prompt(config: &AgentConfig, input: &RunTaskInput) -> S
 }
 
 /// Execute the subagent loop.
-async fn execute_subagent<F>(
+///
+/// Returns a boxed future to break type-level recursion that would otherwise
+/// cause compiler recursion limit issues.
+fn execute_subagent(
     config: Config,
-    executor: Executor,
+    allowed_tools: Option<Vec<String>>,
     system_prompt: String,
     initial_prompt: String,
     cancel_token: CancellationToken,
-    on_chunk: &mut F,
-) -> Result<RunTaskOutput, String>
-where
-    F: FnMut(&OutputChunk) + Send,
-{
-    use std::sync::Mutex as StdMutex;
-
+    on_event: SubagentEventCallback,
+) -> BoxFuture<'static, Result<RunTaskOutput, String>> {
     use crate::agent::Agent;
 
-    // Wrap on_chunk in Mutex for thread-safe interior mutability
-    let on_chunk = StdMutex::new(on_chunk);
-
-    // Helper to get current timestamp
-    let now_ms = || {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0)
-    };
-
-    // Helper to emit stream updates
-    let emit_update = |update: ChatStreamUpdate| {
-        let chunk = match update {
-            ChatStreamUpdate::Plain { text, .. } => OutputChunk {
-                timestamp: now_ms(),
-                stream: StreamKind::Stdout,
-                lines: vec![text],
-            },
-            ChatStreamUpdate::Thinking { text, .. } => OutputChunk {
-                timestamp: now_ms(),
-                stream: StreamKind::Stderr,
-                lines: vec![format!("[thinking] {}", text)],
-            },
+    Box::pin(async move {
+        // Helper to get current timestamp
+        let now_ms = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0)
         };
-        if let Ok(mut f) = on_chunk.lock() {
-            (*f)(&chunk);
-        }
-    };
 
-    // Create subagent with shared executor
-    let mut subagent = Agent::new(config);
-    subagent.set_system_prompt(&system_prompt);
+        // Clone Arc for closures
+        let on_event_for_emit = on_event.clone();
+        let on_event_for_update = on_event.clone();
 
-    // Send initial message
-    let user_message = Message::user(Content::Text(initial_prompt));
+        // Helper to emit events
+        let emit_event = move |event: SubagentEvent| {
+            if let Ok(mut f) = on_event_for_emit.lock() {
+                (*f)(&event);
+            }
+        };
 
-    let mut turns = 0;
-    let max_turns = 50; // Prevent infinite loops
+        // Shared buffers for aggregating streaming text into lines
+        let plain_buffer = Arc::new(std::sync::Mutex::new(String::new()));
+        let thinking_buffer = Arc::new(std::sync::Mutex::new(String::new()));
 
-    // Initial chat
-    let response = subagent
-        .chat_stream(user_message, cancel_token.clone(), &emit_update)
-        .await
-        .map_err(|e| format!("Subagent chat failed: {}", e))?;
+        // Clone buffers for the emit_update closure
+        let plain_buf_for_emit = plain_buffer.clone();
+        let thinking_buf_for_emit = thinking_buffer.clone();
 
-    turns += 1;
-    let mut final_response = extract_text_response(&response.message);
+        // Helper to emit stream updates as Output events, aggregating into lines
+        let emit_update = move |update: ChatStreamUpdate| {
+            let (buffer, stream, prefix) = match &update {
+                ChatStreamUpdate::Plain { .. } => (&plain_buf_for_emit, StreamKind::Stdout, ""),
+                ChatStreamUpdate::Thinking { .. } => {
+                    (&thinking_buf_for_emit, StreamKind::Stderr, "[thinking] ")
+                }
+            };
 
-    // Check if we need tool execution
-    let mut stop_reason = response.stop_reason;
-    let mut current_message = response.message;
+            let text = match update {
+                ChatStreamUpdate::Plain { text, .. } => text,
+                ChatStreamUpdate::Thinking { text, .. } => text,
+            };
 
-    while matches!(stop_reason, Some(StopReason::ToolUse)) && turns < max_turns {
-        if cancel_token.is_cancelled() {
-            return Ok(RunTaskOutput {
-                success: false,
-                response: final_response,
-                turns,
-                error: Some("Cancelled".to_string()),
-            });
-        }
+            let mut buf = buffer.lock().unwrap();
+            buf.push_str(&text);
 
-        // Extract and execute tool calls
-        let tool_uses = extract_tool_uses(&current_message);
-
-        if tool_uses.is_empty() {
-            break;
-        }
-
-        // Execute each tool and collect results
-        let mut tool_results = Vec::new();
-        for tool_use in tool_uses {
-            // Emit tool call start
-            {
-                let chunk = OutputChunk {
-                    timestamp: now_ms(),
-                    stream: StreamKind::Stdout,
-                    lines: vec![format!("[tool:{}] Starting...", tool_use.name)],
-                };
-                if let Ok(mut f) = on_chunk.lock() {
-                    (*f)(&chunk);
+            // Extract complete lines (ending with newline)
+            let mut lines_to_emit = Vec::new();
+            while let Some(newline_pos) = buf.find('\n') {
+                let line = buf.drain(..=newline_pos).collect::<String>();
+                let line = line.trim_end_matches('\n').to_string();
+                if !line.is_empty() || prefix.is_empty() {
+                    lines_to_emit.push(format!("{}{}", prefix, line));
                 }
             }
 
-            let input = crate::tools::Input::Starter(tool_use.input.clone());
-            let exec_result = executor
-                .clone()
-                .execute_with_output(
-                    &tool_use.id,
-                    &tool_use.name,
-                    input,
-                    cancel_token.clone(),
-                    |output| {
-                        if let crate::agent::Output::ToolOutput(chunk) = output
-                            && let Ok(mut f) = on_chunk.lock()
-                        {
-                            (*f)(&chunk);
-                        }
-                    },
-                )
-                .await;
+            // Emit complete lines
+            if !lines_to_emit.is_empty() {
+                let chunk = OutputChunk {
+                    timestamp: now_ms(),
+                    stream,
+                    lines: lines_to_emit,
+                };
+                if let Ok(mut f) = on_event_for_update.lock() {
+                    (*f)(&SubagentEvent::Output(chunk));
+                }
+            }
+        };
 
-            let result_content = match exec_result {
-                Ok(ExecuteStatus::Completed) => Content::Text("Tool executed successfully".into()),
-                Ok(ExecuteStatus::Cancelled) => Content::Text("Tool execution cancelled".into()),
-                Err(e) => Content::Text(format!("Tool error: {}", e)),
-            };
+        // Helper to flush remaining buffered content
+        let flush_buffers = || {
+            let mut lines_to_emit = Vec::new();
 
-            tool_results.push(Block::tool_result(&tool_use.id, None, result_content));
+            // Flush plain buffer
+            if let Ok(mut buf) = plain_buffer.lock()
+                && !buf.is_empty()
+            {
+                lines_to_emit.push((StreamKind::Stdout, std::mem::take(&mut *buf)));
+            }
+
+            // Flush thinking buffer
+            if let Ok(mut buf) = thinking_buffer.lock()
+                && !buf.is_empty()
+            {
+                let content = std::mem::take(&mut *buf);
+                lines_to_emit.push((StreamKind::Stderr, format!("[thinking] {}", content)));
+            }
+
+            // Emit remaining content
+            for (stream, line) in lines_to_emit {
+                if let Ok(mut f) = on_event.lock() {
+                    (*f)(&SubagentEvent::Output(OutputChunk {
+                        timestamp: now_ms(),
+                        stream,
+                        lines: vec![line],
+                    }));
+                }
+            }
+        };
+
+        // Create subagent and configure it
+        let mut subagent = Agent::new(config);
+        subagent.set_system_prompt(&system_prompt);
+
+        // Apply tool restrictions if specified
+        if let Some(tools) = allowed_tools {
+            subagent.apply_tool_policies(Some(&tools), None);
         }
 
-        // Send tool results back to subagent
-        subagent
-            .append_message(Message::user(Content::Multiple(tool_results)))
-            .await;
+        // Send initial message
+        let user_message = Message::user(Content::Text(initial_prompt));
 
-        // Continue conversation
-        let next_response = subagent
-            .chat_stream_with_history(cancel_token.clone(), &emit_update)
+        let mut turns = 0;
+        let max_turns = 50; // Prevent infinite loops
+
+        // Initial chat
+        let response = subagent
+            .chat_stream(user_message, cancel_token.clone(), &emit_update)
             .await
-            .map_err(|e| format!("Subagent continuation failed: {}", e))?;
+            .map_err(|e| format!("Subagent chat failed: {}", e))?;
 
         turns += 1;
-        final_response = extract_text_response(&next_response.message);
-        stop_reason = next_response.stop_reason;
-        current_message = next_response.message;
-    }
+        let mut final_response = extract_text_response(&response.message);
 
-    Ok(RunTaskOutput {
-        success: true,
-        response: final_response,
-        turns,
-        error: None,
+        // Check if we need tool execution
+        let mut stop_reason = response.stop_reason;
+        let mut current_message = response.message;
+
+        while matches!(stop_reason, Some(StopReason::ToolUse)) && turns < max_turns {
+            if cancel_token.is_cancelled() {
+                flush_buffers();
+                return Ok(RunTaskOutput {
+                    success: false,
+                    response: final_response,
+                    turns,
+                    error: Some("Cancelled".to_string()),
+                });
+            }
+
+            // Extract and execute tool calls
+            let tool_uses = extract_tool_uses(&current_message);
+
+            if tool_uses.is_empty() {
+                break;
+            }
+
+            // Execute each tool and collect results
+            let mut tool_results = Vec::new();
+            for tool_use in tool_uses {
+                // Generate input summary for display
+                let input_summary = summarize_tool_input(&tool_use.name, &tool_use.input);
+
+                // Emit tool call start
+                emit_event(SubagentEvent::ToolUse {
+                    id: tool_use.id.clone(),
+                    name: tool_use.name.clone(),
+                    status: ToolStatus::Starting,
+                    input_summary: Some(input_summary.clone()),
+                    output_summary: None,
+                });
+
+                // Clone Arc for the execute_with_output callback
+                let on_event_for_exec = on_event.clone();
+                let input = crate::tools::Input::Starter(tool_use.input.clone());
+                let exec_result = subagent
+                    .executor()
+                    .clone()
+                    .execute_with_output(
+                        &tool_use.id,
+                        &tool_use.name,
+                        input,
+                        cancel_token.clone(),
+                        |output| {
+                            if let crate::agent::Output::ToolOutput(chunk) = output
+                                && let Ok(mut f) = on_event_for_exec.lock()
+                            {
+                                (*f)(&SubagentEvent::Output(chunk));
+                            }
+                        },
+                    )
+                    .await;
+
+                let (result_content, status, output_summary) = match exec_result {
+                    Ok(ExecuteStatus::Completed) => (
+                        Content::Text("Tool executed successfully".into()),
+                        ToolStatus::Completed,
+                        Some("Success".to_string()),
+                    ),
+                    Ok(ExecuteStatus::Cancelled) => (
+                        Content::Text("Tool execution cancelled".into()),
+                        ToolStatus::Cancelled,
+                        Some("Cancelled".to_string()),
+                    ),
+                    Err(ref e) => (
+                        Content::Text(format!("Tool error: {}", e)),
+                        ToolStatus::Failed,
+                        Some(format!("Error: {}", e)),
+                    ),
+                };
+
+                // Emit tool call end
+                emit_event(SubagentEvent::ToolUse {
+                    id: tool_use.id.clone(),
+                    name: tool_use.name.clone(),
+                    status,
+                    input_summary: Some(input_summary),
+                    output_summary,
+                });
+
+                tool_results.push(Block::tool_result(&tool_use.id, None, result_content));
+            }
+
+            // Send tool results back to subagent
+            subagent
+                .append_message(Message::user(Content::Multiple(tool_results)))
+                .await;
+
+            // Continue conversation
+            let next_response = subagent
+                .chat_stream_with_history(cancel_token.clone(), &emit_update)
+                .await
+                .map_err(|e| format!("Subagent continuation failed: {}", e))?;
+
+            turns += 1;
+            final_response = extract_text_response(&next_response.message);
+            stop_reason = next_response.stop_reason;
+            current_message = next_response.message;
+        }
+
+        // Flush any remaining buffered content before returning
+        flush_buffers();
+
+        Ok(RunTaskOutput {
+            success: true,
+            response: final_response,
+            turns,
+            error: None,
+        })
     })
 }
 
@@ -480,6 +632,72 @@ fn extract_tool_uses(message: &Message) -> Vec<ToolUse> {
                 }
             })
             .collect(),
+    }
+}
+
+/// Generate a brief summary of tool input for display.
+fn summarize_tool_input(tool_name: &str, input: &Value) -> String {
+    const MAX_LEN: usize = 60;
+
+    match tool_name {
+        "bash" => {
+            if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
+                truncate_str(cmd, MAX_LEN)
+            } else {
+                "(no command)".to_string()
+            }
+        }
+        "read" => {
+            if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
+                truncate_str(path, MAX_LEN)
+            } else {
+                "(no path)".to_string()
+            }
+        }
+        "list" => {
+            if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
+                truncate_str(path, MAX_LEN)
+            } else {
+                ".".to_string()
+            }
+        }
+        "str_replace" => {
+            if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
+                truncate_str(path, MAX_LEN)
+            } else {
+                "(no path)".to_string()
+            }
+        }
+        _ => {
+            // For unknown tools, show first key-value or truncated JSON
+            if let Some(obj) = input.as_object() {
+                if let Some((key, val)) = obj.iter().next() {
+                    let val_str = match val {
+                        Value::String(s) => truncate_str(s, 40),
+                        _ => val.to_string(),
+                    };
+                    format!(
+                        "{}: {}",
+                        key,
+                        truncate_str(&val_str, MAX_LEN - key.len() - 2)
+                    )
+                } else {
+                    "{}".to_string()
+                }
+            } else {
+                truncate_str(&input.to_string(), MAX_LEN)
+            }
+        }
+    }
+}
+
+fn truncate_str(s: &str, max_len: usize) -> String {
+    // Take first line only
+    let first_line = s.lines().next().unwrap_or(s);
+    if first_line.len() <= max_len {
+        first_line.to_string()
+    } else {
+        format!("{}...", &first_line[..max_len.saturating_sub(3)])
     }
 }
 

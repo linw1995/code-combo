@@ -1,3 +1,5 @@
+#![recursion_limit = "1024"]
+
 mod agent;
 pub mod cli;
 pub mod cmd;

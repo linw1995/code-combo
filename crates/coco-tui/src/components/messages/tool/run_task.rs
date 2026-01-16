@@ -6,7 +6,7 @@ use bon::bon;
 use coco_macro::{ComponentExt, ContentComponentExt};
 use code_combo::{
     OutputChunk, ToolUse,
-    tools::{Final, RunTaskInput, RunTaskOutput},
+    tools::{Final, RunTaskInput, RunTaskOutput, SubagentEvent, ToolStatus},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -45,6 +45,21 @@ struct Inner {
     display_state: FoldState,
 }
 
+/// Tracks the state of a tool being executed by the subagent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SubagentToolState {
+    /// Tool use ID.
+    id: String,
+    /// Tool name.
+    name: String,
+    /// Current status.
+    status: ToolStatus,
+    /// Brief input summary.
+    input_summary: Option<String>,
+    /// Brief output summary (after completion).
+    output_summary: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ExecState {
@@ -54,10 +69,14 @@ enum ExecState {
     },
     Executing {
         chunks: Vec<OutputChunk>,
+        #[serde(default)]
+        active_tools: Vec<SubagentToolState>,
     },
     Finished {
         output: RunTaskOutput,
         chunks: Vec<OutputChunk>,
+        #[serde(default)]
+        tool_history: Vec<SubagentToolState>,
     },
 }
 
@@ -119,6 +138,7 @@ impl<'a> RunTask<'a> {
             Some(output) => ExecState::Finished {
                 output,
                 chunks: Vec::new(),
+                tool_history: Vec::new(),
             },
             None => ExecState::Initial {
                 requiring_confirmation: false,
@@ -145,32 +165,91 @@ impl<'a> RunTask<'a> {
         Ok(component)
     }
 
+    fn render_tool_line(&self, tool: &SubagentToolState) -> Line<'static> {
+        let theme = global::theme();
+        let (status_icon, status_style) = match tool.status {
+            ToolStatus::Starting => ("◐", theme.ui.tool_title_state_initing),
+            ToolStatus::Executing => ("◑", theme.ui.tool_title_state_executing),
+            ToolStatus::Completed => ("✓", theme.ui.tool_title_state_completed),
+            ToolStatus::Failed => ("✗", theme.ui.tool_title_state_failed),
+            ToolStatus::Cancelled => ("○", theme.ui.tool_title_state_cancelled),
+        };
+
+        let mut spans = vec![
+            Span::styled(format!("  {} ", status_icon), status_style),
+            Span::styled(tool.name.clone(), theme.ui.tool_title_name),
+        ];
+
+        // Always show input summary (the command/path), then output status for completed states
+        if let Some(input_summary) = &tool.input_summary {
+            spans.push(Span::styled(
+                format!(" - {}", input_summary),
+                theme.ui.folded_hint,
+            ));
+        }
+
+        // For completed/failed states, also show the output status if different from input
+        match tool.status {
+            ToolStatus::Completed | ToolStatus::Failed | ToolStatus::Cancelled => {
+                if let Some(output_summary) = &tool.output_summary {
+                    // Don't show redundant "Success" if we already showed input
+                    if tool.input_summary.is_none() || output_summary != "Success" {
+                        let output_style = match tool.status {
+                            ToolStatus::Completed => theme.ui.tool_title_state_completed,
+                            ToolStatus::Failed | ToolStatus::Cancelled => {
+                                theme.ui.tool_title_state_failed
+                            }
+                            _ => theme.ui.folded_hint,
+                        };
+                        spans.push(Span::styled(format!(" ({})", output_summary), output_style));
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        Line::from(spans)
+    }
+
     fn render_output(&self) -> Paragraph<'a> {
         let theme = global::theme();
 
         match &self.state.exec_state {
             ExecState::Initial { .. } => Paragraph::new(Vec::<Line>::new()),
-            ExecState::Executing { .. } => {
-                if self.preview_lines.is_empty() {
+            ExecState::Executing { active_tools, .. } => {
+                let mut lines: Vec<Line<'a>> = Vec::new();
+
+                // Show active tools
+                if !active_tools.is_empty() {
+                    lines.push(Line::from(Span::styled("Tools:", theme.ui.tool_title_name)));
+                    for tool in active_tools {
+                        lines.push(self.render_tool_line(tool));
+                    }
+                    lines.push(Line::from(""));
+                }
+
+                // Show streamed output
+                if self.preview_lines.is_empty() && active_tools.is_empty() {
                     return Paragraph::new(vec![Line::from(Span::styled(
                         "Waiting for subagent...",
                         theme.ui.folded_hint,
                     ))]);
                 }
-                let lines: Vec<Line<'a>> = self
-                    .preview_lines
-                    .iter()
-                    .map(|line| {
-                        let style = match line.stream {
-                            code_combo::StreamKind::Stdout => Style::default(),
-                            code_combo::StreamKind::Stderr => theme.ui.bash_stderr_marker,
-                        };
-                        Line::from(Span::styled(line.text.clone(), style))
-                    })
-                    .collect();
+
+                for line in self.preview_lines.iter() {
+                    let style = match line.stream {
+                        code_combo::StreamKind::Stdout => Style::default(),
+                        code_combo::StreamKind::Stderr => theme.ui.bash_stderr_marker,
+                    };
+                    lines.push(Line::from(Span::styled(line.text.clone(), style)));
+                }
                 Paragraph::new(lines)
             }
-            ExecState::Finished { output, chunks } => {
+            ExecState::Finished {
+                output,
+                chunks,
+                tool_history,
+            } => {
                 let mut lines: Vec<Line<'a>> = Vec::new();
 
                 // Show status
@@ -193,6 +272,18 @@ impl<'a> RunTask<'a> {
                         Span::styled("Error: ", theme.ui.tool_title_state_failed),
                         Span::raw(error.clone()),
                     ]));
+                }
+
+                // Show tool history if any
+                if !tool_history.is_empty() {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        "Tools used:",
+                        theme.ui.tool_title_name,
+                    )));
+                    for tool in tool_history {
+                        lines.push(self.render_tool_line(tool));
+                    }
                 }
 
                 // Show response or streamed output
@@ -258,15 +349,68 @@ impl<'a> RunTask<'a> {
         let chunk_for_state = chunk.clone();
         let mut state = self.state.write();
         match &mut state.exec_state {
-            ExecState::Executing { chunks } => chunks.push(chunk_for_state),
+            ExecState::Executing { chunks, .. } => chunks.push(chunk_for_state),
             ExecState::Finished { chunks, .. } => chunks.push(chunk_for_state),
             ExecState::Initial { .. } => {
                 state.exec_state = ExecState::Executing {
                     chunks: vec![chunk_for_state],
+                    active_tools: Vec::new(),
                 };
             }
         }
         self.preview_lines.push_chunk(&chunk);
+    }
+
+    fn handle_subagent_event(&mut self, event: &SubagentEvent) {
+        match event {
+            SubagentEvent::Output(chunk) => {
+                self.push_chunk(chunk.clone());
+                self.rebuild_output();
+            }
+            SubagentEvent::ToolUse {
+                id,
+                name,
+                status,
+                input_summary,
+                output_summary,
+            } => {
+                let tool_state = SubagentToolState {
+                    id: id.clone(),
+                    name: name.clone(),
+                    status: status.clone(),
+                    input_summary: input_summary.clone(),
+                    output_summary: output_summary.clone(),
+                };
+
+                let mut state = self.state.write();
+                match &mut state.exec_state {
+                    ExecState::Executing { active_tools, .. } => {
+                        // Update or add the tool state
+                        if let Some(existing) = active_tools.iter_mut().find(|t| t.id == *id) {
+                            *existing = tool_state;
+                        } else {
+                            active_tools.push(tool_state);
+                        }
+                    }
+                    ExecState::Initial { .. } => {
+                        state.exec_state = ExecState::Executing {
+                            chunks: Vec::new(),
+                            active_tools: vec![tool_state],
+                        };
+                    }
+                    ExecState::Finished { tool_history, .. } => {
+                        // Update history with final state
+                        if let Some(existing) = tool_history.iter_mut().find(|t| t.id == *id) {
+                            *existing = tool_state;
+                        } else {
+                            tool_history.push(tool_state);
+                        }
+                    }
+                }
+                drop(state);
+                self.rebuild_output();
+            }
+        }
     }
 
     pub fn update_output(&mut self, output: Option<Final>) -> Result<()> {
@@ -275,12 +419,23 @@ impl<'a> RunTask<'a> {
                 .whatever_context("failed to parse RunTaskOutput")?;
             {
                 let mut state = self.state.write();
-                let chunks = match &mut state.exec_state {
-                    ExecState::Executing { chunks } => std::mem::take(chunks),
-                    ExecState::Finished { chunks, .. } => std::mem::take(chunks),
-                    ExecState::Initial { .. } => Vec::new(),
+                let (chunks, tool_history) = match &mut state.exec_state {
+                    ExecState::Executing {
+                        chunks,
+                        active_tools,
+                    } => (std::mem::take(chunks), std::mem::take(active_tools)),
+                    ExecState::Finished {
+                        chunks,
+                        tool_history,
+                        ..
+                    } => (std::mem::take(chunks), std::mem::take(tool_history)),
+                    ExecState::Initial { .. } => (Vec::new(), Vec::new()),
                 };
-                state.exec_state = ExecState::Finished { output, chunks };
+                state.exec_state = ExecState::Finished {
+                    output,
+                    chunks,
+                    tool_history,
+                };
                 state.display_state = FoldState::Preview;
             }
             self.rebuild_output();
@@ -290,10 +445,10 @@ impl<'a> RunTask<'a> {
 
     fn has_output_content(&self) -> bool {
         match &self.state.exec_state {
-            ExecState::Finished { output, chunks } => {
+            ExecState::Finished { output, chunks, .. } => {
                 !output.response.is_empty() || !chunks.is_empty()
             }
-            ExecState::Executing { chunks } => !chunks.is_empty(),
+            ExecState::Executing { chunks, .. } => !chunks.is_empty(),
             ExecState::Initial { .. } => false,
         }
     }
@@ -385,7 +540,7 @@ impl Persistable for RunTask<'static> {
     fn load(session: Session) -> Result<Self> {
         let state: Inner = session::load(session)?;
         let preview_lines = match &state.exec_state {
-            ExecState::Executing { chunks } | ExecState::Finished { chunks, .. } => {
+            ExecState::Executing { chunks, .. } | ExecState::Finished { chunks, .. } => {
                 StreamedLines::from_chunks(chunks, Some(OUTPUT_PREVIEW_LINES))
             }
             ExecState::Initial { .. } => StreamedLines::new(Some(OUTPUT_PREVIEW_LINES)),
@@ -427,6 +582,12 @@ impl Component for RunTask<'static> {
                 }
                 self.push_chunk(chunk.clone());
                 self.rebuild_output();
+            }
+            Event::Answer(AnswerEvent::SubagentEvent { id, event }) => {
+                if id != &self.state.tool_use.id {
+                    return;
+                }
+                self.handle_subagent_event(event);
             }
             Event::Answer(AnswerEvent::ToolResult { output, .. }) => {
                 if let Err(err) = self.update_output(Some(output.to_owned())) {
