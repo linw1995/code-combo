@@ -50,6 +50,68 @@ allow_positional = true
 positional_path_from = 1
 
 [[commands]]
+name = "rg"
+allow_positional = true
+positional_path_from = 1
+flags = [
+  { name = "--help", arg = "none" },
+  { name = "--version", arg = "none" },
+  { name = "-n", arg = "none" },
+  { name = "--line-number", arg = "none" },
+  { name = "-S", arg = "none" },
+  { name = "--smart-case", arg = "none" },
+  { name = "-i", arg = "none" },
+  { name = "--ignore-case", arg = "none" },
+  { name = "-s", arg = "none" },
+  { name = "--case-sensitive", arg = "none" },
+  { name = "-w", arg = "none" },
+  { name = "--word-regexp", arg = "none" },
+  { name = "-x", arg = "none" },
+  { name = "--line-regexp", arg = "none" },
+  { name = "-F", arg = "none" },
+  { name = "--fixed-strings", arg = "none" },
+  { name = "-g", arg = "required" },
+  { name = "--glob", arg = "required" },
+  { name = "--iglob", arg = "required" },
+  { name = "-t", arg = "required" },
+  { name = "--type", arg = "required" },
+  { name = "-T", arg = "required" },
+  { name = "--type-not", arg = "required" },
+  { name = "--type-list", arg = "none" },
+  { name = "-e", arg = "required" },
+  { name = "--regexp", arg = "required" },
+  { name = "-f", arg = "required", value = "path" },
+  { name = "--file", arg = "required", value = "path" },
+  { name = "-l", arg = "none" },
+  { name = "--files-with-matches", arg = "none" },
+  { name = "-L", arg = "none" },
+  { name = "--files-without-match", arg = "none" },
+  { name = "--files", arg = "none" },
+  { name = "-c", arg = "none" },
+  { name = "--count", arg = "none" },
+  { name = "-m", arg = "required" },
+  { name = "--max-count", arg = "required" },
+  { name = "-A", arg = "required" },
+  { name = "--after-context", arg = "required" },
+  { name = "-B", arg = "required" },
+  { name = "--before-context", arg = "required" },
+  { name = "-C", arg = "required" },
+  { name = "--context", arg = "required" },
+  { name = "--max-depth", arg = "required" },
+  { name = "--max-filesize", arg = "required" },
+  { name = "--no-messages", arg = "none" },
+  { name = "--hidden", arg = "none" },
+  { name = "--no-hidden", arg = "none" },
+  { name = "--no-ignore", arg = "none" },
+  { name = "--no-ignore-vcs", arg = "none" },
+  { name = "--no-ignore-global", arg = "none" },
+  { name = "--no-ignore-parent", arg = "none" },
+  { name = "--follow", arg = "none" },
+  { name = "--no-follow", arg = "none" },
+  { name = "--color", arg = "optional" },
+]
+
+[[commands]]
 name = "head"
 allow_any = true
 allow_positional = true
