@@ -38,6 +38,12 @@ struct ParsedCommand {
     name_range: Range<usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedCommandSummary {
+    pub name: String,
+    pub args: Vec<String>,
+}
+
 #[derive(Debug)]
 enum ParseError {
     Empty,
@@ -62,6 +68,20 @@ fn safe_command_rules() -> &'static RwLock<Vec<SafeCommandRule>> {
 
 pub fn should_bypass_permission(input: &BashInput) -> bool {
     is_safe_command(&input.command)
+}
+
+pub fn parse_primary_command(command: &str) -> Result<ParsedCommandSummary, String> {
+    let commands = parse_commands(command).map_err(|err| err.to_reason().to_string())?;
+    if commands.len() != 1 {
+        return Err("multiple commands".to_string());
+    }
+    let command = commands
+        .first()
+        .ok_or_else(|| "command is empty".to_string())?;
+    Ok(ParsedCommandSummary {
+        name: command.name.clone(),
+        args: command.args.iter().map(|arg| arg.text.clone()).collect(),
+    })
 }
 
 pub fn bash_unsafe_ranges(command: &str) -> Vec<(Range<usize>, String)> {
@@ -169,6 +189,19 @@ pub fn bash_unsafe_ranges(command: &str) -> Vec<(Range<usize>, String)> {
     }
 
     ranges
+}
+
+impl ParseError {
+    fn to_reason(&self) -> &'static str {
+        match self {
+            ParseError::Empty => "command is empty",
+            ParseError::MultipleStatements => "multiple statements",
+            ParseError::MissingCommandName => "missing command name",
+            ParseError::ParseFailed => "command parse failed",
+            ParseError::SyntaxError => "syntax error",
+            ParseError::UnsupportedNode => "unsupported shell syntax",
+        }
+    }
 }
 
 pub fn bash_unsafe_reason(command: &str) -> Result<(), String> {

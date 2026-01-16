@@ -28,7 +28,9 @@ mod executor;
 mod prompt;
 
 pub use crate::provider::{Content, Message, StopReason, ToolUse};
-pub use bash_executor::{bash_unsafe_ranges, bash_unsafe_reason};
+pub use bash_executor::{
+    ParsedCommandSummary, bash_unsafe_ranges, bash_unsafe_reason, parse_primary_command,
+};
 pub use executor::{ExecuteStatus, Executor, Input, Output};
 
 const DEFAULT_THINKING_BUDGET_TOKENS: usize = 1024;

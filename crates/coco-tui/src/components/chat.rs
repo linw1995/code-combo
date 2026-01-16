@@ -3,8 +3,8 @@ use code_combo::tools::{BashInput, Final};
 use code_combo::{
     Agent, Block as ChatBlock, ChatResponse, ChatStreamUpdate, Config, Content as ChatContent,
     Message as ChatMessage, Output, RuntimeOverrides, SessionEnv, Starter, StarterCommand,
-    StarterError, StarterEvent, StopReason, TextEdit, ToolUse, discover_starters,
-    load_runtime_overrides, save_runtime_overrides,
+    StarterError, StarterEvent, StopReason, TextEdit, ToolUse, bash_unsafe_ranges,
+    discover_starters, load_runtime_overrides, parse_primary_command, save_runtime_overrides,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use futures::StreamExt;
@@ -1568,6 +1568,48 @@ fn build_offload_reply_retry_directive(schemas: &[code_combo::PromptSchema]) -> 
     format!("The previous response did not produce a valid coco reply. Retry.\n\n{directive}")
 }
 
+enum OffloadCommandKind {
+    Coco,
+    Safe,
+    Unsafe,
+}
+
+fn classify_offload_command(command: &str) -> OffloadCommandKind {
+    let is_coco_reply = is_coco_reply_command(command);
+    if is_coco_reply {
+        return OffloadCommandKind::Coco;
+    }
+    if is_safe_command(command) {
+        return OffloadCommandKind::Safe;
+    }
+    OffloadCommandKind::Unsafe
+}
+
+fn build_offload_reply_guidance(
+    schemas: &[code_combo::PromptSchema],
+    command: &str,
+    executed: bool,
+) -> String {
+    let field_args: Vec<String> = schemas
+        .iter()
+        .map(|schema| format!("--{}=...", schema.name))
+        .collect();
+    let field_descriptions: Vec<String> = schemas
+        .iter()
+        .map(|schema| format!("- {}: {}", schema.name, schema.description))
+        .collect();
+    let status = if executed { "executed" } else { "blocked" };
+    format!(
+        "The previous tool call was {status} but did not use `coco reply` (command: {command}).\n\
+You must call the bash tool with `coco reply` and only that command.\n\
+Required fields:\n{field_list}\n\n\
+Example:\n\
+coco reply {field_args}",
+        field_list = field_descriptions.join("\n"),
+        field_args = field_args.join(" "),
+    )
+}
+
 #[derive(Debug, Snafu)]
 enum ComboReplyError {
     #[snafu(display("prompt reply cancelled"))]
@@ -1618,50 +1660,24 @@ fn should_retry_offload_combo_reply(error: &ComboReplyError) -> bool {
     error.should_retry()
 }
 
-fn is_env_assignment(token: &str) -> bool {
-    let Some((key, _value)) = token.split_once('=') else {
-        return false;
-    };
-    if key.is_empty() {
-        return false;
-    }
-    if key.starts_with('-') {
-        return false;
-    }
-    key.chars()
-        .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+fn is_coco_command_name(name: &str) -> bool {
+    name == "coco" || name.ends_with("/coco")
 }
 
-/// Check if a command string starts with `coco reply` (allowing env assignments).
 fn is_coco_reply_command(command: &str) -> bool {
-    let mut parts = command.split_whitespace();
-    let mut token = match parts.next() {
-        Some(token) => token,
-        None => return false,
+    let summary = match parse_primary_command(command) {
+        Ok(summary) => summary,
+        Err(_) => return false,
     };
-
-    loop {
-        if token == "env" {
-            token = match parts.next() {
-                Some(next) => next,
-                None => return false,
-            };
-            continue;
-        }
-        if is_env_assignment(token) {
-            token = match parts.next() {
-                Some(next) => next,
-                None => return false,
-            };
-            continue;
-        }
-        break;
+    if !is_coco_command_name(&summary.name) {
+        return false;
     }
+    matches!(summary.args.first(), Some(arg) if arg == "reply")
+}
 
-    let command_token = token;
-    let reply_token = parts.next();
-    let is_coco = command_token == "coco" || command_token.ends_with("/coco");
-    is_coco && matches!(reply_token, Some("reply"))
+fn is_safe_command(command: &str) -> bool {
+    let trimmed = command.trim();
+    !trimmed.is_empty() && bash_unsafe_ranges(command).is_empty()
 }
 
 /// Parse coco reply stdout output as JSON fields and validate required schemas.
@@ -1836,26 +1852,17 @@ async fn handle_offload_combo_reply(
             }
         })?;
 
-    // Validate it's a coco reply command
-    if !is_coco_reply_command(&bash_input.command) {
-        return Err(ComboReplyError::UnexpectedCommand {
-            command: bash_input.command.clone(),
-        });
-    }
+    let original_command = bash_input.command.clone();
+    let command_kind = classify_offload_command(&bash_input.command);
 
-    if !bash_input.command.contains("COCO_SESSION_SOCK=") {
+    if matches!(command_kind, OffloadCommandKind::Coco)
+        && !bash_input.command.contains("COCO_SESSION_SOCK=")
+    {
         let socket_path = session_socket_path.to_string_lossy();
         let escaped_path = shell_escape(socket_path.as_ref());
         let command = bash_input.command.trim_start();
         bash_input.command = format!("COCO_SESSION_SOCK={} {}", escaped_path, command);
     }
-    let bash_input_value =
-        serde_json::to_value(&bash_input).map_err(|err| ComboReplyError::InvalidBashInput {
-            message: err.to_string(),
-        })?;
-
-    // Auto-grant and execute the bash command
-    agent.grant_once(&bash_tool_use.id, BASH_TOOL_NAME);
 
     // Send tool use event for UI feedback (thinking already streamed via PromptStream)
     tx.send(
@@ -1868,6 +1875,42 @@ async fn handle_offload_combo_reply(
         .into(),
     )
     .ok();
+
+    if matches!(command_kind, OffloadCommandKind::Unsafe) {
+        let reason = match code_combo::bash_unsafe_reason(&original_command) {
+            Ok(_) => "command not allowlisted".to_string(),
+            Err(reason) => reason,
+        };
+        let output = Final::Message(format!("command rejected: {reason}; expected coco reply"));
+        agent
+            .append_message(build_tool_result_message(&bash_tool_use.id, true, &output))
+            .await;
+        tx.send(
+            ComboEvent::ReplyToolResult {
+                name: combo_name.to_string(),
+                tool_use_id: bash_tool_use.id.clone(),
+                is_error: true,
+                output: output.clone(),
+            }
+            .into(),
+        )
+        .ok();
+        let prompt = build_offload_reply_guidance(schemas, &original_command, false);
+        agent
+            .append_message(ChatMessage::user(ChatContent::Text(prompt)))
+            .await;
+        return Err(ComboReplyError::UnexpectedCommand {
+            command: original_command,
+        });
+    }
+
+    let bash_input_value =
+        serde_json::to_value(&bash_input).map_err(|err| ComboReplyError::InvalidBashInput {
+            message: err.to_string(),
+        })?;
+
+    // Auto-grant and execute the bash command
+    agent.grant_once(&bash_tool_use.id, BASH_TOOL_NAME);
 
     // Execute the bash command
     let mut final_output: Option<Output> = None;
@@ -1918,6 +1961,16 @@ async fn handle_offload_combo_reply(
         .into(),
     )
     .ok();
+
+    if matches!(command_kind, OffloadCommandKind::Safe) {
+        let prompt = build_offload_reply_guidance(schemas, &original_command, true);
+        agent
+            .append_message(ChatMessage::user(ChatContent::Text(prompt)))
+            .await;
+        return Err(ComboReplyError::UnexpectedCommand {
+            command: original_command,
+        });
+    }
 
     if is_error {
         return Err(ComboReplyError::BashCommandFailed {
