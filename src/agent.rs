@@ -29,7 +29,9 @@ mod executor;
 mod prompt;
 
 pub use crate::provider::{Content, Message, StopReason, ToolUse};
-pub use bash_executor::{bash_unsafe_ranges, bash_unsafe_reason};
+pub use bash_executor::{
+    ParsedCommandSummary, bash_unsafe_ranges, bash_unsafe_reason, parse_primary_command,
+};
 pub use executor::{ExecuteStatus, Executor, Input, Output};
 
 const DEFAULT_THINKING_BUDGET_TOKENS: usize = 1024;
@@ -39,6 +41,7 @@ pub use config::{
 };
 
 const PROMPT_REPLY_TOOL_NAME: &str = "combo_reply";
+const REPLY_TOOL_MISSING_ERROR: &str = "reply tool use not found in response";
 
 #[derive(Clone)]
 pub struct Agent {
@@ -602,17 +605,7 @@ impl Agent {
             !request_options.disable_tools,
             "reply tool disabled by request options"
         );
-        let reply_tool = build_reply_tool(&schemas)?;
         let (_, client) = self.pick_provider()?;
-        let messages = {
-            let mut history = self.messages.lock().await;
-            if use_tool_choice_fallback {
-                let new_message = build_reply_prompt_message(&schemas);
-                history.push(new_message);
-            }
-            history.clone()
-        };
-        let messages = self.prepare_messages_for_request(messages, &request_options);
         let tool_choice = ToolChoice::tool(PROMPT_REPLY_TOOL_NAME, None);
         let system_prompt = system_prompt.trim();
         let system_prompt = if system_prompt.is_empty() {
@@ -621,73 +614,92 @@ impl Agent {
             Some(system_prompt)
         };
         let thinking = self.thinking_payload_with_override(thinking.as_ref());
-        let response = if request_options.disable_tool_choice {
-            ensure_whatever!(
-                request_options.tool_choice_fallback,
-                "tool_choice disabled without prompt fallback"
-            );
-            client
-                .messages(
-                    system_prompt,
-                    messages,
-                    vec![reply_tool],
-                    thinking,
-                    &request_options,
-                )
-                .await
-                .whatever_context_display("failed to request prompt reply")?
-        } else {
-            client
-                .messages_with_tool_choice(
-                    system_prompt,
-                    messages,
-                    vec![reply_tool],
-                    tool_choice,
-                    thinking,
-                    &request_options,
-                )
-                .await
-                .whatever_context_display("failed to request prompt reply")?
-        };
-        let stop_reason = response.stop_reason.clone();
-        if !response.content.is_empty() {
-            let mut history = self.messages.lock().await;
-            history.push(Message::assistant(Content::Multiple(
-                response.content.clone(),
-            )));
-        }
-        let mut thinking = Vec::new();
-        let mut reply_tool = None;
-        for block in response.content.into_iter() {
-            match block {
-                Block::Thinking { thinking: text, .. } => {
-                    thinking.push(text);
+        let mut attempt = 0usize;
+        loop {
+            let reply_tool = build_reply_tool(&schemas)?;
+            let messages = {
+                let mut history = self.messages.lock().await;
+                if attempt == 0 && use_tool_choice_fallback {
+                    let new_message = build_reply_prompt_message(&schemas);
+                    history.push(new_message);
+                } else if attempt > 0 {
+                    history.push(build_reply_retry_message(&schemas));
                 }
-                Block::ToolUse(tool_use) if tool_use.name == PROMPT_REPLY_TOOL_NAME => {
-                    reply_tool = Some(tool_use);
-                }
-                _ => (),
+                history.clone()
+            };
+            let messages = self.prepare_messages_for_request(messages, &request_options);
+            let response = if request_options.disable_tool_choice {
+                ensure_whatever!(
+                    request_options.tool_choice_fallback,
+                    "tool_choice disabled without prompt fallback"
+                );
+                client
+                    .messages(
+                        system_prompt,
+                        messages,
+                        vec![reply_tool],
+                        thinking.clone(),
+                        &request_options,
+                    )
+                    .await
+                    .whatever_context_display("failed to request prompt reply")?
+            } else {
+                client
+                    .messages_with_tool_choice(
+                        system_prompt,
+                        messages,
+                        vec![reply_tool],
+                        tool_choice.clone(),
+                        thinking.clone(),
+                        &request_options,
+                    )
+                    .await
+                    .whatever_context_display("failed to request prompt reply")?
+            };
+            let stop_reason = response.stop_reason.clone();
+            if !response.content.is_empty() {
+                let mut history = self.messages.lock().await;
+                history.push(Message::assistant(Content::Multiple(
+                    response.content.clone(),
+                )));
             }
+            let mut thinking = Vec::new();
+            let mut reply_tool_use = None;
+            for block in response.content.into_iter() {
+                match block {
+                    Block::Thinking { thinking: text, .. } => {
+                        thinking.push(text);
+                    }
+                    Block::ToolUse(tool_use) if tool_use.name == PROMPT_REPLY_TOOL_NAME => {
+                        reply_tool_use = Some(tool_use);
+                    }
+                    _ => (),
+                }
+            }
+            let Some(tool_use) = reply_tool_use else {
+                if attempt >= request_options.combo_reply_retries {
+                    whatever!("{}", REPLY_TOOL_MISSING_ERROR);
+                }
+                attempt += 1;
+                continue;
+            };
+            {
+                let mut history = self.messages.lock().await;
+                history.push(Message::user(Content::Multiple(vec![Block::tool_result(
+                    &tool_use.id,
+                    None,
+                    Content::Text("ok".to_string()),
+                )])));
+            }
+            let response = serde_json::to_string(&tool_use.input)
+                .whatever_context("failed to serialize reply tool input")?;
+            self.mark_thinking_cleanup_pending(stop_reason.as_ref());
+            return Ok(PromptReply {
+                tool_use,
+                response,
+                thinking,
+            });
         }
-        let Some(tool_use) = reply_tool else {
-            whatever!("reply tool use not found in response");
-        };
-        {
-            let mut history = self.messages.lock().await;
-            history.push(Message::user(Content::Multiple(vec![Block::tool_result(
-                &tool_use.id,
-                None,
-                Content::Text("ok".to_string()),
-            )])));
-        }
-        let response = serde_json::to_string(&tool_use.input)
-            .whatever_context("failed to serialize reply tool input")?;
-        self.mark_thinking_cleanup_pending(stop_reason.as_ref());
-        Ok(PromptReply {
-            tool_use,
-            response,
-            thinking,
-        })
     }
 
     pub async fn reply_prompt_stream_with_thinking<F>(
@@ -708,17 +720,7 @@ impl Agent {
             !request_options.disable_tools,
             "reply tool disabled by request options"
         );
-        let reply_tool = build_reply_tool(&schemas)?;
         let (_, client) = self.pick_provider()?;
-        let messages = {
-            let mut history = self.messages.lock().await;
-            if use_tool_choice_fallback {
-                let new_message = build_reply_prompt_message(&schemas);
-                history.push(new_message);
-            }
-            history.clone()
-        };
-        let messages = self.prepare_messages_for_request(messages, &request_options);
         let tool_choice = ToolChoice::tool(PROMPT_REPLY_TOOL_NAME, None);
         let system_prompt = system_prompt.trim();
         let system_prompt = if system_prompt.is_empty() {
@@ -727,94 +729,113 @@ impl Agent {
             Some(system_prompt)
         };
         let thinking = self.thinking_payload_with_override(thinking.as_ref());
-        let mut stream = if request_options.disable_tool_choice {
-            ensure_whatever!(
-                request_options.tool_choice_fallback,
-                "tool_choice disabled without prompt fallback"
-            );
-            client
-                .messages_stream(
-                    system_prompt,
-                    messages,
-                    vec![reply_tool],
-                    thinking,
-                    &request_options,
-                )
-                .await
-                .inspect_err(|err| {
-                    warn!("send prompt reply stream error: {err:?}");
-                })
-                .whatever_context_display("failed to request prompt reply stream")?
-        } else {
-            client
-                .messages_stream_with_tool_choice(
-                    system_prompt,
-                    messages,
-                    vec![reply_tool],
-                    tool_choice,
-                    thinking,
-                    &request_options,
-                )
-                .await
-                .inspect_err(|err| {
-                    warn!("send prompt reply stream error: {err:?}");
-                })
-                .whatever_context_display("failed to request prompt reply stream")?
-        };
-
-        let mut accumulator = StreamAccumulator::new();
-        while let Some(event) = tokio::select! {
-            _ = cancel_token.cancelled() => {
-                whatever!("prompt reply stream cancelled");
-            }
-            event = stream.next() => event,
-        } {
-            let event = event.whatever_context_display("read prompt reply stream error")?;
-            let action = accumulator
-                .handle_event(event, &mut on_update)
-                .whatever_context("parse prompt reply stream error")?;
-            if matches!(action, StreamAction::Stop) {
-                break;
-            }
-        }
-
-        let (blocks, stop_reason) = accumulator.finish();
-        if !blocks.is_empty() {
-            let msg = Message::assistant(Content::Multiple(blocks.clone()));
-            self.messages.lock().await.push(msg);
-        }
-        let mut thinking = Vec::new();
-        let mut reply_tool = None;
-        for block in &blocks {
-            match block {
-                Block::Thinking { thinking: text, .. } => {
-                    thinking.push(text.clone());
+        let mut attempt = 0usize;
+        loop {
+            let reply_tool = build_reply_tool(&schemas)?;
+            let messages = {
+                let mut history = self.messages.lock().await;
+                if attempt == 0 && use_tool_choice_fallback {
+                    let new_message = build_reply_prompt_message(&schemas);
+                    history.push(new_message);
+                } else if attempt > 0 {
+                    history.push(build_reply_retry_message(&schemas));
                 }
-                Block::ToolUse(tool_use) if tool_use.name == PROMPT_REPLY_TOOL_NAME => {
-                    reply_tool = Some(tool_use.clone());
+                history.clone()
+            };
+            let messages = self.prepare_messages_for_request(messages, &request_options);
+            let mut stream = if request_options.disable_tool_choice {
+                ensure_whatever!(
+                    request_options.tool_choice_fallback,
+                    "tool_choice disabled without prompt fallback"
+                );
+                client
+                    .messages_stream(
+                        system_prompt,
+                        messages,
+                        vec![reply_tool],
+                        thinking.clone(),
+                        &request_options,
+                    )
+                    .await
+                    .inspect_err(|err| {
+                        warn!("send prompt reply stream error: {err:?}");
+                    })
+                    .whatever_context_display("failed to request prompt reply stream")?
+            } else {
+                client
+                    .messages_stream_with_tool_choice(
+                        system_prompt,
+                        messages,
+                        vec![reply_tool],
+                        tool_choice.clone(),
+                        thinking.clone(),
+                        &request_options,
+                    )
+                    .await
+                    .inspect_err(|err| {
+                        warn!("send prompt reply stream error: {err:?}");
+                    })
+                    .whatever_context_display("failed to request prompt reply stream")?
+            };
+
+            let mut accumulator = StreamAccumulator::new();
+            while let Some(event) = tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    whatever!("prompt reply stream cancelled");
                 }
-                _ => (),
+                event = stream.next() => event,
+            } {
+                let event = event.whatever_context_display("read prompt reply stream error")?;
+                let action = accumulator
+                    .handle_event(event, &mut on_update)
+                    .whatever_context("parse prompt reply stream error")?;
+                if matches!(action, StreamAction::Stop) {
+                    break;
+                }
             }
+
+            let (blocks, stop_reason) = accumulator.finish();
+            if !blocks.is_empty() {
+                let msg = Message::assistant(Content::Multiple(blocks.clone()));
+                self.messages.lock().await.push(msg);
+            }
+            let mut thinking = Vec::new();
+            let mut reply_tool_use = None;
+            for block in &blocks {
+                match block {
+                    Block::Thinking { thinking: text, .. } => {
+                        thinking.push(text.clone());
+                    }
+                    Block::ToolUse(tool_use) if tool_use.name == PROMPT_REPLY_TOOL_NAME => {
+                        reply_tool_use = Some(tool_use.clone());
+                    }
+                    _ => (),
+                }
+            }
+            let Some(tool_use) = reply_tool_use else {
+                if attempt >= request_options.combo_reply_retries {
+                    whatever!("{}", REPLY_TOOL_MISSING_ERROR);
+                }
+                attempt += 1;
+                continue;
+            };
+            {
+                let mut history = self.messages.lock().await;
+                history.push(Message::user(Content::Multiple(vec![Block::tool_result(
+                    &tool_use.id,
+                    None,
+                    Content::Text("ok".to_string()),
+                )])));
+            }
+            let response = serde_json::to_string(&tool_use.input)
+                .whatever_context("failed to serialize reply tool input")?;
+            self.mark_thinking_cleanup_pending(stop_reason.as_ref());
+            return Ok(PromptReply {
+                tool_use,
+                response,
+                thinking,
+            });
         }
-        let Some(tool_use) = reply_tool else {
-            whatever!("reply tool use not found in response");
-        };
-        {
-            let mut history = self.messages.lock().await;
-            history.push(Message::user(Content::Multiple(vec![Block::tool_result(
-                &tool_use.id,
-                None,
-                Content::Text("ok".to_string()),
-            )])));
-        }
-        let response = serde_json::to_string(&tool_use.input)
-            .whatever_context("failed to serialize reply tool input")?;
-        self.mark_thinking_cleanup_pending(stop_reason.as_ref());
-        Ok(PromptReply {
-            tool_use,
-            response,
-            thinking,
-        })
     }
 
     pub fn grant_once(&mut self, id: &str, name: &str) {
@@ -844,6 +865,10 @@ impl Agent {
 
     pub fn disable_stream_for_current_model(&self) -> bool {
         self.request_options_for_current_model().disable_stream
+    }
+
+    pub fn combo_reply_retries(&self) -> usize {
+        self.request_options_for_current_model().combo_reply_retries
     }
 
     pub fn current_model(&self) -> String {
@@ -1093,6 +1118,13 @@ impl Agent {
 
 fn build_reply_prompt_message(schemas: &[PromptSchema]) -> Message {
     Message::user(Content::Text(build_reply_tool_directive(schemas)))
+}
+
+fn build_reply_retry_message(schemas: &[PromptSchema]) -> Message {
+    let directive = build_reply_tool_directive(schemas);
+    Message::user(Content::Text(format!(
+        "The previous response did not call the required tool. {directive}"
+    )))
 }
 
 fn build_reply_tool(schemas: &[PromptSchema]) -> Result<crate::provider::Tool> {

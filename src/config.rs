@@ -641,6 +641,7 @@ safe_commands_mode = \"override\"\n\
         let options = config.request_options_for_model("kimi-k2-thinking");
         assert!(options.include_reasoning_content);
         assert_eq!(options.offload_combo_reply, Some(true));
+        assert_eq!(options.combo_reply_retries, 1);
         assert_eq!(options.temperature, Some(1.0));
         assert_eq!(options.max_tokens, Some(16000));
     }
@@ -652,12 +653,14 @@ safe_commands_mode = \"override\"\n\
             model: "deepseek-reasoner".to_string(),
             disable_tool_choice: Some(false),
             tool_choice_fallback: Some(false),
+            combo_reply_retries: Some(0),
             max_tokens: Some(2048),
             ..ModelRequestConfig::default()
         });
         let options = config.request_options_for_model("deepseek-reasoner");
         assert!(!options.disable_tool_choice);
         assert!(!options.tool_choice_fallback);
+        assert_eq!(options.combo_reply_retries, 0);
         assert_eq!(options.max_tokens, Some(2048));
     }
 }

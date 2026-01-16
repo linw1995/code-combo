@@ -1,11 +1,9 @@
-use std::collections::HashMap;
-
 use serde_json::Value;
 use snafu::prelude::*;
 use tokio::io::AsyncReadExt;
 use tracing::info;
 
-use crate::{PromptPayload, PromptSchema, SessionSocketClient, error::Result};
+use crate::{PromptPayload, PromptSchema, ReplyPayload, SessionSocketClient, error::Result};
 
 pub async fn handle_ask(prompt: String, schemas: Vec<String>) -> Result<()> {
     let prompt = resolve_prompt(prompt).await?;
@@ -68,33 +66,33 @@ pub async fn handle_tell(prompt: String) -> Result<()> {
 /// Fields are provided as --field=value format.
 /// Validation is done by the parent process (TUI) which knows the required schemas.
 pub async fn handle_reply(fields: Vec<String>) -> Result<()> {
-    let parsed_fields = parse_reply_fields(&fields)?;
+    let Some(client) = SessionSocketClient::from_env()
+        .await
+        .whatever_context("failed to new from env COCO_SESSION_SOCK")?
+    else {
+        whatever!("env COCO_SESSION_SOCK is not set");
+    };
 
-    // Output the fields as JSON for bash result parsing
-    let output = serde_json::to_string(&parsed_fields)
-        .whatever_context("failed to serialize reply fields")?;
-    println!("{output}");
+    let validation = client
+        .send_reply_wait_validation(ReplyPayload { fields })
+        .await
+        .whatever_context("failed to send reply to session socket")?;
+
+    if !validation.success {
+        let error = validation
+            .error
+            .unwrap_or_else(|| "reply validation failed".to_string());
+        whatever!("{error}");
+    }
+
+    let Some(response) = validation.response else {
+        whatever!("reply validation succeeded without response");
+    };
+
+    println!("{response}");
 
     info!("reply output generated");
     Ok(())
-}
-
-fn parse_reply_fields(fields: &[String]) -> Result<HashMap<String, String>> {
-    let mut parsed = HashMap::new();
-    for field in fields {
-        // Handle --field=value format
-        let field = field.strip_prefix("--").unwrap_or(field);
-        let Some((key, value)) = field.split_once('=') else {
-            whatever!("invalid field format {field:?}, expected --field=value");
-        };
-        let key = key.trim();
-        ensure_whatever!(!key.is_empty(), "field key cannot be empty");
-        if parsed.contains_key(key) {
-            whatever!("duplicate field key: {key}");
-        }
-        parsed.insert(key.to_string(), value.to_string());
-    }
-    Ok(parsed)
 }
 
 async fn resolve_prompt(prompt: String) -> Result<String> {
