@@ -1099,13 +1099,14 @@ impl Agent {
         messages: Vec<Message>,
         request_options: &RequestOptions,
     ) -> Vec<Message> {
-        let mut messages =
-            if self.thinking_cleanup_pending && !request_options.include_reasoning_content {
+        let mut messages = if request_options.include_reasoning_content {
+            messages
+        } else {
+            if self.thinking_cleanup_pending {
                 self.thinking_cleanup_pending = false;
-                Self::strip_thinking_blocks(&messages)
-            } else {
-                messages
-            };
+            }
+            Self::strip_thinking_blocks(&messages)
+        };
         if request_options.include_reasoning_content {
             Self::ensure_thinking_blocks(&mut messages);
         }

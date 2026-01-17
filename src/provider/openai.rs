@@ -96,10 +96,7 @@ fn build_request(
             name: None,
         });
     }
-    messages.extend(convert_messages(
-        conversations,
-        request_options.include_reasoning_content,
-    )?);
+    messages.extend(convert_messages(conversations)?);
     let tools = tools
         .into_iter()
         .map(|tool| openai_api::Tool {
@@ -144,10 +141,7 @@ fn convert_tool_choice(choice: ToolChoice) -> openai_api::ToolChoice {
     }
 }
 
-fn convert_messages(
-    conversations: Vec<Message>,
-    include_reasoning_content: bool,
-) -> Result<Vec<openai_api::ChatMessage>, Whatever> {
+fn convert_messages(conversations: Vec<Message>) -> Result<Vec<openai_api::ChatMessage>, Whatever> {
     let mut output = Vec::new();
     for message in conversations {
         match message.role {
@@ -155,7 +149,7 @@ fn convert_messages(
                 convert_user_message(message.content, &mut output)?;
             }
             Role::Assistant => {
-                convert_assistant_message(message.content, include_reasoning_content, &mut output)?;
+                convert_assistant_message(message.content, &mut output)?;
             }
         }
     }
@@ -223,7 +217,6 @@ fn convert_user_message(
 
 fn convert_assistant_message(
     content: Content,
-    include_reasoning_content: bool,
     output: &mut Vec<openai_api::ChatMessage>,
 ) -> Result<(), Whatever> {
     let mut text = String::new();
@@ -260,19 +253,17 @@ fn convert_assistant_message(
                         });
                     }
                     Block::Thinking { thinking, .. } => {
-                        if include_reasoning_content {
-                            if !reasoning.is_empty() {
-                                reasoning.push('\n');
-                            }
-                            reasoning.push_str(&thinking);
+                        if !reasoning.is_empty() {
+                            reasoning.push('\n');
                         }
+                        reasoning.push_str(&thinking);
                     }
                     Block::ToolResult { .. } => (),
                 }
             }
         }
     }
-    let reasoning_content = if include_reasoning_content && !reasoning.is_empty() {
+    let reasoning_content = if !reasoning.is_empty() {
         Some(reasoning)
     } else {
         None
@@ -601,10 +592,7 @@ mod tests {
 
     #[test]
     fn build_request_includes_reasoning_content() {
-        let request_options = RequestOptions {
-            include_reasoning_content: true,
-            ..RequestOptions::default()
-        };
+        let request_options = RequestOptions::default();
         let message = Message {
             role: Role::Assistant,
             content: Content::Multiple(vec![
@@ -636,13 +624,10 @@ mod tests {
     }
 
     #[test]
-    fn build_request_omits_reasoning_content_by_default() {
+    fn build_request_omits_reasoning_content_without_thinking() {
         let message = Message {
             role: Role::Assistant,
-            content: Content::Multiple(vec![super::Block::Thinking {
-                thinking: "Hidden".to_string(),
-                signature: None,
-            }]),
+            content: Content::Text("Answer".to_string()),
         };
         let request = build_request(
             None,
@@ -653,9 +638,11 @@ mod tests {
             &RequestOptions::default(),
         )
         .expect("build request");
-        assert!(!request.messages.iter().any(|msg| {
-            matches!(msg.role, super::openai_api::Role::Assistant)
-                && msg.reasoning_content.as_deref() == Some("Hidden")
-        }));
+        let assistant = request
+            .messages
+            .iter()
+            .find(|msg| matches!(msg.role, super::openai_api::Role::Assistant))
+            .expect("assistant message");
+        assert!(assistant.reasoning_content.is_none());
     }
 }
