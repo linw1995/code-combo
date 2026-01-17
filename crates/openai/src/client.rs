@@ -10,7 +10,10 @@ use reqwest::{StatusCode, Url, header::HeaderMap};
 use snafu::{ResultExt, Whatever};
 use tracing::trace;
 
-use crate::{ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ErrorResponse};
+use crate::{
+    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ErrorResponse,
+    StreamOptions,
+};
 
 pub struct Client {
     model: String,
@@ -110,6 +113,9 @@ impl Client {
     ) -> Result<ChatCompletionStream> {
         request.model = self.model.clone();
         request.stream = Some(true);
+        request.stream_options = Some(StreamOptions {
+            include_usage: Some(true),
+        });
         let url = self
             .base_url
             .join(self.api_path("chat/completions"))

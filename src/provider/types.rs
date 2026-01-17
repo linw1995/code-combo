@@ -1,6 +1,40 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct UsageStats {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<usize>,
+}
+
+impl UsageStats {
+    pub fn merge(&mut self, other: UsageStats) {
+        let updated_input = other.input_tokens.is_some();
+        let updated_output = other.output_tokens.is_some();
+        let updated_total = other.total_tokens.is_some();
+        if other.input_tokens.is_some() {
+            self.input_tokens = other.input_tokens;
+        }
+        if other.output_tokens.is_some() {
+            self.output_tokens = other.output_tokens;
+        }
+        if other.total_tokens.is_some() {
+            self.total_tokens = other.total_tokens;
+        }
+        if !updated_total
+            && (updated_input || updated_output || self.total_tokens.is_none())
+            && let (Some(input), Some(output)) = (self.input_tokens, self.output_tokens)
+        {
+            self.total_tokens = Some(input + output);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
@@ -208,6 +242,8 @@ pub struct MessagesResponse {
     pub stop_reason: Option<StopReason>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_sequence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<UsageStats>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,7 +283,7 @@ pub struct StreamErrorDetail {
     pub code: Option<String>,
 }
 
-pub type StreamUsage = Value;
+pub type StreamUsage = UsageStats;
 
 #[derive(Debug, Clone)]
 pub enum MessagesStreamEvent {
@@ -278,4 +314,26 @@ pub enum MessagesStreamEvent {
         event: String,
         data: Value,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UsageStats;
+
+    #[test]
+    fn usage_merge_recomputes_total() {
+        let mut usage = UsageStats {
+            input_tokens: Some(10),
+            output_tokens: Some(2),
+            total_tokens: None,
+        };
+        usage.merge(UsageStats {
+            input_tokens: None,
+            output_tokens: Some(5),
+            total_tokens: None,
+        });
+        assert_eq!(usage.input_tokens, Some(10));
+        assert_eq!(usage.output_tokens, Some(5));
+        assert_eq!(usage.total_tokens, Some(15));
+    }
 }

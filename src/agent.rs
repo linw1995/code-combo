@@ -63,6 +63,7 @@ pub struct Agent {
 pub struct ChatResponse {
     pub message: Message,
     pub stop_reason: Option<StopReason>,
+    pub usage: Option<crate::provider::UsageStats>,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +87,7 @@ struct StreamAccumulator {
     blocks: Vec<Block>,
     tool_inputs: HashMap<usize, String>,
     stop_reason: Option<StopReason>,
+    usage: Option<crate::provider::UsageStats>,
 }
 
 impl StreamAccumulator {
@@ -94,11 +96,18 @@ impl StreamAccumulator {
             blocks: Vec::new(),
             tool_inputs: HashMap::new(),
             stop_reason: None,
+            usage: None,
         }
     }
 
-    fn finish(self) -> (Vec<Block>, Option<StopReason>) {
-        (self.blocks, self.stop_reason)
+    fn finish(
+        self,
+    ) -> (
+        Vec<Block>,
+        Option<StopReason>,
+        Option<crate::provider::UsageStats>,
+    ) {
+        (self.blocks, self.stop_reason, self.usage)
     }
 
     fn handle_event<F>(
@@ -110,7 +119,12 @@ impl StreamAccumulator {
         F: FnMut(ChatStreamUpdate),
     {
         match event {
-            MessagesStreamEvent::MessageStart { .. } => Ok(StreamAction::Continue),
+            MessagesStreamEvent::MessageStart { message } => {
+                if let Some(usage) = message.usage {
+                    self.update_usage(usage);
+                }
+                Ok(StreamAction::Continue)
+            }
             MessagesStreamEvent::ContentBlockStart {
                 index,
                 content_block,
@@ -142,9 +156,12 @@ impl StreamAccumulator {
                 self.finalize_tool_input(index)?;
                 Ok(StreamAction::Continue)
             }
-            MessagesStreamEvent::MessageDelta { delta, .. } => {
+            MessagesStreamEvent::MessageDelta { delta, usage } => {
                 if let Some(reason) = delta.stop_reason {
                     self.stop_reason = Some(reason);
+                }
+                if let Some(usage) = usage {
+                    self.update_usage(usage);
                 }
                 Ok(StreamAction::Continue)
             }
@@ -161,6 +178,22 @@ impl StreamAccumulator {
                 whatever!("{message}")
             }
             MessagesStreamEvent::Unknown { .. } => Ok(StreamAction::Continue),
+        }
+    }
+
+    fn update_usage(&mut self, usage: crate::provider::UsageStats) {
+        match &mut self.usage {
+            Some(current) => current.merge(usage),
+            None => {
+                let mut current = usage;
+                if current.total_tokens.is_none()
+                    && let (Some(input), Some(output)) =
+                        (current.input_tokens, current.output_tokens)
+                {
+                    current.total_tokens = Some(input + output);
+                }
+                self.usage = Some(current);
+            }
         }
     }
 
@@ -437,6 +470,7 @@ impl Agent {
             .whatever_context_display("failed to send messages")?;
 
         let stop_reason = response.stop_reason.clone();
+        let usage = response.usage.clone();
         let message = if response.content.is_empty() {
             Message::assistant(Content::Multiple(Vec::default()))
         } else {
@@ -448,6 +482,7 @@ impl Agent {
         Ok(ChatResponse {
             message,
             stop_reason,
+            usage,
         })
     }
 
@@ -474,6 +509,7 @@ impl Agent {
             .whatever_context_display("failed to send messages")?;
 
         let stop_reason = response.stop_reason.clone();
+        let usage = response.usage.clone();
         let message = if response.content.is_empty() {
             Message::assistant(Content::Multiple(Vec::default()))
         } else {
@@ -485,6 +521,7 @@ impl Agent {
         Ok(ChatResponse {
             message,
             stop_reason,
+            usage,
         })
     }
 
@@ -568,7 +605,7 @@ impl Agent {
             }
         }
 
-        let (blocks, stop_reason) = accumulator.finish();
+        let (blocks, stop_reason, usage) = accumulator.finish();
         let message = if blocks.is_empty() {
             Message::assistant(Content::Multiple(Vec::default()))
         } else {
@@ -580,6 +617,7 @@ impl Agent {
         Ok(ChatResponse {
             message,
             stop_reason,
+            usage,
         })
     }
 
@@ -794,7 +832,7 @@ impl Agent {
                 }
             }
 
-            let (blocks, stop_reason) = accumulator.finish();
+            let (blocks, stop_reason, _) = accumulator.finish();
             if !blocks.is_empty() {
                 let msg = Message::assistant(Content::Multiple(blocks.clone()));
                 self.messages.lock().await.push(msg);
@@ -869,6 +907,10 @@ impl Agent {
 
     pub fn combo_reply_retries(&self) -> usize {
         self.request_options_for_current_model().combo_reply_retries
+    }
+
+    pub fn context_window(&self) -> Option<usize> {
+        self.request_options_for_current_model().context_window
     }
 
     pub fn current_model(&self) -> String {
@@ -1257,7 +1299,7 @@ mod tests {
             other => panic!("unexpected update: {other:?}"),
         }
 
-        let (blocks, stop_reason) = accumulator.finish();
+        let (blocks, stop_reason, _) = accumulator.finish();
         assert_eq!(stop_reason, Some(StopReason::EndTurn));
         assert_eq!(blocks.len(), 2);
         match &blocks[0] {
