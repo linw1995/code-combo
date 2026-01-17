@@ -17,8 +17,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::{
-    Config, PromptSchema, ProviderConfig, RequestOptions, Result, ResultDisplayExt, ThinkingBlocks,
-    ThinkingConfig,
+    Config, PromptSchema, ProviderConfig, RequestOptions, Result, ResultDisplayExt,
+    ThinkingBlocksMode, ThinkingConfig,
     tools::{RunTaskContext, RunTaskTool},
 };
 use executor::PermissionControl;
@@ -1101,7 +1101,7 @@ impl Agent {
         request_options: &RequestOptions,
     ) -> Vec<Message> {
         let mut messages = match request_options.thinking_blocks {
-            ThinkingBlocks::Strip => {
+            ThinkingBlocksMode::DropAfterTurn => {
                 if self.thinking_cleanup_pending {
                     self.thinking_cleanup_pending = false;
                     Self::strip_thinking_blocks(&messages)
@@ -1109,8 +1109,8 @@ impl Agent {
                     messages
                 }
             }
-            ThinkingBlocks::Include => messages,
-            ThinkingBlocks::StripAll => {
+            ThinkingBlocksMode::Keep => messages,
+            ThinkingBlocksMode::DropAlways => {
                 if self.thinking_cleanup_pending {
                     self.thinking_cleanup_pending = false;
                 }
@@ -1118,7 +1118,10 @@ impl Agent {
             }
         };
         if request_options.ensure_toolcall_thinking
-            && !matches!(request_options.thinking_blocks, ThinkingBlocks::StripAll)
+            && !matches!(
+                request_options.thinking_blocks,
+                ThinkingBlocksMode::DropAlways
+            )
         {
             Self::ensure_thinking_blocks(&mut messages);
         }
@@ -1422,7 +1425,7 @@ mod tests {
     fn prepare_messages_strip_all_removes_thinking() {
         let mut agent = Agent::new(Config::default());
         let options = RequestOptions {
-            thinking_blocks: ThinkingBlocks::StripAll,
+            thinking_blocks: ThinkingBlocksMode::DropAlways,
             ensure_toolcall_thinking: true,
             ..Default::default()
         };

@@ -27,7 +27,7 @@ pub use mcp::{
     McpConfig, McpServerCommandConfig, McpServerConfig, McpServerConnection, McpServerHttpConfig,
 };
 pub use provider::{
-    ModelRequestConfig, ProviderConfig, ProviderKind, RequestOptions, ThinkingBlocks,
+    ModelRequestConfig, ProviderConfig, ProviderKind, RequestOptions, ThinkingBlocksMode,
 };
 pub use ui::{MarkdownRenderEngine, UI};
 
@@ -415,7 +415,7 @@ fn table_name_from_table(table: &toml::value::Table, path: &str) -> Result<Strin
 mod tests {
     use super::{
         Config, MarkdownRenderEngine, McpServerConnection, ModelRequestConfig, SafeCommandsMode,
-        ThinkingBlocks, merge_config_values,
+        ThinkingBlocksMode, merge_config_values,
     };
 
     fn base_config() -> String {
@@ -651,7 +651,7 @@ safe_commands_mode = \"override\"\n\
     fn request_options_apply_builtin_presets() {
         let config = Config::default();
         let options = config.request_options_for_model("kimi-k2-thinking");
-        assert_eq!(options.thinking_blocks, ThinkingBlocks::Include);
+        assert_eq!(options.thinking_blocks, ThinkingBlocksMode::Keep);
         assert_eq!(options.offload_combo_reply, Some(true));
         assert_eq!(options.combo_reply_retries, 1);
         assert_eq!(options.temperature, Some(1.0));

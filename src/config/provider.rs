@@ -12,11 +12,11 @@ pub enum ProviderKind {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum ThinkingBlocks {
+pub enum ThinkingBlocksMode {
     #[default]
-    Strip,
-    Include,
-    StripAll,
+    DropAfterTurn,
+    Keep,
+    DropAlways,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -29,7 +29,7 @@ pub struct ModelRequestConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_choice_fallback: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking_blocks: Option<ThinkingBlocks>,
+    pub thinking_blocks: Option<ThinkingBlocksMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ensure_toolcall_thinking: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -53,7 +53,7 @@ pub struct RequestOptions {
     pub disable_tools: bool,
     pub disable_tool_choice: bool,
     pub tool_choice_fallback: bool,
-    pub thinking_blocks: ThinkingBlocks,
+    pub thinking_blocks: ThinkingBlocksMode,
     pub ensure_toolcall_thinking: bool,
     pub disable_stream: bool,
     pub offload_combo_reply: Option<bool>,
