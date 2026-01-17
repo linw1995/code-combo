@@ -1,6 +1,6 @@
 [[model_presets]]
 model = "deepseek-chat"
-include_reasoning_content = true
+include_reasoning_content = "ensure"
 disable_tool_choice = true
 tool_choice_fallback = true
 combo_reply_retries = 1
@@ -10,7 +10,7 @@ max_tokens = 4000
 
 [[model_presets]]
 model = "deepseek-reasoner"
-include_reasoning_content = true
+include_reasoning_content = "ensure"
 disable_tool_choice = true
 tool_choice_fallback = true
 combo_reply_retries = 1
@@ -20,7 +20,7 @@ max_tokens = 32000
 
 [[model_presets]]
 model = "kimi-k2-thinking"
-include_reasoning_content = true
+include_reasoning_content = "strip"
 offload_combo_reply = true
 combo_reply_retries = 1
 temperature = 1.0
@@ -31,7 +31,7 @@ model = "glm-4.7"
 max_tokens = 131072
 context_window = 204800
 can_reason = true
-include_reasoning_content = true
+include_reasoning_content = "strip"
 offload_combo_reply = true
 combo_reply_retries = 1
 

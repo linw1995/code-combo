@@ -26,7 +26,9 @@ pub use env::EnvString;
 pub use mcp::{
     McpConfig, McpServerCommandConfig, McpServerConfig, McpServerConnection, McpServerHttpConfig,
 };
-pub use provider::{ModelRequestConfig, ProviderConfig, ProviderKind, RequestOptions};
+pub use provider::{
+    ModelRequestConfig, ProviderConfig, ProviderKind, ReasoningContent, RequestOptions,
+};
 pub use ui::{MarkdownRenderEngine, UI};
 
 type BoxError = Box<dyn StdError + Send + Sync>;
@@ -412,8 +414,8 @@ fn table_name_from_table(table: &toml::value::Table, path: &str) -> Result<Strin
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, MarkdownRenderEngine, McpServerConnection, ModelRequestConfig, SafeCommandsMode,
-        merge_config_values,
+        Config, MarkdownRenderEngine, McpServerConnection, ModelRequestConfig, ReasoningContent,
+        SafeCommandsMode, merge_config_values,
     };
 
     fn base_config() -> String {
@@ -452,6 +454,16 @@ mod tests {
         let config_str = format!("deny_tools = []\n{}", base_config());
         let config: Config = toml::from_str(&config_str).expect("parse config");
         assert_eq!(config.deny_tools, Some(Vec::new()));
+    }
+
+    #[test]
+    fn parse_config_rejects_bool_reasoning_content() {
+        let config_str = format!(
+            "[[model_presets]]\nmodel = \"demo\"\ninclude_reasoning_content = true\n{}\n",
+            base_config()
+        );
+        let parsed: Result<Config, _> = toml::from_str(&config_str);
+        assert!(parsed.is_err());
     }
 
     #[test]
@@ -639,7 +651,7 @@ safe_commands_mode = \"override\"\n\
     fn request_options_apply_builtin_presets() {
         let config = Config::default();
         let options = config.request_options_for_model("kimi-k2-thinking");
-        assert!(options.include_reasoning_content);
+        assert_eq!(options.include_reasoning_content, ReasoningContent::Include);
         assert_eq!(options.offload_combo_reply, Some(true));
         assert_eq!(options.combo_reply_retries, 1);
         assert_eq!(options.temperature, Some(1.0));

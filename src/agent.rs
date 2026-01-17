@@ -17,7 +17,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::{
-    Config, PromptSchema, ProviderConfig, RequestOptions, Result, ResultDisplayExt, ThinkingConfig,
+    Config, PromptSchema, ProviderConfig, ReasoningContent, RequestOptions, Result,
+    ResultDisplayExt, ThinkingConfig,
     tools::{RunTaskContext, RunTaskTool},
 };
 use executor::PermissionControl;
@@ -1099,18 +1100,22 @@ impl Agent {
         messages: Vec<Message>,
         request_options: &RequestOptions,
     ) -> Vec<Message> {
-        let mut messages = if request_options.include_reasoning_content {
-            messages
-        } else {
-            if self.thinking_cleanup_pending {
-                self.thinking_cleanup_pending = false;
+        match request_options.include_reasoning_content {
+            ReasoningContent::Strip => {
+                if self.thinking_cleanup_pending {
+                    self.thinking_cleanup_pending = false;
+                    Self::strip_thinking_blocks(&messages)
+                } else {
+                    messages
+                }
             }
-            Self::strip_thinking_blocks(&messages)
-        };
-        if request_options.include_reasoning_content {
-            Self::ensure_thinking_blocks(&mut messages);
+            ReasoningContent::Include => messages,
+            ReasoningContent::Ensure => {
+                let mut messages = messages;
+                Self::ensure_thinking_blocks(&mut messages);
+                messages
+            }
         }
-        messages
     }
 
     fn mark_thinking_cleanup_pending(&mut self, reason: Option<&StopReason>) {
@@ -1366,7 +1371,7 @@ mod tests {
     fn prepare_messages_inserts_thinking_for_tool_use() {
         let mut agent = Agent::new(Config::default());
         let options = RequestOptions {
-            include_reasoning_content: true,
+            include_reasoning_content: ReasoningContent::Ensure,
             ..Default::default()
         };
         let messages = vec![

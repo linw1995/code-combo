@@ -10,6 +10,16 @@ pub enum ProviderKind {
     Anthropic,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[derive(Default)]
+pub enum ReasoningContent {
+    #[default]
+    Strip,
+    Include,
+    Ensure,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelRequestConfig {
     pub model: String,
@@ -20,7 +30,7 @@ pub struct ModelRequestConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_choice_fallback: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub include_reasoning_content: Option<bool>,
+    pub include_reasoning_content: Option<ReasoningContent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disable_stream: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -42,7 +52,7 @@ pub struct RequestOptions {
     pub disable_tools: bool,
     pub disable_tool_choice: bool,
     pub tool_choice_fallback: bool,
-    pub include_reasoning_content: bool,
+    pub include_reasoning_content: ReasoningContent,
     pub disable_stream: bool,
     pub offload_combo_reply: Option<bool>,
     pub combo_reply_retries: usize,
