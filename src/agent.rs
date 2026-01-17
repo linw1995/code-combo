@@ -17,8 +17,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::{
-    Config, PromptSchema, ProviderConfig, ReasoningContent, RequestOptions, Result,
-    ResultDisplayExt, ThinkingConfig,
+    Config, PromptSchema, ProviderConfig, RequestOptions, Result, ResultDisplayExt, ThinkingBlocks,
+    ThinkingConfig,
     tools::{RunTaskContext, RunTaskTool},
 };
 use executor::PermissionControl;
@@ -1100,8 +1100,8 @@ impl Agent {
         messages: Vec<Message>,
         request_options: &RequestOptions,
     ) -> Vec<Message> {
-        match request_options.include_reasoning_content {
-            ReasoningContent::Strip => {
+        let mut messages = match request_options.thinking_blocks {
+            ThinkingBlocks::Strip => {
                 if self.thinking_cleanup_pending {
                     self.thinking_cleanup_pending = false;
                     Self::strip_thinking_blocks(&messages)
@@ -1109,13 +1109,20 @@ impl Agent {
                     messages
                 }
             }
-            ReasoningContent::Include => messages,
-            ReasoningContent::Ensure => {
-                let mut messages = messages;
-                Self::ensure_thinking_blocks(&mut messages);
-                messages
+            ThinkingBlocks::Include => messages,
+            ThinkingBlocks::StripAll => {
+                if self.thinking_cleanup_pending {
+                    self.thinking_cleanup_pending = false;
+                }
+                Self::strip_thinking_blocks(&messages)
             }
+        };
+        if request_options.ensure_toolcall_thinking
+            && !matches!(request_options.thinking_blocks, ThinkingBlocks::StripAll)
+        {
+            Self::ensure_thinking_blocks(&mut messages);
         }
+        messages
     }
 
     fn mark_thinking_cleanup_pending(&mut self, reason: Option<&StopReason>) {
@@ -1371,7 +1378,7 @@ mod tests {
     fn prepare_messages_inserts_thinking_for_tool_use() {
         let mut agent = Agent::new(Config::default());
         let options = RequestOptions {
-            include_reasoning_content: ReasoningContent::Ensure,
+            ensure_toolcall_thinking: true,
             ..Default::default()
         };
         let messages = vec![
@@ -1406,6 +1413,40 @@ mod tests {
                     .filter(|block| matches!(block, Block::Thinking { .. }))
                     .count();
                 assert_eq!(thinking_count, 1);
+            }
+            _ => panic!("expected multiple blocks"),
+        }
+    }
+
+    #[test]
+    fn prepare_messages_strip_all_removes_thinking() {
+        let mut agent = Agent::new(Config::default());
+        let options = RequestOptions {
+            thinking_blocks: ThinkingBlocks::StripAll,
+            ensure_toolcall_thinking: true,
+            ..Default::default()
+        };
+        let messages = vec![Message::assistant(Content::Multiple(vec![
+            Block::Thinking {
+                thinking: "Reasoning".to_string(),
+                signature: None,
+            },
+            Block::ToolUse(ToolUse {
+                id: "tool_1".to_string(),
+                name: "combo_reply".to_string(),
+                input: serde_json::Value::Null,
+            }),
+        ]))];
+
+        let prepared = agent.prepare_messages_for_request(messages, &options);
+
+        match &prepared[0].content {
+            Content::Multiple(blocks) => {
+                assert!(
+                    blocks
+                        .iter()
+                        .all(|block| !matches!(block, Block::Thinking { .. }))
+                );
             }
             _ => panic!("expected multiple blocks"),
         }

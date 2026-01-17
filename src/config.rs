@@ -27,7 +27,7 @@ pub use mcp::{
     McpConfig, McpServerCommandConfig, McpServerConfig, McpServerConnection, McpServerHttpConfig,
 };
 pub use provider::{
-    ModelRequestConfig, ProviderConfig, ProviderKind, ReasoningContent, RequestOptions,
+    ModelRequestConfig, ProviderConfig, ProviderKind, RequestOptions, ThinkingBlocks,
 };
 pub use ui::{MarkdownRenderEngine, UI};
 
@@ -414,8 +414,8 @@ fn table_name_from_table(table: &toml::value::Table, path: &str) -> Result<Strin
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, MarkdownRenderEngine, McpServerConnection, ModelRequestConfig, ReasoningContent,
-        SafeCommandsMode, merge_config_values,
+        Config, MarkdownRenderEngine, McpServerConnection, ModelRequestConfig, SafeCommandsMode,
+        ThinkingBlocks, merge_config_values,
     };
 
     fn base_config() -> String {
@@ -457,9 +457,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_config_rejects_bool_reasoning_content() {
+    fn parse_config_rejects_bool_thinking_blocks() {
         let config_str = format!(
-            "[[model_presets]]\nmodel = \"demo\"\ninclude_reasoning_content = true\n{}\n",
+            "[[model_presets]]\nmodel = \"demo\"\nthinking_blocks = true\n{}\n",
             base_config()
         );
         let parsed: Result<Config, _> = toml::from_str(&config_str);
@@ -651,7 +651,7 @@ safe_commands_mode = \"override\"\n\
     fn request_options_apply_builtin_presets() {
         let config = Config::default();
         let options = config.request_options_for_model("kimi-k2-thinking");
-        assert_eq!(options.include_reasoning_content, ReasoningContent::Include);
+        assert_eq!(options.thinking_blocks, ThinkingBlocks::Include);
         assert_eq!(options.offload_combo_reply, Some(true));
         assert_eq!(options.combo_reply_retries, 1);
         assert_eq!(options.temperature, Some(1.0));
