@@ -76,6 +76,7 @@ pub struct PromptReply {
     pub tool_use: ToolUse,
     pub response: String,
     pub thinking: Vec<String>,
+    pub usage: Option<crate::provider::UsageStats>,
 }
 
 enum StreamAction {
@@ -695,6 +696,7 @@ impl Agent {
                     .whatever_context_display("failed to request prompt reply")?
             };
             let stop_reason = response.stop_reason.clone();
+            let usage = response.usage.clone();
             if !response.content.is_empty() {
                 let mut history = self.messages.lock().await;
                 history.push(Message::assistant(Content::Multiple(
@@ -736,6 +738,7 @@ impl Agent {
                 tool_use,
                 response,
                 thinking,
+                usage,
             });
         }
     }
@@ -832,7 +835,7 @@ impl Agent {
                 }
             }
 
-            let (blocks, stop_reason, _) = accumulator.finish();
+            let (blocks, stop_reason, usage) = accumulator.finish();
             if !blocks.is_empty() {
                 let msg = Message::assistant(Content::Multiple(blocks.clone()));
                 self.messages.lock().await.push(msg);
@@ -872,6 +875,7 @@ impl Agent {
                 tool_use,
                 response,
                 thinking,
+                usage,
             });
         }
     }

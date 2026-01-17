@@ -1861,6 +1861,9 @@ async fn handle_offload_combo_reply(
         .map_err(|e| ComboReplyError::ChatFailed {
             message: e.to_string(),
         })?;
+    if let Some(usage) = chat_response.usage.clone() {
+        tx.send(AnswerEvent::Usage { usage }.into()).ok();
+    }
 
     // Extract Bash tool_use from response
     let blocks = match &chat_response.message.content {
@@ -2204,12 +2207,12 @@ async fn task_combo_execute(
                                 let stream_name = name.clone();
                                 let thinking_seen = Arc::new(AtomicBool::new(false));
                                 let thinking_seen_stream = thinking_seen.clone();
-                                let reply = agent
-                                    .reply_prompt_stream_with_thinking(
-                                        &system_prompt,
-                                        schemas,
-                                        thinking.clone(),
-                                        cancel_token.clone(),
+                            let reply = agent
+                                .reply_prompt_stream_with_thinking(
+                                    &system_prompt,
+                                    schemas,
+                                    thinking.clone(),
+                                    cancel_token.clone(),
                                         move |update| {
                                             let (index, kind, text) = match update {
                                                 ChatStreamUpdate::Plain { index, text } => {
@@ -2240,6 +2243,9 @@ async fn task_combo_execute(
                                 reply
                             };
                             if let Ok(reply) = &reply {
+                                if let Some(usage) = reply.usage.clone() {
+                                    tx.send(AnswerEvent::Usage { usage }.into()).ok();
+                                }
                                 let thinking = if streamed_thinking {
                                     Vec::new()
                                 } else {
