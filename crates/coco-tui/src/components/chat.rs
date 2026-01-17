@@ -1664,18 +1664,6 @@ enum ComboReplyError {
     UnexpectedCommand { command: String },
     #[snafu(display("bash execution failed: {message}"))]
     BashExecutionFailed { message: String },
-    #[snafu(display("bash command did not produce output"))]
-    BashOutputMissing,
-    #[snafu(display("coco reply failed with exit code {exit_code}: {stderr}"))]
-    ReplyCommandFailed { exit_code: u8, stderr: String },
-    #[snafu(display("coco reply output is not valid JSON: {message}"))]
-    ReplyOutputInvalidJson { message: String },
-    #[snafu(display("coco reply output must be a JSON object"))]
-    ReplyOutputNotObject,
-    #[snafu(display("missing required fields: {fields}"))]
-    ReplyOutputMissingFields { fields: String },
-    #[snafu(display("unexpected message output: {message}"))]
-    UnexpectedMessageOutput { message: String },
 }
 
 impl ComboReplyError {
@@ -1685,17 +1673,8 @@ impl ComboReplyError {
             ComboReplyError::MissingBashToolUse
                 | ComboReplyError::InvalidBashInput { .. }
                 | ComboReplyError::UnexpectedCommand { .. }
-                | ComboReplyError::ReplyCommandFailed { .. }
-                | ComboReplyError::ReplyOutputInvalidJson { .. }
-                | ComboReplyError::ReplyOutputNotObject
-                | ComboReplyError::ReplyOutputMissingFields { .. }
-                | ComboReplyError::UnexpectedMessageOutput { .. }
         )
     }
-}
-
-fn should_retry_offload_combo_reply(error: &ComboReplyError) -> bool {
-    error.should_retry()
 }
 
 fn is_coco_command_name(name: &str) -> bool {
@@ -1733,60 +1712,6 @@ fn add_usage(total: &mut UsageStats, delta: &UsageStats) {
     }
 }
 
-/// Parse coco reply stdout output as JSON fields and validate required schemas.
-fn parse_coco_reply_output(
-    output: &Final,
-    schemas: &[code_combo::PromptSchema],
-) -> Result<String, ComboReplyError> {
-    match output {
-        Final::Json(value) => {
-            // BashOutput structure: { stdout, stderr, exit_code, timed_out }
-            let exit_code = value
-                .get("exit_code")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(255) as u8;
-            if exit_code != 0 {
-                let stderr = value.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
-                return Err(ComboReplyError::ReplyCommandFailed {
-                    exit_code,
-                    stderr: stderr.to_string(),
-                });
-            }
-            let stdout = value
-                .get("stdout")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .trim();
-            // Validate it's valid JSON
-            let parsed: serde_json::Value = serde_json::from_str(stdout).map_err(|e| {
-                ComboReplyError::ReplyOutputInvalidJson {
-                    message: e.to_string(),
-                }
-            })?;
-
-            // Validate all required fields are present
-            let obj = parsed
-                .as_object()
-                .ok_or(ComboReplyError::ReplyOutputNotObject)?;
-            let missing: Vec<&str> = schemas
-                .iter()
-                .filter(|s| !obj.contains_key(&s.name))
-                .map(|s| s.name.as_str())
-                .collect();
-            if !missing.is_empty() {
-                return Err(ComboReplyError::ReplyOutputMissingFields {
-                    fields: missing.join(", "),
-                });
-            }
-
-            Ok(stdout.to_string())
-        }
-        Final::Message(msg) => Err(ComboReplyError::UnexpectedMessageOutput {
-            message: msg.to_string(),
-        }),
-    }
-}
-
 /// Handle combo reply via offload to bash `coco reply` command.
 /// Returns Ok(json_response) on success, Err(error) on failure.
 async fn handle_offload_combo_reply_with_retry(
@@ -1796,7 +1721,7 @@ async fn handle_offload_combo_reply_with_retry(
     session_socket_path: &Path,
     cancel_token: CancellationToken,
     tx: tokio::sync::mpsc::UnboundedSender<Event>,
-) -> Result<String, ComboReplyError> {
+) -> Result<(), ComboReplyError> {
     let max_retries = agent.combo_reply_retries();
     let mut attempt = 0usize;
     loop {
@@ -1819,9 +1744,9 @@ async fn handle_offload_combo_reply_with_retry(
         )
         .await;
         match response {
-            Ok(result) => return Ok(result),
+            Ok(()) => return Ok(()),
             Err(err) => {
-                if attempt >= max_retries || !should_retry_offload_combo_reply(&err) {
+                if attempt >= max_retries || !err.should_retry() {
                     return Err(err);
                 }
                 attempt += 1;
@@ -1831,7 +1756,7 @@ async fn handle_offload_combo_reply_with_retry(
 }
 
 /// Handle combo reply via offload to bash `coco reply` command.
-/// Returns Ok(json_response) on success, Err(error) on failure.
+/// Response is sent via SESSION_SOCK, not returned here.
 async fn handle_offload_combo_reply(
     agent: &mut Agent,
     schemas: &[code_combo::PromptSchema],
@@ -1840,7 +1765,7 @@ async fn handle_offload_combo_reply(
     cancel_token: CancellationToken,
     tx: tokio::sync::mpsc::UnboundedSender<Event>,
     directive: &str,
-) -> Result<String, ComboReplyError> {
+) -> Result<(), ComboReplyError> {
     use code_combo::tools::BASH_TOOL_NAME;
 
     if cancel_token.is_cancelled() {
@@ -1995,10 +1920,10 @@ async fn handle_offload_combo_reply(
     }
 
     // Parse the output and send result event
-    let (output, is_error) = match final_output {
-        Some(Output::Success(output)) => (output, false),
-        Some(Output::Failure(output)) => (output, true),
-        _ => return Err(ComboReplyError::BashOutputMissing),
+    let (output, is_error) = match final_output.expect("bash execution should produce output") {
+        Output::Success(output) => (output, false),
+        Output::Failure(output) => (output, true),
+        _ => unreachable!("bash tool only produces Success or Failure"),
     };
 
     agent
@@ -2028,7 +1953,7 @@ async fn handle_offload_combo_reply(
         });
     }
 
-    parse_coco_reply_output(&output, schemas)
+    Ok(())
 }
 
 async fn task_combo_execute(
@@ -2187,9 +2112,10 @@ async fn task_combo_execute(
                         .unwrap();
 
                         // Check if offload_combo_reply is enabled for the current provider
-                        let response = if agent.offload_combo_reply() {
+                        if agent.offload_combo_reply() {
                             // Offload path: use bash tool to call `coco reply`
-                            handle_offload_combo_reply_with_retry(
+                            // Response is sent via SESSION_SOCK by the server
+                            if let Err(err) = handle_offload_combo_reply_with_retry(
                                 &mut agent,
                                 &schemas,
                                 &name,
@@ -2198,7 +2124,15 @@ async fn task_combo_execute(
                                 tx.clone(),
                             )
                             .await
-                            .map_err(|err| err.to_string())
+                            {
+                                tx.send(
+                                    ComboEvent::ReplyToolError {
+                                        message: err.to_string(),
+                                    }
+                                    .into(),
+                                )
+                                .ok();
+                            }
                         } else {
                             // Original path: use combo_reply tool
                             let disable_stream = agent.disable_stream_for_current_model();
@@ -2219,12 +2153,12 @@ async fn task_combo_execute(
                                 let stream_name = name.clone();
                                 let thinking_seen = Arc::new(AtomicBool::new(false));
                                 let thinking_seen_stream = thinking_seen.clone();
-                            let reply = agent
-                                .reply_prompt_stream_with_thinking(
-                                    &system_prompt,
-                                    schemas,
-                                    thinking.clone(),
-                                    cancel_token.clone(),
+                                let reply = agent
+                                    .reply_prompt_stream_with_thinking(
+                                        &system_prompt,
+                                        schemas,
+                                        thinking.clone(),
+                                        cancel_token.clone(),
                                         move |update| {
                                             let (index, kind, text) = match update {
                                                 ChatStreamUpdate::Plain { index, text } => {
@@ -2274,23 +2208,22 @@ async fn task_combo_execute(
                                 )
                                 .ok();
                             }
-                            reply.map(|reply| reply.response)
-                        };
-
-                        if let Err(err) = &response {
-                            tx.send(
-                                ComboEvent::ReplyToolError {
-                                    message: err.clone(),
-                                }
-                                .into(),
-                            )
-                            .ok();
-                        }
-                        if let Err(err) = responder.send(response) {
-                            tx.send(
-                                ComboEvent::ReplyToolError { message: err }.into(),
-                            )
-                            .ok();
+                            let response = reply.map(|reply| reply.response);
+                            if let Err(err) = &response {
+                                tx.send(
+                                    ComboEvent::ReplyToolError {
+                                        message: err.clone(),
+                                    }
+                                    .into(),
+                                )
+                                .ok();
+                            }
+                            if let Err(err) = responder.send(response) {
+                                tx.send(
+                                    ComboEvent::ReplyToolError { message: err }.into(),
+                                )
+                                .ok();
+                            }
                         }
                     }
                     StarterEvent::Finished { exit_code: code } => {
@@ -2932,7 +2865,7 @@ mod tests {
     }
 
     #[test]
-    fn should_retry_offload_combo_reply_matches_model_errors() {
+    fn combo_reply_error_should_retry() {
         let retryable = [
             ComboReplyError::MissingBashToolUse,
             ComboReplyError::InvalidBashInput {
@@ -2941,52 +2874,16 @@ mod tests {
             ComboReplyError::UnexpectedCommand {
                 command: "ls".to_string(),
             },
-            ComboReplyError::ReplyCommandFailed {
-                exit_code: 1,
-                stderr: "bad args".to_string(),
-            },
-            ComboReplyError::ReplyOutputInvalidJson {
-                message: "invalid".to_string(),
-            },
-            ComboReplyError::ReplyOutputNotObject,
-            ComboReplyError::ReplyOutputMissingFields {
-                fields: "foo, bar".to_string(),
-            },
-            ComboReplyError::UnexpectedMessageOutput {
-                message: "hi".to_string(),
-            },
         ];
         for case in retryable {
-            assert!(should_retry_offload_combo_reply(&case), "case: {case}");
+            assert!(case.should_retry(), "case: {case}");
         }
-        assert!(!should_retry_offload_combo_reply(
-            &ComboReplyError::Cancelled
-        ));
-        assert!(!should_retry_offload_combo_reply(
-            &ComboReplyError::ChatFailed {
+        assert!(!ComboReplyError::Cancelled.should_retry());
+        assert!(
+            !ComboReplyError::ChatFailed {
                 message: "network".to_string()
             }
-        ));
-    }
-
-    #[test]
-    fn parse_coco_reply_output_rejects_nonzero_exit() {
-        let output = Final::Json(json!({
-            "exit_code": 1,
-            "stdout": "",
-            "stderr": "bad args",
-        }));
-        let schemas = vec![code_combo::PromptSchema {
-            name: "message".to_string(),
-            description: "reply message".to_string(),
-        }];
-        let err = parse_coco_reply_output(&output, &schemas).expect_err("expected error");
-        match err {
-            ComboReplyError::ReplyCommandFailed { exit_code, stderr } => {
-                assert_eq!(exit_code, 1);
-                assert_eq!(stderr, "bad args");
-            }
-            _ => panic!("expected ReplyCommandFailed"),
-        }
+            .should_retry()
+        );
     }
 }
