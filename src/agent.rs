@@ -7,7 +7,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::provider::{
-    Block, Client, ContentBlockDelta, MessagesStreamEvent, Thinking, ToolChoice,
+    Block, Client, ContentBlockDelta, MessagesStreamEvent, Role, Thinking, ToolChoice,
 };
 use futures_util::StreamExt;
 use serde_json::{Map as JsonMap, json};
@@ -1065,17 +1065,51 @@ impl Agent {
             .collect()
     }
 
+    fn ensure_thinking_blocks(messages: &mut [Message]) {
+        for message in messages {
+            if !matches!(message.role, Role::Assistant) {
+                continue;
+            }
+            let Content::Multiple(blocks) = &mut message.content else {
+                continue;
+            };
+            let has_tool_use = blocks
+                .iter()
+                .any(|block| matches!(block, Block::ToolUse(_)));
+            if !has_tool_use {
+                continue;
+            }
+            let has_thinking = blocks
+                .iter()
+                .any(|block| matches!(block, Block::Thinking { .. }));
+            if !has_thinking {
+                blocks.insert(
+                    0,
+                    Block::Thinking {
+                        thinking: String::new(),
+                        signature: None,
+                    },
+                );
+            }
+        }
+    }
+
     fn prepare_messages_for_request(
         &mut self,
         messages: Vec<Message>,
         request_options: &RequestOptions,
     ) -> Vec<Message> {
-        if self.thinking_cleanup_pending && !request_options.include_reasoning_content {
-            self.thinking_cleanup_pending = false;
-            Self::strip_thinking_blocks(&messages)
-        } else {
-            messages
+        let mut messages =
+            if self.thinking_cleanup_pending && !request_options.include_reasoning_content {
+                self.thinking_cleanup_pending = false;
+                Self::strip_thinking_blocks(&messages)
+            } else {
+                messages
+            };
+        if request_options.include_reasoning_content {
+            Self::ensure_thinking_blocks(&mut messages);
         }
+        messages
     }
 
     fn mark_thinking_cleanup_pending(&mut self, reason: Option<&StopReason>) {
@@ -1325,5 +1359,49 @@ mod tests {
         assert!(!should_use_tool_choice_fallback(&options));
         options.disable_tool_choice = true;
         assert!(should_use_tool_choice_fallback(&options));
+    }
+
+    #[test]
+    fn prepare_messages_inserts_thinking_for_tool_use() {
+        let mut agent = Agent::new(Config::default());
+        let options = RequestOptions {
+            include_reasoning_content: true,
+            ..Default::default()
+        };
+        let messages = vec![
+            Message::assistant(Content::Multiple(vec![Block::ToolUse(ToolUse {
+                id: "tool_1".to_string(),
+                name: "combo_reply".to_string(),
+                input: serde_json::Value::Null,
+            })])),
+            Message::assistant(Content::Multiple(vec![
+                Block::Thinking {
+                    thinking: "Reasoning".to_string(),
+                    signature: None,
+                },
+                Block::ToolUse(ToolUse {
+                    id: "tool_2".to_string(),
+                    name: "combo_reply".to_string(),
+                    input: serde_json::Value::Null,
+                }),
+            ])),
+        ];
+
+        let prepared = agent.prepare_messages_for_request(messages, &options);
+
+        match &prepared[0].content {
+            Content::Multiple(blocks) => assert!(matches!(blocks[0], Block::Thinking { .. })),
+            _ => panic!("expected multiple blocks"),
+        }
+        match &prepared[1].content {
+            Content::Multiple(blocks) => {
+                let thinking_count = blocks
+                    .iter()
+                    .filter(|block| matches!(block, Block::Thinking { .. }))
+                    .count();
+                assert_eq!(thinking_count, 1);
+            }
+            _ => panic!("expected multiple blocks"),
+        }
     }
 }

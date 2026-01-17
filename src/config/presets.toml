@@ -1,5 +1,6 @@
 [[model_presets]]
 model = "deepseek-chat"
+include_reasoning_content = true
 disable_tool_choice = true
 tool_choice_fallback = true
 combo_reply_retries = 1
@@ -9,6 +10,7 @@ max_tokens = 4000
 
 [[model_presets]]
 model = "deepseek-reasoner"
+include_reasoning_content = true
 disable_tool_choice = true
 tool_choice_fallback = true
 combo_reply_retries = 1
