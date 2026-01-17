@@ -651,7 +651,7 @@ safe_commands_mode = \"override\"\n\
     fn request_options_apply_builtin_presets() {
         let config = Config::default();
         let options = config.request_options_for_model("kimi-k2-thinking");
-        assert_eq!(options.thinking_blocks, ThinkingBlocksMode::Keep);
+        assert_eq!(options.thinking_blocks, ThinkingBlocksMode::DropAfterTurn);
         assert_eq!(options.offload_combo_reply, Some(true));
         assert_eq!(options.combo_reply_retries, 1);
         assert_eq!(options.temperature, Some(1.0));
