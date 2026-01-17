@@ -106,7 +106,7 @@ impl Config {
 
 fn apply_model_presets(options: &mut RequestOptions, presets: &[ModelRequestConfig], model: &str) {
     for preset in presets {
-        if preset.model == model {
+        if preset.model.eq_ignore_ascii_case(model) {
             options.apply_override(preset);
         }
     }

@@ -14,6 +14,7 @@ use crate::RequestOptions;
 use crate::provider::types::{
     Block, Content, ContentBlockDelta, Message, MessageDelta, MessagesResponse,
     MessagesStreamEvent, Role, StopReason, StreamErrorDetail, Thinking, Tool, ToolChoice, ToolUse,
+    UsageStats,
 };
 
 struct ToolCallState {
@@ -311,7 +312,9 @@ fn response_into_messages(response: openai_api::ChatCompletionResponse) -> Messa
     let mut content_blocks = Vec::new();
     let mut stop_reason = None;
     let stop_sequence = None;
-    if let Some(choice) = response.choices.into_iter().next() {
+    let openai_api::ChatCompletionResponse { choices, usage } = response;
+    let usage = usage.map(usage_stats_from_openai);
+    if let Some(choice) = choices.into_iter().next() {
         stop_reason = choice.finish_reason.and_then(map_finish_reason);
         if let Some(reasoning_content) = choice.message.reasoning_content
             && !reasoning_content.is_empty()
@@ -341,6 +344,15 @@ fn response_into_messages(response: openai_api::ChatCompletionResponse) -> Messa
         content: content_blocks,
         stop_reason,
         stop_sequence,
+        usage,
+    }
+}
+
+fn usage_stats_from_openai(usage: openai_api::Usage) -> UsageStats {
+    UsageStats {
+        input_tokens: Some(usage.prompt_tokens),
+        output_tokens: Some(usage.completion_tokens),
+        total_tokens: Some(usage.total_tokens),
     }
 }
 
@@ -378,6 +390,7 @@ impl OpenAIStream {
                 content: Vec::new(),
                 stop_reason: None,
                 stop_sequence: None,
+                usage: None,
             },
         });
         Self {
@@ -454,7 +467,17 @@ impl Stream for OpenAIStream {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Some(Err(err))) => return Poll::Ready(Some(Err(err))),
                 Poll::Ready(Some(Ok(chunk))) => {
-                    if let Some(choice) = chunk.choices.into_iter().next() {
+                    let openai_api::ChatCompletionChunk { choices, usage } = chunk;
+                    if let Some(usage) = usage {
+                        this.push_event(MessagesStreamEvent::MessageDelta {
+                            delta: MessageDelta {
+                                stop_reason: None,
+                                stop_sequence: None,
+                            },
+                            usage: Some(usage_stats_from_openai(usage)),
+                        });
+                    }
+                    if let Some(choice) = choices.into_iter().next() {
                         let delta = choice.delta;
                         if let Some(reasoning_content) = delta.reasoning_content
                             && !reasoning_content.is_empty()

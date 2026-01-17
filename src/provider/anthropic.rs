@@ -1,11 +1,9 @@
-use serde_json::Value;
-
 use ::anthropic as anthropic_api;
 
 use crate::provider::types::{
     Block, Content, ContentBlockDelta, Message, MessageDelta, MessagesResponse,
     MessagesStreamEvent, Role, StopReason, StreamErrorDetail, StreamUsage, Thinking, Tool,
-    ToolChoice, ToolUse,
+    ToolChoice, ToolUse, UsageStats,
 };
 
 impl From<anthropic_api::Role> for Role {
@@ -301,10 +299,12 @@ impl From<MessageDelta> for anthropic_api::MessageDelta {
 
 impl From<anthropic_api::MessagesResponse> for MessagesResponse {
     fn from(value: anthropic_api::MessagesResponse) -> Self {
+        let usage = usage_stats_from_usage(&value.usage);
         Self {
             content: value.content.into_iter().map(Into::into).collect(),
             stop_reason: value.stop_reason.map(Into::into),
             stop_sequence: value.stop_sequence,
+            usage,
         }
     }
 }
@@ -319,8 +319,12 @@ impl From<anthropic_api::StreamErrorDetail> for StreamErrorDetail {
     }
 }
 
-fn convert_stream_usage(usage: anthropic_api::StreamUsage) -> StreamUsage {
-    serde_json::to_value(usage).unwrap_or(Value::Null)
+fn usage_stats_from_usage(usage: &anthropic_api::Usage) -> Option<UsageStats> {
+    Some(UsageStats {
+        input_tokens: Some(usage.input_tokens),
+        output_tokens: Some(usage.output_tokens),
+        total_tokens: Some(usage.input_tokens + usage.output_tokens),
+    })
 }
 
 impl From<anthropic_api::MessagesStreamEvent> for MessagesStreamEvent {
@@ -360,5 +364,17 @@ impl From<anthropic_api::MessagesStreamEvent> for MessagesStreamEvent {
                 Self::Unknown { event, data }
             }
         }
+    }
+}
+
+fn convert_stream_usage(usage: anthropic_api::StreamUsage) -> StreamUsage {
+    let total_tokens = match (usage.input_tokens, usage.output_tokens) {
+        (Some(input_tokens), Some(output_tokens)) => Some(input_tokens + output_tokens),
+        _ => None,
+    };
+    UsageStats {
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        total_tokens,
     }
 }

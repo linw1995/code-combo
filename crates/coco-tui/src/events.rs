@@ -1,5 +1,5 @@
 use code_combo::{
-    OutputChunk, Starter, TextEdit, ThinkingConfig, ToolUse,
+    OutputChunk, Starter, TextEdit, ThinkingConfig, ToolUse, UsageStats,
     tools::{Final, SubagentEvent},
 };
 use crossterm::event::{KeyEvent, MouseEvent};
@@ -48,6 +48,9 @@ pub enum AnswerEvent {
         text: String,
     },
     Cancelled,
+    Usage {
+        usage: UsageStats,
+    },
     // Below events come from User
     ToolOutput {
         id: String,
