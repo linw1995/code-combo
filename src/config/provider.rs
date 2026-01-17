@@ -10,6 +10,15 @@ pub enum ProviderKind {
     Anthropic,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingBlocksMode {
+    #[default]
+    DropAfterTurn,
+    Keep,
+    DropAlways,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelRequestConfig {
     pub model: String,
@@ -20,7 +29,9 @@ pub struct ModelRequestConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_choice_fallback: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub include_reasoning_content: Option<bool>,
+    pub thinking_blocks: Option<ThinkingBlocksMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ensure_toolcall_thinking: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disable_stream: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -42,7 +53,8 @@ pub struct RequestOptions {
     pub disable_tools: bool,
     pub disable_tool_choice: bool,
     pub tool_choice_fallback: bool,
-    pub include_reasoning_content: bool,
+    pub thinking_blocks: ThinkingBlocksMode,
+    pub ensure_toolcall_thinking: bool,
     pub disable_stream: bool,
     pub offload_combo_reply: Option<bool>,
     pub combo_reply_retries: usize,
@@ -63,8 +75,11 @@ impl RequestOptions {
         if let Some(value) = override_config.tool_choice_fallback {
             self.tool_choice_fallback = value;
         }
-        if let Some(value) = override_config.include_reasoning_content {
-            self.include_reasoning_content = value;
+        if let Some(value) = override_config.thinking_blocks {
+            self.thinking_blocks = value;
+        }
+        if let Some(value) = override_config.ensure_toolcall_thinking {
+            self.ensure_toolcall_thinking = value;
         }
         if let Some(value) = override_config.disable_stream {
             self.disable_stream = value;
