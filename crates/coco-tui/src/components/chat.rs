@@ -1050,7 +1050,12 @@ impl Component for Chat<'static> {
                     .append_stream_text(*index, *kind, text.clone());
             }
             Event::Answer(AnswerEvent::Usage { usage }) => {
-                self.last_usage = Some(usage.clone());
+                match &mut self.last_usage {
+                    Some(total) => add_usage(total, usage),
+                    None => {
+                        self.last_usage = Some(usage.clone());
+                    }
+                }
                 global::signal_dirty();
             }
             Event::Answer(AnswerEvent::Cancelled) => {
@@ -1713,6 +1718,21 @@ fn is_coco_reply_command(command: &str) -> bool {
 fn is_safe_command(command: &str) -> bool {
     let trimmed = command.trim();
     !trimmed.is_empty() && bash_unsafe_ranges(command).is_empty()
+}
+
+fn add_usage(total: &mut UsageStats, delta: &UsageStats) {
+    let has_breakdown = delta.input_tokens.is_some() || delta.output_tokens.is_some();
+    if has_breakdown {
+        let input = total.input_tokens.unwrap_or(0) + delta.input_tokens.unwrap_or(0);
+        let output = total.output_tokens.unwrap_or(0) + delta.output_tokens.unwrap_or(0);
+        total.input_tokens = Some(input);
+        total.output_tokens = Some(output);
+        total.total_tokens = Some(input + output);
+        return;
+    }
+    if let Some(delta_total) = delta.total_tokens {
+        total.total_tokens = Some(total.total_tokens.unwrap_or(0) + delta_total);
+    }
 }
 
 /// Parse coco reply stdout output as JSON fields and validate required schemas.
