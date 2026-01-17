@@ -1666,8 +1666,6 @@ enum ComboReplyError {
     BashExecutionFailed { message: String },
     #[snafu(display("bash command did not produce output"))]
     BashOutputMissing,
-    #[snafu(display("bash command failed: {output}"))]
-    BashCommandFailed { output: String },
     #[snafu(display("coco reply failed with exit code {exit_code}: {stderr}"))]
     ReplyCommandFailed { exit_code: u8, stderr: String },
     #[snafu(display("coco reply output is not valid JSON: {message}"))]
@@ -2027,12 +2025,6 @@ async fn handle_offload_combo_reply(
             .await;
         return Err(ComboReplyError::UnexpectedCommand {
             command: original_command,
-        });
-    }
-
-    if is_error {
-        return Err(ComboReplyError::BashCommandFailed {
-            output: format!("{output:?}"),
         });
     }
 
@@ -2975,5 +2967,26 @@ mod tests {
                 message: "network".to_string()
             }
         ));
+    }
+
+    #[test]
+    fn parse_coco_reply_output_rejects_nonzero_exit() {
+        let output = Final::Json(json!({
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": "bad args",
+        }));
+        let schemas = vec![code_combo::PromptSchema {
+            name: "message".to_string(),
+            description: "reply message".to_string(),
+        }];
+        let err = parse_coco_reply_output(&output, &schemas).expect_err("expected error");
+        match err {
+            ComboReplyError::ReplyCommandFailed { exit_code, stderr } => {
+                assert_eq!(exit_code, 1);
+                assert_eq!(stderr, "bad args");
+            }
+            _ => panic!("expected ReplyCommandFailed"),
+        }
     }
 }
