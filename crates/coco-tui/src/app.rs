@@ -40,6 +40,7 @@ pub struct App {
     action_tx: UnboundedSender<Action>,
 
     dirty: bool,
+    force_full_refresh: bool,
     root: Box<dyn Component>,
 
     // Config
@@ -67,6 +68,7 @@ impl App {
             action_tx,
             action_rx,
             dirty: true,
+            force_full_refresh: false,
             root,
             frame_rate: 60.0,
             tick_rate: 4.0,
@@ -215,10 +217,9 @@ impl App {
                 Event::Dirty => self.dirty = true,
                 Event::FullRefresh => {
                     trace!("full refresh triggered");
-                    self.terminal
-                        .clear()
-                        .whatever_context("failed to clear terminal for full refresh")?;
-                    self.send_action(Action::Render);
+                    // Set flag to force full refresh in render() to clear diff artifacts
+                    self.force_full_refresh = true;
+                    self.dirty = true;
                 }
                 _ => {
                     if !matches!(event, Event::Tick) {
@@ -268,12 +269,21 @@ impl App {
     fn render(&mut self) -> Result<()> {
         self.terminal
             .draw(|frame| {
+                // If a full refresh is requested, first render a blank block
+                // to clear any ratatui diff artifacts. Then render the actual content.
+                // This clears any leftover characters from the diff algorithm.
+                if self.force_full_refresh {
+                    let blank = ratatui::widgets::Clear;
+                    frame.render_widget(blank, frame.area());
+                }
+
                 if let Err(err) = self.root.draw(frame, frame.area()) {
                     error!(?err, "terminal draw error");
                 }
             })
             .whatever_context("failed to draw terminal")?;
         self.dirty = false;
+        self.force_full_refresh = false;
         Ok(())
     }
 
