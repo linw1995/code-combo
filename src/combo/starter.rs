@@ -119,6 +119,7 @@ impl std::fmt::Debug for PromptResponseSender {
 struct SessionState {
     metadata: Option<MetadataPayload>,
     pending_reply_schemas: Option<Vec<PromptSchema>>,
+    pending_reply_responder: Option<PromptResponseSender>,
     event_index: usize,
 }
 
@@ -700,6 +701,7 @@ async fn spawn_session_server(
 async fn clear_pending_reply(state: &Arc<AsyncMutex<SessionState>>) {
     let mut guard = state.lock().await;
     guard.pending_reply_schemas = None;
+    guard.pending_reply_responder = None;
 }
 
 async fn handle_session_connection(
@@ -906,6 +908,8 @@ async fn handle_session_connection(
                         }
                         .build());
                     }
+                    let (response_tx, response_rx) = oneshot::channel();
+                    let responder = PromptResponseSender::new(response_tx);
                     {
                         let mut guard = state.lock().await;
                         if guard.pending_reply_schemas.is_some() {
@@ -915,9 +919,8 @@ async fn handle_session_connection(
                             .build());
                         }
                         guard.pending_reply_schemas = Some(payload.schemas.clone());
+                        guard.pending_reply_responder = Some(responder.clone());
                     }
-                    let (response_tx, response_rx) = oneshot::channel();
-                    let responder = PromptResponseSender::new(response_tx);
                     let thinking = resolve_prompt_thinking(metadata.as_ref(), &payload);
                     if event_tx
                         .send(StarterEvent::PromptRequest {
@@ -1030,6 +1033,13 @@ async fn handle_session_connection(
                         continue;
                     }
                 };
+                // Send response to responder (for offload mode where TUI doesn't parse stdout)
+                {
+                    let mut guard = state.lock().await;
+                    if let Some(responder) = guard.pending_reply_responder.take() {
+                        let _ = responder.send(Ok(response.clone()));
+                    }
+                }
                 conn.send_server_message(&ServerMessage::ReplyValidation(ReplyValidation {
                     success: true,
                     error: None,

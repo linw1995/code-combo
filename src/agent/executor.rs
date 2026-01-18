@@ -23,6 +23,7 @@ pub struct Executor {
     tools_pcl: HashMap<String, Vec<(String, PermissionControl)>>,
     tools_once_pcl: HashMap<String, Vec<String>>,
     bash_session_allowlist: HashSet<String>,
+    bash_envs: Vec<(String, String)>,
     auto_accept_edits: bool,
 }
 
@@ -54,6 +55,7 @@ impl Default for Executor {
             tools_once_pcl: HashMap::default(),
             tools: DEFAULT_TOOLS.clone(),
             bash_session_allowlist: HashSet::default(),
+            bash_envs: Vec::new(),
             auto_accept_edits: false,
         }
     }
@@ -137,6 +139,19 @@ impl Executor {
 
     pub fn auto_accept_edits(&self) -> bool {
         self.auto_accept_edits
+    }
+
+    /// Set environment variables to inject when executing bash commands.
+    pub fn set_bash_env(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        let key = key.into();
+        // Remove existing entry with same key if present
+        self.bash_envs.retain(|(k, _)| k != &key);
+        self.bash_envs.push((key, value.into()));
+    }
+
+    /// Remove an environment variable from bash command injection.
+    pub fn remove_bash_env(&mut self, key: &str) {
+        self.bash_envs.retain(|(k, _)| k != key);
     }
 
     pub fn apply_tool_policies(
@@ -279,7 +294,7 @@ impl Executor {
         }
 
         if name == BASH_TOOL_NAME {
-            let output = run_bash_chunked(input, cancel_token.clone(), |chunk| {
+            let output = run_bash_chunked(input, &self.bash_envs, cancel_token.clone(), |chunk| {
                 on_output(Output::ToolOutput(chunk.clone()));
             })
             .await;

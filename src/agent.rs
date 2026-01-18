@@ -898,6 +898,16 @@ impl Agent {
         self.executor.auto_accept_edits()
     }
 
+    /// Set environment variables to inject when executing bash commands.
+    pub fn set_bash_env(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.executor.set_bash_env(key, value);
+    }
+
+    /// Remove an environment variable from bash command injection.
+    pub fn remove_bash_env(&mut self, key: &str) {
+        self.executor.remove_bash_env(key);
+    }
+
     pub fn set_thinking_enabled(&mut self, enabled: bool) {
         self.thinking_enabled = enabled;
     }
