@@ -247,6 +247,16 @@ impl Component for Tool {
                     handle_component_event!(self, event);
                 }
             }
+            Event::Answer(AnswerEvent::ToolOutput { id, .. })
+            | Event::Answer(AnswerEvent::SubagentEvent { id, .. }) => {
+                if self.tool_use_id() == id {
+                    // Auto-allowed tools skip permission, transition directly to Executing
+                    if self.inner.state == ToolState::Initing {
+                        self.update_state(ToolState::Executing);
+                    }
+                    handle_component_event!(self, event);
+                }
+            }
             Event::Answer(AnswerEvent::ToolResult { id, is_error, .. }) => {
                 if self.tool_use_id() == id {
                     self.update_state(if *is_error {

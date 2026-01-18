@@ -284,7 +284,10 @@ impl Executor {
                 if !bypass_permission
                     && !matches!(
                         name,
-                        STR_REPLACE_TOOL_NAME | READ_TOOL_NAME | LIST_TOOL_NAME
+                        STR_REPLACE_TOOL_NAME
+                            | READ_TOOL_NAME
+                            | LIST_TOOL_NAME
+                            | RUN_TASK_TOOL_NAME
                     )
                 {
                     on_output(Output::AskPermission);
