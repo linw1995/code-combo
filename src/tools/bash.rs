@@ -55,6 +55,7 @@ pub const BASH_TOOL_NAME: &str = "bash";
 
 pub async fn run_bash_chunked<'a, F>(
     input: Input<'a>,
+    extra_envs: &[(String, String)],
     cancel_token: CancellationToken,
     mut on_chunk: F,
 ) -> ExecuteResult
@@ -79,7 +80,11 @@ where
         }
     };
 
-    let output = match run_bash_chunked_raw(input, cancel_token, |chunk| on_chunk(chunk)).await {
+    let output = match run_bash_chunked_raw(input, extra_envs, cancel_token, |chunk| {
+        on_chunk(chunk)
+    })
+    .await
+    {
         Ok(output) => output,
         Err(err) => BashOutput {
             exit_code: 255,
@@ -102,6 +107,7 @@ where
 
 async fn run_bash_chunked_raw<F>(
     input: BashInput,
+    extra_envs: &[(String, String)],
     cancel_token: CancellationToken,
     mut on_chunk: F,
 ) -> Result<BashOutput, String>
@@ -121,6 +127,7 @@ where
     let mut proc = ExecCommand::from_argv(argv)
         .remove_env_prefix("COCO_")
         .envs(envs)
+        .envs(extra_envs.to_vec())
         .spawn_chunked(ChunkConfig {
             interval: Duration::ZERO,
         })
@@ -213,7 +220,7 @@ impl Tool for BashTool {
     }
 
     async fn execute<'a>(&self, input: Input<'a>) -> ExecuteResult {
-        run_bash_chunked(input, CancellationToken::new(), |_| {}).await
+        run_bash_chunked(input, &[], CancellationToken::new(), |_| {}).await
     }
 }
 

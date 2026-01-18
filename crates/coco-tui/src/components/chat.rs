@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::prelude::*;
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -1713,12 +1713,10 @@ fn add_usage(total: &mut UsageStats, delta: &UsageStats) {
 }
 
 /// Handle combo reply via offload to bash `coco reply` command.
-/// Returns Ok(json_response) on success, Err(error) on failure.
 async fn handle_offload_combo_reply_with_retry(
     agent: &mut Agent,
     schemas: &[code_combo::PromptSchema],
     combo_name: &str,
-    session_socket_path: &Path,
     cancel_token: CancellationToken,
     tx: tokio::sync::mpsc::UnboundedSender<Event>,
 ) -> Result<(), ComboReplyError> {
@@ -1737,7 +1735,6 @@ async fn handle_offload_combo_reply_with_retry(
             agent,
             schemas,
             combo_name,
-            session_socket_path,
             cancel_token.clone(),
             tx.clone(),
             &directive,
@@ -1761,7 +1758,6 @@ async fn handle_offload_combo_reply(
     agent: &mut Agent,
     schemas: &[code_combo::PromptSchema],
     combo_name: &str,
-    session_socket_path: &Path,
     cancel_token: CancellationToken,
     tx: tokio::sync::mpsc::UnboundedSender<Event>,
     directive: &str,
@@ -1826,7 +1822,7 @@ async fn handle_offload_combo_reply(
         })
         .ok_or(ComboReplyError::MissingBashToolUse)?;
 
-    let mut bash_input: BashInput =
+    let bash_input: BashInput =
         serde_json::from_value(bash_tool_use.input.clone()).map_err(|err| {
             ComboReplyError::InvalidBashInput {
                 message: err.to_string(),
@@ -1835,15 +1831,6 @@ async fn handle_offload_combo_reply(
 
     let original_command = bash_input.command.clone();
     let command_kind = classify_offload_command(&bash_input.command);
-
-    if matches!(command_kind, OffloadCommandKind::Coco)
-        && !bash_input.command.contains("COCO_SESSION_SOCK=")
-    {
-        let socket_path = session_socket_path.to_string_lossy();
-        let escaped_path = shell_escape(socket_path.as_ref());
-        let command = bash_input.command.trim_start();
-        bash_input.command = format!("COCO_SESSION_SOCK={} {}", escaped_path, command);
-    }
 
     // Send tool use event for UI feedback (thinking already streamed via PromptStream)
     tx.send(
@@ -2115,16 +2102,20 @@ async fn task_combo_execute(
                         if agent.offload_combo_reply() {
                             // Offload path: use bash tool to call `coco reply`
                             // Response is sent via SESSION_SOCK by the server
-                            if let Err(err) = handle_offload_combo_reply_with_retry(
+                            agent.set_bash_env(
+                                "COCO_SESSION_SOCK",
+                                session_socket_path.to_string_lossy().to_string(),
+                            );
+                            let result = handle_offload_combo_reply_with_retry(
                                 &mut agent,
                                 &schemas,
                                 &name,
-                                &session_socket_path,
                                 cancel_token.clone(),
                                 tx.clone(),
                             )
-                            .await
-                            {
+                            .await;
+                            agent.remove_bash_env("COCO_SESSION_SOCK");
+                            if let Err(err) = result {
                                 tx.send(
                                     ComboEvent::ReplyToolError {
                                         message: err.to_string(),
