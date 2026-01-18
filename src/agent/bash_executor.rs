@@ -1306,6 +1306,20 @@ fn collect_commands(
         return Err(ParseError::UnsupportedNode);
     }
 
+    // Handle redirection nodes with safety checks
+    if node.kind() == "redirected_statement" {
+        // Check if this is a safe redirection
+        validate_redirection(node, source)?;
+        // Recursively process the redirected statement
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if child.kind() != "file_redirect" {
+                collect_commands(child, source, commands)?;
+            }
+        }
+        return Ok(());
+    }
+
     if node.kind() == "command" {
         commands.push(parse_command_node(node, source)?);
     }
@@ -1383,8 +1397,6 @@ fn is_disallowed_node_kind(kind: &str) -> bool {
         kind,
         "command_substitution"
             | "process_substitution"
-            | "redirected_statement"
-            | "file_redirect"
             | "heredoc_redirect"
             | "herestring_redirect"
             | "variable_assignment"
@@ -1425,6 +1437,70 @@ fn contains_disallowed_tokens(node: Node<'_>) -> bool {
 
 fn is_disallowed_token_kind(kind: &str) -> bool {
     matches!(kind, "&" | ";")
+}
+
+/// Validates that a redirection is safe.
+///
+/// Allows:
+/// - Redirection to /dev/null (e.g., > /dev/null, 2> /dev/null)
+/// - File descriptor duplication (e.g., 2>&1, 1>&2)
+///
+/// Disallows:
+/// - Redirection to arbitrary files
+fn validate_redirection(node: Node<'_>, source: &str) -> Result<(), ParseError> {
+    let mut cursor = node.walk();
+
+    // Check all file_redirect children
+    for child in node.named_children(&mut cursor) {
+        if child.kind() == "file_redirect" && !is_safe_file_redirect(&child, source) {
+            return Err(ParseError::UnsupportedNode);
+        }
+    }
+
+    Ok(())
+}
+
+/// Checks if a file_redirect node is safe
+fn is_safe_file_redirect(node: &Node<'_>, source: &str) -> bool {
+    // Check if this is a fd duplication (has >& or <& operator)
+    let is_fd_dup = has_fd_dup_operator(node);
+
+    if is_fd_dup {
+        // For fd duplication, destination is a number (e.g., "1" in 2>&1)
+        if let Some(dest_node) = node.child_by_field_name("destination")
+            && dest_node.kind() == "number"
+            && let Some(text) = node_text(dest_node, source)
+            && let Ok(num) = text.parse::<u32>()
+        {
+            return num <= 9;
+        }
+        return false;
+    }
+
+    // For regular redirection, check destination path
+    if let Some(dest_node) = node.child_by_field_name("destination")
+        && let Some(dest) = node_text(dest_node, source)
+    {
+        return dest.trim() == "/dev/null";
+    }
+
+    false
+}
+
+/// Checks if a file_redirect contains a fd duplication operator (>& or <&)
+fn has_fd_dup_operator(node: &Node<'_>) -> bool {
+    let mut index = 0;
+    let count = node.child_count();
+    while index < count {
+        if let Some(child) = node.child(index) {
+            let kind = child.kind();
+            if kind == ">&" || kind == "<&" {
+                return true;
+            }
+        }
+        index += 1;
+    }
+    false
 }
 
 fn collect_disallowed_token_ranges(node: Node<'_>, ranges: &mut Vec<Range<usize>>) {
@@ -1783,6 +1859,43 @@ mod tests {
         assert_unsafe_cmd!("ls &");
         assert_unsafe_cmd!("echo $(whoami)");
         assert_unsafe_cmd!("ls > out.txt");
+    }
+
+    #[test]
+    fn safe_command_allows_dev_null_redirection() {
+        assert_safe_cmd!("ls > /dev/null");
+        assert_safe_cmd!("ls 2>/dev/null");
+        assert_safe_cmd!("ls 1>/dev/null");
+        assert_safe_cmd!("cat file.txt > /dev/null 2>&1");
+    }
+
+    #[test]
+    fn safe_command_allows_fd_duplication() {
+        assert_safe_cmd!("ls 2>&1");
+        assert_safe_cmd!("ls 1>&2");
+        assert_safe_cmd!("cat file.txt 2>&1");
+    }
+
+    #[test]
+    fn safe_command_allows_combined_redirections() {
+        assert_safe_cmd!("ls > /dev/null 2>&1");
+        assert_safe_cmd!("cat file.txt 2>&1 | head");
+        assert_safe_cmd!("ls 2>/dev/null | grep pattern");
+    }
+
+    #[test]
+    fn unsafe_command_rejects_file_redirection() {
+        assert_unsafe_cmd!("ls > out.txt");
+        assert_unsafe_cmd!("ls >> out.txt");
+        assert_unsafe_cmd!("ls 2> error.log");
+        assert_unsafe_cmd!("ls > /tmp/out.txt");
+    }
+
+    #[test]
+    fn unsafe_command_rejects_background_execution() {
+        assert_unsafe_cmd!("ls &");
+        assert_unsafe_cmd!("sleep 10 &");
+        assert_unsafe_cmd!("cat file.txt &");
     }
 
     #[test]
