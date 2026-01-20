@@ -215,7 +215,8 @@ impl CancellationGuard {
 
 impl Chat<'static> {
     pub fn new(config: Config) -> Self {
-        let agent = Agent::new(config);
+        let mut agent = Agent::new(config);
+        agent.set_ignore_workspace_scripts(global::ignore_workspace_scripts());
 
         Self {
             state: State::default(),

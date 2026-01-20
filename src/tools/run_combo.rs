@@ -195,6 +195,8 @@ pub struct RunComboContext {
     pub model_override: Option<String>,
     /// Whether thinking is enabled for combo reply.
     pub thinking_enabled: bool,
+    /// Whether to ignore workspace combo scripts.
+    pub ignore_workspace_scripts: bool,
 }
 
 /// Tool for executing combo scripts.
@@ -241,7 +243,17 @@ impl Tool for RunComboTool {
                     "description": "Name of the combo to execute"
                 },
                 "args": {
-                    "type": "string",
+                    "anyOf": [
+                        {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            }
+                        },
+                        {
+                            "type": "string"
+                        }
+                    ],
                     "description": "Arguments passed to the combo starter"
                 }
             },
@@ -296,7 +308,7 @@ where
     // Wrap callback early so errors can emit events.
     let on_event_boxed: ComboEventCallback = Arc::new(std::sync::Mutex::new(Box::new(on_event)));
 
-    let (envs, config, system_prompt, model_override, thinking_enabled) = {
+    let (envs, config, system_prompt, model_override, thinking_enabled, ignore_workspace_scripts) = {
         let ctx = context.lock().await;
         (
             ctx.envs.clone(),
@@ -304,6 +316,7 @@ where
             ctx.system_prompt.clone(),
             ctx.model_override.clone(),
             ctx.thinking_enabled,
+            ctx.ignore_workspace_scripts,
         )
     };
 
@@ -316,7 +329,8 @@ where
     };
 
     if combo_info.is_none() {
-        let discovered = discover_combo_infos(&config, cancel_token.clone()).await;
+        let discovered =
+            discover_combo_infos(&config, cancel_token.clone(), ignore_workspace_scripts).await;
         if discovered.cancelled || cancel_token.is_cancelled() {
             if let Ok(mut f) = on_event_boxed.lock() {
                 (*f)(&ComboEvent::Cancelled {
@@ -1409,8 +1423,9 @@ struct ComboDiscoveryResult {
 async fn discover_combo_infos(
     config: &Config,
     cancel_token: CancellationToken,
+    ignore_workspace_scripts: bool,
 ) -> ComboDiscoveryResult {
-    let combo_dirs = combo_discovery_dirs(config);
+    let combo_dirs = combo_discovery_dirs(config, ignore_workspace_scripts);
     let combo_dirs = combo_dirs.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let result = discover_starters(&combo_dirs, cancel_token).await;
     let combos = result
@@ -1433,8 +1448,13 @@ async fn discover_combo_infos(
     }
 }
 
-fn combo_discovery_dirs(config: &Config) -> Vec<PathBuf> {
-    vec![workspace_dir().join(".coco/combos"), config.combo_dir()]
+fn combo_discovery_dirs(config: &Config, ignore_workspace_scripts: bool) -> Vec<PathBuf> {
+    let mut combo_dirs = Vec::with_capacity(2);
+    if !ignore_workspace_scripts {
+        combo_dirs.push(workspace_dir().join(".coco/combos"));
+    }
+    combo_dirs.push(config.combo_dir());
+    combo_dirs
 }
 
 fn flush_buffer(

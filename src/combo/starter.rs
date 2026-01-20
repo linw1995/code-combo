@@ -451,7 +451,8 @@ fn execute_command(
             .chain(args.iter().cloned())
             .collect::<Vec<_>>();
         let mut proc = match ExecCommand::from_argv(argv)
-            .stdin(Stdio::piped())
+            .stdin(Stdio::null())
+            .disable_tty()
             .envs(merged_envs)
             .spawn_chunked(ChunkConfig::default())
         {

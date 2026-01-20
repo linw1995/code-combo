@@ -351,6 +351,7 @@ impl Agent {
             system_prompt: system_prompt.clone(),
             model_override: None,
             thinking_enabled: false,
+            ignore_workspace_scripts: false,
         }));
         let run_combo_tool = RunComboTool::new_with_shared_context(combo_context.clone());
         executor.register_tool(std::sync::Arc::new(run_combo_tool));
@@ -463,6 +464,12 @@ impl Agent {
         self.model_override = model.clone();
         self.update_combo_context(move |ctx| {
             ctx.model_override = model;
+        });
+    }
+
+    pub fn set_ignore_workspace_scripts(&mut self, ignore: bool) {
+        self.update_combo_context(move |ctx| {
+            ctx.ignore_workspace_scripts = ignore;
         });
     }
 
