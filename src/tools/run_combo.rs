@@ -774,16 +774,28 @@ async fn execute_combo(
     }
 
     let success = !failed && exit_code.map(|c| c == 0).unwrap_or(true);
-    let summary = if summary_parts.is_empty() {
+    let fallback_summary = if summary_parts.is_empty() {
         format!(
             "Combo '{}' completed with {} tool call(s)",
             combo_name, tool_calls
         )
     } else {
-        // Take last few lines as summary
         let max_lines = 10;
         let start = summary_parts.len().saturating_sub(max_lines);
         summary_parts[start..].join("\n")
+    };
+    let summary = if cancel_token.is_cancelled() {
+        fallback_summary
+    } else {
+        match generate_combo_summary(&mut reply_agent, &combo_name, tool_calls, exit_code, failed)
+            .await
+        {
+            Ok(summary) => summary,
+            Err(err) => {
+                warn!(?err, "Failed to generate combo summary");
+                fallback_summary
+            }
+        }
     };
 
     Ok(RunComboOutput {
@@ -994,6 +1006,61 @@ fn truncate_to_boundary(text: &str, max_bytes: usize) -> &str {
         end -= 1;
     }
     &text[..end]
+}
+
+fn extract_text_response(message: &Message) -> String {
+    match &message.content {
+        Content::Text(text) => text.clone(),
+        Content::Multiple(blocks) => blocks
+            .iter()
+            .filter_map(|block| {
+                if let Block::Text { text } = block {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
+async fn generate_combo_summary(
+    agent: &mut Agent,
+    combo_name: &str,
+    tool_calls: usize,
+    exit_code: Option<i32>,
+    failed: bool,
+) -> Result<String, String> {
+    let mut summary_agent = agent.clone();
+    summary_agent.apply_tool_policies(Some(&[]), None);
+    let prompt = format!(
+        "Summarize the combo execution for the user.\n\
+- Provide 3-5 concise bullet points.\n\
+- Include status (success/failure), key actions, notable outputs or errors, and next steps if any.\n\
+- Base the summary on the tool uses, tool results, and prompts already in the conversation history.\n\
+- Do not call tools.\n\
+\n\
+Context:\n\
+combo_name: {combo_name}\n\
+tool_calls: {tool_calls}\n\
+exit_code: {exit_code}\n\
+failed: {failed}\n\
+",
+        exit_code = exit_code
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+    );
+    let response = summary_agent
+        .chat(Message::user(Content::Text(prompt)))
+        .await
+        .map_err(|err| err.to_string())?;
+    let summary = extract_text_response(&response.message);
+    let summary = summary.trim();
+    if summary.is_empty() {
+        return Err("summary response is empty".to_string());
+    }
+    Ok(summary.to_string())
 }
 
 fn build_offload_reply_directive(schemas: &[PromptSchema]) -> String {
