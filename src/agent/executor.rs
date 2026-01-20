@@ -4,6 +4,7 @@ use std::{
 };
 
 use lazy_static::lazy_static;
+use serde_json::Value;
 use snafu::prelude::*;
 use tokio_util::sync::CancellationToken;
 
@@ -11,9 +12,10 @@ use super::bash_executor;
 use crate::{
     AppliedTextEdit, OutputChunk, TextEdit, error,
     tools::{
-        self, BASH_TOOL_NAME, BashInput, BashTool, Final, LIST_TOOL_NAME, ListTool, READ_TOOL_NAME,
-        RUN_TASK_TOOL_NAME, ReadTool, RunTaskTool, STR_REPLACE_TOOL_NAME, StrReplaceTool,
-        SubagentEvent, Tool, run_bash_chunked, run_task,
+        self, BASH_TOOL_NAME, BashInput, BashTool, ComboEvent, Final, LIST_TOOL_NAME, ListTool,
+        READ_TOOL_NAME, RUN_COMBO_TOOL_NAME, RUN_TASK_TOOL_NAME, ReadTool, RunComboTool,
+        RunTaskTool, STR_REPLACE_TOOL_NAME, StrReplaceTool, SubagentEvent, Tool, run_bash_chunked,
+        run_combo, run_task,
     },
 };
 
@@ -86,6 +88,7 @@ pub enum Output {
     TextEdit(TextEdit),
     ToolOutput(OutputChunk),
     SubagentOutput(SubagentEvent),
+    ComboOutput(ComboEvent),
     Denied,
     AskPermission,
 }
@@ -288,6 +291,7 @@ impl Executor {
                             | READ_TOOL_NAME
                             | LIST_TOOL_NAME
                             | RUN_TASK_TOOL_NAME
+                            | RUN_COMBO_TOOL_NAME
                     )
                 {
                     on_output(Output::AskPermission);
@@ -393,6 +397,83 @@ impl Executor {
                 return Ok(ExecuteStatus::Completed);
             }
         }
+
+        // Special handling for run_combo tool to support streaming ComboEvents
+        if name == RUN_COMBO_TOOL_NAME
+            && let Some(run_combo_tool) = tool
+                .as_any()
+                .and_then(|any| any.downcast_ref::<RunComboTool>())
+        {
+            let input_value = match input {
+                Input::Starter(v) => v,
+                _ => {
+                    on_output(Output::Failure(Final::from(
+                        "run_combo requires Starter input",
+                    )));
+                    return Ok(ExecuteStatus::Completed);
+                }
+            };
+
+            let ctx = run_combo_tool.context();
+
+            let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+            let task_cancel = cancel_token.clone();
+            let task_handle = tokio::spawn(async move {
+                run_combo(
+                    ctx,
+                    Input::Starter(input_value),
+                    task_cancel,
+                    move |event| {
+                        let _ = event_tx.send(event.clone());
+                    },
+                )
+                .await
+            });
+
+            let mut task_handle = std::pin::pin!(task_handle);
+
+            loop {
+                tokio::select! {
+                    event = event_rx.recv() => {
+                        match event {
+                            Some(e) => on_output(Output::ComboOutput(e)),
+                            None => {
+                                match task_handle.await {
+                                    Ok(output) => {
+                                        on_output(output.into());
+                                    }
+                                    Err(e) => {
+                                        on_output(Output::Failure(Final::from(format!("Combo task panicked: {}", e))));
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    result = &mut task_handle => {
+                        while let Ok(e) = event_rx.try_recv() {
+                            on_output(Output::ComboOutput(e));
+                        }
+                        match result {
+                            Ok(output) => {
+                                on_output(output.into());
+                            }
+                            Err(e) => {
+                                on_output(Output::Failure(Final::from(format!("Combo task panicked: {}", e))));
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+
+            if cancel_token.is_cancelled() {
+                return Ok(ExecuteStatus::Cancelled);
+            } else {
+                return Ok(ExecuteStatus::Completed);
+            }
+        }
         // Fall through to generic execution if downcast fails
 
         let output = tokio::select! {
@@ -464,6 +545,10 @@ impl Executor {
                 input_schema: t.input_schema(),
             })
             .collect()
+    }
+
+    pub fn tool_input_schema(&self, name: &str) -> Option<Value> {
+        self.tools.get(name).map(|tool| tool.input_schema())
     }
 
     fn normalize_tool_names(names: &[String]) -> HashSet<String> {

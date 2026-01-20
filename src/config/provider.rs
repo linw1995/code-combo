@@ -35,6 +35,8 @@ pub struct ModelRequestConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disable_stream: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stringify_nested_tool_inputs: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offload_combo_reply: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combo_reply_retries: Option<usize>,
@@ -56,6 +58,7 @@ pub struct RequestOptions {
     pub thinking_blocks: ThinkingBlocksMode,
     pub ensure_toolcall_thinking: bool,
     pub disable_stream: bool,
+    pub stringify_nested_tool_inputs: bool,
     pub offload_combo_reply: Option<bool>,
     pub combo_reply_retries: usize,
     pub context_window: Option<usize>,
@@ -83,6 +86,9 @@ impl RequestOptions {
         }
         if let Some(value) = override_config.disable_stream {
             self.disable_stream = value;
+        }
+        if let Some(value) = override_config.stringify_nested_tool_inputs {
+            self.stringify_nested_tool_inputs = value;
         }
         if let Some(value) = override_config.offload_combo_reply {
             self.offload_combo_reply = Some(value);

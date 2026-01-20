@@ -118,6 +118,7 @@ impl Combo {
         Self {
             state: State::new(Inner {
                 name: name.to_string(),
+                starter_state: StarterState::Executing,
                 ..Default::default()
             }),
             command: None,
