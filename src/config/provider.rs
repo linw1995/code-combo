@@ -126,6 +126,9 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub models: Option<Vec<String>>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stringify_nested_tool_inputs: Option<bool>,
+
     /// When true, combo reply uses Bash tool to call `coco reply` command
     /// instead of the built-in combo_reply tool. This offloads the structured
     /// response extraction to an external command.

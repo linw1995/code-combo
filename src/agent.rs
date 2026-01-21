@@ -1089,7 +1089,11 @@ impl Agent {
             Ok(idx) => {
                 let provider = &self.config.providers[idx];
                 let model = Self::resolve_model(provider, selected_model);
-                self.config.request_options_for_model(&model)
+                let mut options = self.config.request_options_for_model(&model);
+                if let Some(value) = provider.stringify_nested_tool_inputs {
+                    options.stringify_nested_tool_inputs = value;
+                }
+                options
             }
             Err(_) => RequestOptions::default(),
         }
@@ -1516,6 +1520,25 @@ fn parse_stringified_tool_input(input: Value, schema: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{EnvString, ProviderKind};
+
+    #[test]
+    fn request_options_provider_override_stringify_nested_tool_inputs() {
+        let mut config = Config::default();
+        config.providers.push(ProviderConfig {
+            name: "demo".to_string(),
+            kind: ProviderKind::OpenAI,
+            api_key: EnvString::String("test".to_string()),
+            base_url: "http://localhost".to_string(),
+            thinking_budget_tokens: None,
+            models: None,
+            stringify_nested_tool_inputs: Some(true),
+            offload_combo_reply: false,
+        });
+        let agent = Agent::new(config);
+        let options = agent.request_options_for_current_model();
+        assert!(options.stringify_nested_tool_inputs);
+    }
 
     #[test]
     fn stream_accumulator_updates_plain_and_thinking() {
