@@ -53,7 +53,6 @@ pub struct Agent {
     /// Shared messages across cloned instances.
     messages: Arc<Mutex<Vec<Message>>>,
     thinking_enabled: bool,
-    thinking_budget_tokens: usize,
     thinking_cleanup_pending: bool,
     model_override: Option<String>,
 
@@ -299,12 +298,6 @@ impl Agent {
             .as_deref()
             .and_then(|path| path.parent());
 
-        let thinking_budget_tokens = config
-            .providers
-            .first()
-            .and_then(|provider| provider.thinking_budget_tokens)
-            .unwrap_or(DEFAULT_THINKING_BUDGET_TOKENS);
-
         // Load agent config (builtin -> global -> workspace, always override)
         let agent_config = load_agent_config_with_layers(
             &config.agent_path_layers,
@@ -370,7 +363,6 @@ impl Agent {
             executor,
             messages: Arc::new(Mutex::new(vec![])),
             thinking_enabled: false,
-            thinking_budget_tokens,
             thinking_cleanup_pending: false,
             model_override: None,
             agent_config,
@@ -501,7 +493,7 @@ impl Agent {
     pub async fn chat(&mut self, message: Message) -> Result<ChatResponse> {
         let request_options = self.request_options_for_current_model();
         let (_, client) = self.pick_provider()?;
-        let thinking = self.thinking_payload();
+        let thinking = self.thinking_payload(&request_options);
 
         let messages = {
             let mut messages = self.messages.lock().await;
@@ -545,7 +537,7 @@ impl Agent {
     pub async fn chat_with_history(&mut self) -> Result<ChatResponse> {
         let request_options = self.request_options_for_current_model();
         let (_, client) = self.pick_provider()?;
-        let thinking = self.thinking_payload();
+        let thinking = self.thinking_payload(&request_options);
 
         let messages = self.messages.lock().await.clone();
         let messages = self.prepare_messages_for_request(messages, &request_options);
@@ -619,7 +611,7 @@ impl Agent {
         F: FnMut(ChatStreamUpdate) + Send,
     {
         let (_, client) = self.pick_provider()?;
-        let thinking = self.thinking_payload();
+        let thinking = self.thinking_payload(request_options);
 
         let messages = {
             let mut messages = self.messages.lock().await;
@@ -707,7 +699,7 @@ impl Agent {
         } else {
             Some(system_prompt)
         };
-        let thinking = self.thinking_payload_with_override(thinking.as_ref());
+        let thinking = self.thinking_payload_with_override(&request_options, thinking.as_ref());
         let mut attempt = 0usize;
         loop {
             let reply_tool = build_reply_tool(&schemas)?;
@@ -824,7 +816,7 @@ impl Agent {
         } else {
             Some(system_prompt)
         };
-        let thinking = self.thinking_payload_with_override(thinking.as_ref());
+        let thinking = self.thinking_payload_with_override(&request_options, thinking.as_ref());
         let mut attempt = 0usize;
         loop {
             let reply_tool = build_reply_tool(&schemas)?;
@@ -1014,10 +1006,9 @@ impl Agent {
             Ok(idx) => {
                 let provider = &self.config.providers[idx];
                 let model = Self::resolve_model(provider, selected_model);
-                let options = self.config.request_options_for_model(&model);
-                options
-                    .offload_combo_reply
-                    .unwrap_or(provider.offload_combo_reply)
+                let mut options = self.config.request_options_for_model(&model);
+                options.apply_override(&provider.request_overrides);
+                options.offload_combo_reply.unwrap_or(false)
             }
             Err(_) => false,
         }
@@ -1059,9 +1050,13 @@ impl Agent {
             .await
     }
 
-    fn thinking_payload(&self) -> Option<Thinking> {
+    fn thinking_payload(&self, request_options: &RequestOptions) -> Option<Thinking> {
         if self.thinking_enabled {
-            Some(Thinking::enabled(self.thinking_budget_tokens))
+            Some(Thinking::enabled(
+                request_options
+                    .thinking_budget_tokens
+                    .unwrap_or(DEFAULT_THINKING_BUDGET_TOKENS),
+            ))
         } else {
             None
         }
@@ -1069,17 +1064,20 @@ impl Agent {
 
     fn thinking_payload_with_override(
         &self,
+        request_options: &RequestOptions,
         thinking: Option<&ThinkingConfig>,
     ) -> Option<Thinking> {
         let Some(thinking) = thinking else {
-            return self.thinking_payload();
+            return self.thinking_payload(request_options);
         };
         if !thinking.enabled {
             return None;
         }
-        let budget_tokens = thinking
-            .budget_tokens
-            .unwrap_or(self.thinking_budget_tokens);
+        let budget_tokens = thinking.budget_tokens.unwrap_or(
+            request_options
+                .thinking_budget_tokens
+                .unwrap_or(DEFAULT_THINKING_BUDGET_TOKENS),
+        );
         Some(Thinking::enabled(budget_tokens))
     }
 
@@ -1090,9 +1088,7 @@ impl Agent {
                 let provider = &self.config.providers[idx];
                 let model = Self::resolve_model(provider, selected_model);
                 let mut options = self.config.request_options_for_model(&model);
-                if let Some(value) = provider.stringify_nested_tool_inputs {
-                    options.stringify_nested_tool_inputs = value;
-                }
+                options.apply_override(&provider.request_overrides);
                 options
             }
             Err(_) => RequestOptions::default(),
@@ -1520,7 +1516,7 @@ fn parse_stringified_tool_input(input: Value, schema: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EnvString, ProviderKind};
+    use crate::{EnvString, ModelRequestConfig, ProviderKind};
 
     #[test]
     fn request_options_provider_override_stringify_nested_tool_inputs() {
@@ -1530,10 +1526,11 @@ mod tests {
             kind: ProviderKind::OpenAI,
             api_key: EnvString::String("test".to_string()),
             base_url: "http://localhost".to_string(),
-            thinking_budget_tokens: None,
             models: None,
-            stringify_nested_tool_inputs: Some(true),
-            offload_combo_reply: false,
+            request_overrides: ModelRequestConfig {
+                stringify_nested_tool_inputs: Some(true),
+                ..ModelRequestConfig::default()
+            },
         });
         let agent = Agent::new(config);
         let options = agent.request_options_for_current_model();

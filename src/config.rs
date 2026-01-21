@@ -27,7 +27,8 @@ pub use mcp::{
     McpConfig, McpServerCommandConfig, McpServerConfig, McpServerConnection, McpServerHttpConfig,
 };
 pub use provider::{
-    ModelRequestConfig, ProviderConfig, ProviderKind, RequestOptions, ThinkingBlocksMode,
+    ModelPreset, ModelRequestConfig, ProviderConfig, ProviderKind, RequestOptions,
+    ThinkingBlocksMode,
 };
 pub use ui::{MarkdownRenderEngine, UI};
 
@@ -55,7 +56,7 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub providers: Vec<ProviderConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub model_presets: Vec<ModelRequestConfig>,
+    pub model_presets: Vec<ModelPreset>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_tools: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -106,10 +107,10 @@ impl Config {
     }
 }
 
-fn apply_model_presets(options: &mut RequestOptions, presets: &[ModelRequestConfig], model: &str) {
+fn apply_model_presets(options: &mut RequestOptions, presets: &[ModelPreset], model: &str) {
     for preset in presets {
         if preset.model.eq_ignore_ascii_case(model) {
-            options.apply_override(preset);
+            options.apply_override(&preset.options);
         }
     }
 }
@@ -414,8 +415,8 @@ fn table_name_from_table(table: &toml::value::Table, path: &str) -> Result<Strin
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, MarkdownRenderEngine, McpServerConnection, ModelRequestConfig, SafeCommandsMode,
-        ThinkingBlocksMode, merge_config_values,
+        Config, MarkdownRenderEngine, McpServerConnection, ModelPreset, ModelRequestConfig,
+        SafeCommandsMode, ThinkingBlocksMode, merge_config_values,
     };
 
     fn base_config() -> String {
@@ -661,13 +662,15 @@ safe_commands_mode = \"override\"\n\
     #[test]
     fn request_options_config_overrides_builtin() {
         let mut config = Config::default();
-        config.model_presets.push(ModelRequestConfig {
+        config.model_presets.push(ModelPreset {
             model: "deepseek-reasoner".to_string(),
-            disable_tool_choice: Some(false),
-            tool_choice_fallback: Some(false),
-            combo_reply_retries: Some(0),
-            max_tokens: Some(2048),
-            ..ModelRequestConfig::default()
+            options: ModelRequestConfig {
+                disable_tool_choice: Some(false),
+                tool_choice_fallback: Some(false),
+                combo_reply_retries: Some(0),
+                max_tokens: Some(2048),
+                ..ModelRequestConfig::default()
+            },
         });
         let options = config.request_options_for_model("deepseek-reasoner");
         assert!(!options.disable_tool_choice);
