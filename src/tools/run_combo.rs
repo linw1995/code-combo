@@ -7,7 +7,6 @@
 use std::{path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
-use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -35,7 +34,7 @@ pub struct RunComboInput {
     /// Name of the combo to execute.
     pub combo_name: String,
     /// Arguments passed to the combo starter.
-    #[serde(default, deserialize_with = "deserialize_combo_args")]
+    #[serde(default)]
     pub args: Vec<String>,
 }
 
@@ -243,17 +242,10 @@ impl Tool for RunComboTool {
                     "description": "Name of the combo to execute"
                 },
                 "args": {
-                    "anyOf": [
-                        {
-                            "type": "array",
-                            "items": {
-                                "type": "string"
-                            }
-                        },
-                        {
-                            "type": "string"
-                        }
-                    ],
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
                     "description": "Arguments passed to the combo starter"
                 }
             },
@@ -828,25 +820,6 @@ fn emit_combo_event(on_event: &ComboEventCallback, event: ComboEvent) {
     if let Ok(mut f) = on_event.lock() {
         (*f)(&event);
     }
-}
-
-fn deserialize_combo_args<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum RawArgs {
-        List(Vec<String>),
-        Single(String),
-    }
-
-    let raw = Option::<RawArgs>::deserialize(deserializer)?;
-    Ok(match raw {
-        None => Vec::new(),
-        Some(RawArgs::List(items)) => items,
-        Some(RawArgs::Single(value)) => vec![value],
-    })
 }
 
 fn build_reply_agent(
@@ -1537,29 +1510,6 @@ fn shell_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_run_combo_input() {
-        let json = json!({
-            "combo_name": "commit"
-        });
-
-        let input: RunComboInput = serde_json::from_value(json).unwrap();
-        assert_eq!(input.combo_name, "commit");
-        assert!(input.args.is_empty());
-    }
-
-    #[test]
-    fn parse_run_combo_input_args_string() {
-        let json = json!({
-            "combo_name": "commit",
-            "args": "hello world"
-        });
-
-        let input: RunComboInput = serde_json::from_value(json).unwrap();
-        assert_eq!(input.combo_name, "commit");
-        assert_eq!(input.args, vec!["hello world"]);
-    }
 
     #[test]
     fn serialize_run_combo_output() {
