@@ -1,6 +1,6 @@
 use code_combo::{
     OutputChunk, Starter, TextEdit, ThinkingConfig, ToolUse, UsageStats,
-    tools::{Final, SubagentEvent},
+    tools::{ComboEvent as ComboToolEvent, Final, SubagentEvent},
 };
 use crossterm::event::{KeyEvent, MouseEvent};
 
@@ -66,6 +66,11 @@ pub enum AnswerEvent {
     SubagentEvent {
         id: String,
         event: SubagentEvent,
+    },
+    /// Combo tool event (for run_combo tool).
+    ComboToolEvent {
+        id: String,
+        event: ComboToolEvent,
     },
 }
 

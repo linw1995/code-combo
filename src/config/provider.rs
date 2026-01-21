@@ -21,7 +21,6 @@ pub enum ThinkingBlocksMode {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelRequestConfig {
-    pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disable_tools: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -35,6 +34,8 @@ pub struct ModelRequestConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disable_stream: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stringify_nested_tool_inputs: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offload_combo_reply: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combo_reply_retries: Option<usize>,
@@ -46,6 +47,15 @@ pub struct ModelRequestConfig {
     pub temperature: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_budget_tokens: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelPreset {
+    pub model: String,
+    #[serde(default, flatten)]
+    pub options: ModelRequestConfig,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -56,12 +66,14 @@ pub struct RequestOptions {
     pub thinking_blocks: ThinkingBlocksMode,
     pub ensure_toolcall_thinking: bool,
     pub disable_stream: bool,
+    pub stringify_nested_tool_inputs: bool,
     pub offload_combo_reply: Option<bool>,
     pub combo_reply_retries: usize,
     pub context_window: Option<usize>,
     pub can_reason: Option<bool>,
     pub temperature: Option<f32>,
     pub max_tokens: Option<usize>,
+    pub thinking_budget_tokens: Option<usize>,
 }
 
 impl RequestOptions {
@@ -84,6 +96,9 @@ impl RequestOptions {
         if let Some(value) = override_config.disable_stream {
             self.disable_stream = value;
         }
+        if let Some(value) = override_config.stringify_nested_tool_inputs {
+            self.stringify_nested_tool_inputs = value;
+        }
         if let Some(value) = override_config.offload_combo_reply {
             self.offload_combo_reply = Some(value);
         }
@@ -102,6 +117,9 @@ impl RequestOptions {
         if override_config.max_tokens.is_some() {
             self.max_tokens = override_config.max_tokens;
         }
+        if let Some(value) = override_config.thinking_budget_tokens {
+            self.thinking_budget_tokens = Some(value);
+        }
     }
 }
 
@@ -112,19 +130,14 @@ pub struct ProviderConfig {
     pub kind: ProviderKind,
     pub api_key: EnvString,
     pub base_url: String,
-    #[serde(default)]
-    pub thinking_budget_tokens: Option<usize>,
 
     /// Optional list of supported models.
     /// If None or empty, this provider accepts any model (wildcard).
     #[serde(default)]
     pub models: Option<Vec<String>>,
 
-    /// When true, combo reply uses Bash tool to call `coco reply` command
-    /// instead of the built-in combo_reply tool. This offloads the structured
-    /// response extraction to an external command.
-    #[serde(default)]
-    pub offload_combo_reply: bool,
+    #[serde(default, flatten)]
+    pub request_overrides: ModelRequestConfig,
 }
 
 impl std::fmt::Debug for ProviderConfig {

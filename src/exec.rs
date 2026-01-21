@@ -112,6 +112,7 @@ pub struct ExecCommand {
     envs: Vec<(String, String)>,
     env_remove: Vec<OsString>,
     stdin: Stdio,
+    disable_tty: bool,
 }
 
 impl ExecCommand {
@@ -121,6 +122,7 @@ impl ExecCommand {
             envs: Vec::new(),
             env_remove: Vec::new(),
             stdin: Stdio::null(),
+            disable_tty: false,
         }
     }
 
@@ -147,6 +149,11 @@ impl ExecCommand {
         self
     }
 
+    pub fn disable_tty(mut self) -> Self {
+        self.disable_tty = true;
+        self
+    }
+
     pub fn spawn_chunked(self, config: ChunkConfig) -> io::Result<RunningProcess> {
         if self.argv.is_empty() {
             return Err(io::Error::new(
@@ -167,6 +174,10 @@ impl ExecCommand {
             cmd.env_remove(key);
         }
         cmd.envs(self.envs.iter().map(|(k, v)| (k, v)));
+        if self.disable_tty {
+            cmd.env_remove("GPG_TTY");
+            cmd.env_remove("SSH_TTY");
+        }
 
         let mut child = cmd.spawn()?;
         let _ = child.stdin.take();

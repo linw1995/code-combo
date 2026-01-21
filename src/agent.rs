@@ -10,7 +10,7 @@ use crate::provider::{
     Block, Client, ContentBlockDelta, MessagesStreamEvent, Role, Thinking, ToolChoice,
 };
 use futures_util::StreamExt;
-use serde_json::{Map as JsonMap, json};
+use serde_json::{Map as JsonMap, Value, json};
 use snafu::prelude::*;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -19,7 +19,7 @@ use tracing::warn;
 use crate::{
     Config, PromptSchema, ProviderConfig, RequestOptions, Result, ResultDisplayExt,
     ThinkingBlocksMode, ThinkingConfig,
-    tools::{RunTaskContext, RunTaskTool},
+    tools::{ComboInfo, RunComboContext, RunComboTool, RunTaskContext, RunTaskTool},
 };
 use executor::PermissionControl;
 use prompt::{build_system_prompt_from_config, build_system_prompt_from_config_async};
@@ -53,12 +53,14 @@ pub struct Agent {
     /// Shared messages across cloned instances.
     messages: Arc<Mutex<Vec<Message>>>,
     thinking_enabled: bool,
-    thinking_budget_tokens: usize,
     thinking_cleanup_pending: bool,
     model_override: Option<String>,
 
     /// Full agent configuration loaded at initialization
     agent_config: AgentConfig,
+
+    /// Shared context for run_combo tool.
+    combo_context: Arc<Mutex<RunComboContext>>,
 }
 
 pub struct ChatResponse {
@@ -296,12 +298,6 @@ impl Agent {
             .as_deref()
             .and_then(|path| path.parent());
 
-        let thinking_budget_tokens = config
-            .providers
-            .first()
-            .and_then(|provider| provider.thinking_budget_tokens)
-            .unwrap_or(DEFAULT_THINKING_BUDGET_TOKENS);
-
         // Load agent config (builtin -> global -> workspace, always override)
         let agent_config = load_agent_config_with_layers(
             &config.agent_path_layers,
@@ -318,6 +314,13 @@ impl Agent {
             Some(&agent_config),
         );
 
+        // Build system prompt from agent config
+        let system_prompt = build_system_prompt_from_config(
+            agent_config.system_prompt.as_ref(),
+            &config.config_dir,
+            workspace_dir.unwrap_or(&config.config_dir),
+        );
+
         // Register run_task tool only if subagents are configured
         // Must be done before apply_tool_policies so it can be retained
         if let Some(ref subagents) = agent_config.subagents
@@ -332,6 +335,20 @@ impl Agent {
             executor.register_tool(std::sync::Arc::new(run_task_tool));
         }
 
+        // Register run_combo tool with empty combo list initially
+        // Combos will be populated later via set_combos()
+        let combo_context = Arc::new(Mutex::new(RunComboContext {
+            combos: Vec::new(),
+            envs: Vec::new(),
+            config: config.clone(),
+            system_prompt: system_prompt.clone(),
+            model_override: None,
+            thinking_enabled: false,
+            ignore_workspace_scripts: false,
+        }));
+        let run_combo_tool = RunComboTool::new_with_shared_context(combo_context.clone());
+        executor.register_tool(std::sync::Arc::new(run_combo_tool));
+
         // Apply agent tools as base
         if let Some(tools) = agent_config.tools.as_deref() {
             executor.apply_tool_policies(Some(tools), None);
@@ -340,23 +357,16 @@ impl Agent {
         // Apply config.toml allow/deny on top (existing behavior)
         executor.apply_tool_policies(config.allow_tools.as_deref(), config.deny_tools.as_deref());
 
-        // Build system prompt from agent config
-        let system_prompt = build_system_prompt_from_config(
-            agent_config.system_prompt.as_ref(),
-            &config.config_dir,
-            workspace_dir.unwrap_or(&config.config_dir),
-        );
-
         Self {
             config,
             system_prompt,
             executor,
             messages: Arc::new(Mutex::new(vec![])),
             thinking_enabled: false,
-            thinking_budget_tokens,
             thinking_cleanup_pending: false,
             model_override: None,
             agent_config,
+            combo_context,
         }
     }
 
@@ -365,7 +375,11 @@ impl Agent {
     }
 
     pub fn set_system_prompt(&mut self, system_prompt: &str) {
-        self.system_prompt = system_prompt.to_string()
+        self.system_prompt = system_prompt.to_string();
+        let system_prompt = self.system_prompt.clone();
+        self.update_combo_context(move |ctx| {
+            ctx.system_prompt = system_prompt;
+        });
     }
 
     /// Apply tool policies to restrict available tools.
@@ -386,6 +400,14 @@ impl Agent {
         &self.executor
     }
 
+    /// Update the combo list for run_combo tool.
+    ///
+    /// This should be called after combo discovery to populate the available combos.
+    pub async fn set_combos(&self, combos: Vec<ComboInfo>) {
+        let mut ctx = self.combo_context.lock().await;
+        ctx.combos = combos;
+    }
+
     /// Setup system prompt asynchronously from configuration and AGENTS.md files.
     ///
     /// This method builds the system prompt by:
@@ -404,7 +426,9 @@ impl Agent {
         )
         .await;
 
-        self.system_prompt = system_prompt;
+        self.system_prompt = system_prompt.clone();
+        let mut ctx = self.combo_context.lock().await;
+        ctx.system_prompt = system_prompt;
     }
 
     /// Get the agent configuration.
@@ -429,7 +453,29 @@ impl Agent {
     }
 
     pub fn set_model_override(&mut self, model: Option<String>) {
-        self.model_override = model;
+        self.model_override = model.clone();
+        self.update_combo_context(move |ctx| {
+            ctx.model_override = model;
+        });
+    }
+
+    pub fn set_ignore_workspace_scripts(&mut self, ignore: bool) {
+        self.update_combo_context(move |ctx| {
+            ctx.ignore_workspace_scripts = ignore;
+        });
+    }
+
+    fn update_combo_context<F>(&self, update: F)
+    where
+        F: FnOnce(&mut RunComboContext) + Send + 'static,
+    {
+        let ctx = self.combo_context.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let mut guard = ctx.lock().await;
+                update(&mut guard);
+            });
+        }
     }
 
     pub async fn dump_messages(&self) -> Vec<Message> {
@@ -447,7 +493,7 @@ impl Agent {
     pub async fn chat(&mut self, message: Message) -> Result<ChatResponse> {
         let request_options = self.request_options_for_current_model();
         let (_, client) = self.pick_provider()?;
-        let thinking = self.thinking_payload();
+        let thinking = self.thinking_payload(&request_options);
 
         let messages = {
             let mut messages = self.messages.lock().await;
@@ -476,7 +522,10 @@ impl Agent {
         let message = if response.content.is_empty() {
             Message::assistant(Content::Multiple(Vec::default()))
         } else {
-            let msg = Message::assistant(Content::Multiple(response.content));
+            let mut msg = Message::assistant(Content::Multiple(response.content));
+            if request_options.stringify_nested_tool_inputs {
+                parse_stringified_tool_inputs_in_message(&mut msg, &self.executor);
+            }
             self.messages.lock().await.push(msg.clone());
             msg
         };
@@ -491,7 +540,7 @@ impl Agent {
     pub async fn chat_with_history(&mut self) -> Result<ChatResponse> {
         let request_options = self.request_options_for_current_model();
         let (_, client) = self.pick_provider()?;
-        let thinking = self.thinking_payload();
+        let thinking = self.thinking_payload(&request_options);
 
         let messages = self.messages.lock().await.clone();
         let messages = self.prepare_messages_for_request(messages, &request_options);
@@ -515,7 +564,10 @@ impl Agent {
         let message = if response.content.is_empty() {
             Message::assistant(Content::Multiple(Vec::default()))
         } else {
-            let msg = Message::assistant(Content::Multiple(response.content));
+            let mut msg = Message::assistant(Content::Multiple(response.content));
+            if request_options.stringify_nested_tool_inputs {
+                parse_stringified_tool_inputs_in_message(&mut msg, &self.executor);
+            }
             self.messages.lock().await.push(msg.clone());
             msg
         };
@@ -565,7 +617,7 @@ impl Agent {
         F: FnMut(ChatStreamUpdate) + Send,
     {
         let (_, client) = self.pick_provider()?;
-        let thinking = self.thinking_payload();
+        let thinking = self.thinking_payload(request_options);
 
         let messages = {
             let mut messages = self.messages.lock().await;
@@ -611,7 +663,10 @@ impl Agent {
         let message = if blocks.is_empty() {
             Message::assistant(Content::Multiple(Vec::default()))
         } else {
-            let msg = Message::assistant(Content::Multiple(blocks));
+            let mut msg = Message::assistant(Content::Multiple(blocks));
+            if request_options.stringify_nested_tool_inputs {
+                parse_stringified_tool_inputs_in_message(&mut msg, &self.executor);
+            }
             self.messages.lock().await.push(msg.clone());
             msg
         };
@@ -653,7 +708,7 @@ impl Agent {
         } else {
             Some(system_prompt)
         };
-        let thinking = self.thinking_payload_with_override(thinking.as_ref());
+        let thinking = self.thinking_payload_with_override(&request_options, thinking.as_ref());
         let mut attempt = 0usize;
         loop {
             let reply_tool = build_reply_tool(&schemas)?;
@@ -770,7 +825,7 @@ impl Agent {
         } else {
             Some(system_prompt)
         };
-        let thinking = self.thinking_payload_with_override(thinking.as_ref());
+        let thinking = self.thinking_payload_with_override(&request_options, thinking.as_ref());
         let mut attempt = 0usize;
         loop {
             let reply_tool = build_reply_tool(&schemas)?;
@@ -910,6 +965,9 @@ impl Agent {
 
     pub fn set_thinking_enabled(&mut self, enabled: bool) {
         self.thinking_enabled = enabled;
+        self.update_combo_context(move |ctx| {
+            ctx.thinking_enabled = enabled;
+        });
     }
 
     pub fn thinking_enabled(&self) -> bool {
@@ -957,10 +1015,9 @@ impl Agent {
             Ok(idx) => {
                 let provider = &self.config.providers[idx];
                 let model = Self::resolve_model(provider, selected_model);
-                let options = self.config.request_options_for_model(&model);
-                options
-                    .offload_combo_reply
-                    .unwrap_or(provider.offload_combo_reply)
+                let mut options = self.config.request_options_for_model(&model);
+                options.apply_override(&provider.request_overrides);
+                options.offload_combo_reply.unwrap_or(false)
             }
             Err(_) => false,
         }
@@ -978,6 +1035,7 @@ impl Agent {
         name: &str,
         input: executor::Input<'a>,
     ) -> Output {
+        let input = self.normalize_tool_input_for_execution(name, input);
         self.executor
             .execute(id, name, input)
             .await
@@ -995,14 +1053,19 @@ impl Agent {
     where
         F: FnMut(Output) + Send,
     {
+        let input = self.normalize_tool_input_for_execution(name, input);
         self.executor
             .execute_with_output(id, name, input, cancel_token, on_output)
             .await
     }
 
-    fn thinking_payload(&self) -> Option<Thinking> {
+    fn thinking_payload(&self, request_options: &RequestOptions) -> Option<Thinking> {
         if self.thinking_enabled {
-            Some(Thinking::enabled(self.thinking_budget_tokens))
+            Some(Thinking::enabled(
+                request_options
+                    .thinking_budget_tokens
+                    .unwrap_or(DEFAULT_THINKING_BUDGET_TOKENS),
+            ))
         } else {
             None
         }
@@ -1010,17 +1073,20 @@ impl Agent {
 
     fn thinking_payload_with_override(
         &self,
+        request_options: &RequestOptions,
         thinking: Option<&ThinkingConfig>,
     ) -> Option<Thinking> {
         let Some(thinking) = thinking else {
-            return self.thinking_payload();
+            return self.thinking_payload(request_options);
         };
         if !thinking.enabled {
             return None;
         }
-        let budget_tokens = thinking
-            .budget_tokens
-            .unwrap_or(self.thinking_budget_tokens);
+        let budget_tokens = thinking.budget_tokens.unwrap_or(
+            request_options
+                .thinking_budget_tokens
+                .unwrap_or(DEFAULT_THINKING_BUDGET_TOKENS),
+        );
         Some(Thinking::enabled(budget_tokens))
     }
 
@@ -1030,9 +1096,33 @@ impl Agent {
             Ok(idx) => {
                 let provider = &self.config.providers[idx];
                 let model = Self::resolve_model(provider, selected_model);
-                self.config.request_options_for_model(&model)
+                let mut options = self.config.request_options_for_model(&model);
+                options.apply_override(&provider.request_overrides);
+                options
             }
             Err(_) => RequestOptions::default(),
+        }
+    }
+
+    fn normalize_tool_input_for_execution<'a>(
+        &self,
+        name: &str,
+        input: executor::Input<'a>,
+    ) -> executor::Input<'a> {
+        let request_options = self.request_options_for_current_model();
+        if !request_options.stringify_nested_tool_inputs {
+            return input;
+        }
+        match input {
+            Input::Starter(value) => {
+                let schema = self.executor.tool_input_schema(name);
+                let value = match schema.as_ref() {
+                    Some(schema) => parse_stringified_tool_input(value, schema),
+                    None => value,
+                };
+                Input::Starter(value)
+            }
+            input => input,
         }
     }
 
@@ -1043,7 +1133,13 @@ impl Agent {
         if request_options.disable_tools {
             Vec::new()
         } else {
-            self.executor.provider_tools()
+            let mut tools = self.executor.provider_tools();
+            if request_options.stringify_nested_tool_inputs {
+                for tool in &mut tools {
+                    tool.input_schema = stringify_nested_tool_schema(&tool.input_schema);
+                }
+            }
+            tools
         }
     }
 
@@ -1134,6 +1230,9 @@ impl Agent {
             )
         {
             Self::ensure_thinking_blocks(&mut messages);
+        }
+        if request_options.stringify_nested_tool_inputs {
+            messages = stringify_nested_tool_inputs(messages, &self.executor);
         }
         messages
     }
@@ -1277,9 +1376,189 @@ fn should_use_tool_choice_fallback(request_options: &RequestOptions) -> bool {
     request_options.disable_tool_choice && request_options.tool_choice_fallback
 }
 
+fn stringify_nested_tool_schema(schema: &Value) -> Value {
+    let mut output = schema.clone();
+    stringify_nested_schema_in_place(&mut output, 0);
+    output
+}
+
+fn stringify_nested_schema_in_place(schema: &mut Value, depth: usize) {
+    if depth > 0 && schema_is_object_or_array(schema) {
+        let desc = schema
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let suffix = "JSON string";
+        let description = if desc.is_empty() {
+            suffix.to_string()
+        } else {
+            format!("{desc} ({suffix})")
+        };
+        *schema = json!({
+            "type": "string",
+            "description": description,
+        });
+        return;
+    }
+
+    let Some(obj) = schema.as_object_mut() else {
+        return;
+    };
+
+    if let Some(props) = obj.get_mut("properties").and_then(Value::as_object_mut) {
+        for value in props.values_mut() {
+            stringify_nested_schema_in_place(value, depth + 1);
+        }
+    }
+    if let Some(items) = obj.get_mut("items") {
+        stringify_nested_schema_in_place(items, depth + 1);
+    }
+    if let Some(additional) = obj.get_mut("additionalProperties") {
+        stringify_nested_schema_in_place(additional, depth + 1);
+    }
+    for key in ["anyOf", "oneOf", "allOf"] {
+        if let Some(list) = obj.get_mut(key).and_then(Value::as_array_mut) {
+            for value in list {
+                stringify_nested_schema_in_place(value, depth + 1);
+            }
+        }
+    }
+}
+
+fn schema_is_object_or_array(schema: &Value) -> bool {
+    if let Some(ty) = schema.get("type") {
+        match ty {
+            Value::String(value) => {
+                if value == "object" || value == "array" {
+                    return true;
+                }
+            }
+            Value::Array(values) => {
+                if values.iter().any(|value| {
+                    matches!(value, Value::String(value) if value == "object" || value == "array")
+                }) {
+                    return true;
+                }
+            }
+            _ => (),
+        }
+    }
+    if schema.get("properties").is_some() || schema.get("items").is_some() {
+        return true;
+    }
+    for key in ["anyOf", "oneOf", "allOf"] {
+        if let Some(list) = schema.get(key).and_then(Value::as_array)
+            && list.iter().any(schema_is_object_or_array)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn stringify_nested_tool_inputs(messages: Vec<Message>, executor: &Executor) -> Vec<Message> {
+    messages
+        .into_iter()
+        .map(|mut message| {
+            let Content::Multiple(blocks) = &mut message.content else {
+                return message;
+            };
+            for block in blocks {
+                let Block::ToolUse(tool_use) = block else {
+                    continue;
+                };
+                if let Some(schema) = executor.tool_input_schema(&tool_use.name) {
+                    tool_use.input = stringify_tool_input_value(&tool_use.input, &schema);
+                }
+            }
+            message
+        })
+        .collect()
+}
+
+fn stringify_tool_input_value(input: &Value, schema: &Value) -> Value {
+    let Value::Object(map) = input else {
+        return input.clone();
+    };
+    let mut output = JsonMap::new();
+    for (key, value) in map {
+        let prop_schema = schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|props| props.get(key));
+        if let Some(schema) = prop_schema
+            && schema_is_object_or_array(schema)
+            && matches!(value, Value::Object(_) | Value::Array(_))
+        {
+            let text = serde_json::to_string(value).unwrap_or_else(|_| value.to_string());
+            output.insert(key.clone(), Value::String(text));
+        } else {
+            output.insert(key.clone(), value.clone());
+        }
+    }
+    Value::Object(output)
+}
+
+fn parse_stringified_tool_input(input: Value, schema: &Value) -> Value {
+    let Value::Object(map) = input else {
+        return input;
+    };
+    let mut output = JsonMap::new();
+    for (key, value) in map {
+        let prop_schema = schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|props| props.get(&key));
+        if let Some(schema) = prop_schema
+            && schema_is_object_or_array(schema)
+            && let Value::String(text) = &value
+            && let Ok(parsed) = serde_json::from_str::<Value>(text)
+        {
+            output.insert(key, parsed);
+            continue;
+        }
+        output.insert(key, value);
+    }
+    Value::Object(output)
+}
+
+fn parse_stringified_tool_inputs_in_message(message: &mut Message, executor: &Executor) {
+    let Content::Multiple(blocks) = &mut message.content else {
+        return;
+    };
+    for block in blocks {
+        let Block::ToolUse(tool_use) = block else {
+            continue;
+        };
+        if let Some(schema) = executor.tool_input_schema(&tool_use.name) {
+            tool_use.input = parse_stringified_tool_input(tool_use.input.clone(), &schema);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{EnvString, ModelRequestConfig, ProviderKind};
+
+    #[test]
+    fn request_options_provider_override_stringify_nested_tool_inputs() {
+        let mut config = Config::default();
+        config.providers.push(ProviderConfig {
+            name: "demo".to_string(),
+            kind: ProviderKind::OpenAI,
+            api_key: EnvString::String("test".to_string()),
+            base_url: "http://localhost".to_string(),
+            models: None,
+            request_overrides: ModelRequestConfig {
+                stringify_nested_tool_inputs: Some(true),
+                ..ModelRequestConfig::default()
+            },
+        });
+        let agent = Agent::new(config);
+        let options = agent.request_options_for_current_model();
+        assert!(options.stringify_nested_tool_inputs);
+    }
 
     #[test]
     fn stream_accumulator_updates_plain_and_thinking() {
@@ -1463,5 +1742,66 @@ mod tests {
             }
             _ => panic!("expected multiple blocks"),
         }
+    }
+
+    #[test]
+    fn stringify_nested_schema_converts_nested_object_and_array() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "description": "metadata",
+                    "properties": {
+                        "name": {"type": "string"}
+                    }
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                }
+            }
+        });
+
+        let output = stringify_nested_tool_schema(&schema);
+        let props = output
+            .get("properties")
+            .and_then(Value::as_object)
+            .expect("properties");
+        assert_eq!(props["meta"]["type"], "string");
+        assert!(
+            props["meta"]["description"]
+                .as_str()
+                .unwrap_or("")
+                .contains("JSON string")
+        );
+        assert_eq!(props["tags"]["type"], "string");
+    }
+
+    #[test]
+    fn stringify_and_parse_tool_input_round_trip() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"}
+                    }
+                },
+                "name": {"type": "string"}
+            }
+        });
+
+        let input = json!({
+            "meta": {"name": "coco"},
+            "name": "demo"
+        });
+        let stringified = stringify_tool_input_value(&input, &schema);
+        assert!(stringified.get("meta").is_some());
+        assert!(stringified["meta"].is_string());
+
+        let parsed = parse_stringified_tool_input(stringified, &schema);
+        assert_eq!(parsed, input);
     }
 }
