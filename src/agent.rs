@@ -522,7 +522,10 @@ impl Agent {
         let message = if response.content.is_empty() {
             Message::assistant(Content::Multiple(Vec::default()))
         } else {
-            let msg = Message::assistant(Content::Multiple(response.content));
+            let mut msg = Message::assistant(Content::Multiple(response.content));
+            if request_options.stringify_nested_tool_inputs {
+                parse_stringified_tool_inputs_in_message(&mut msg, &self.executor);
+            }
             self.messages.lock().await.push(msg.clone());
             msg
         };
@@ -561,7 +564,10 @@ impl Agent {
         let message = if response.content.is_empty() {
             Message::assistant(Content::Multiple(Vec::default()))
         } else {
-            let msg = Message::assistant(Content::Multiple(response.content));
+            let mut msg = Message::assistant(Content::Multiple(response.content));
+            if request_options.stringify_nested_tool_inputs {
+                parse_stringified_tool_inputs_in_message(&mut msg, &self.executor);
+            }
             self.messages.lock().await.push(msg.clone());
             msg
         };
@@ -657,7 +663,10 @@ impl Agent {
         let message = if blocks.is_empty() {
             Message::assistant(Content::Multiple(Vec::default()))
         } else {
-            let msg = Message::assistant(Content::Multiple(blocks));
+            let mut msg = Message::assistant(Content::Multiple(blocks));
+            if request_options.stringify_nested_tool_inputs {
+                parse_stringified_tool_inputs_in_message(&mut msg, &self.executor);
+            }
             self.messages.lock().await.push(msg.clone());
             msg
         };
@@ -1511,6 +1520,20 @@ fn parse_stringified_tool_input(input: Value, schema: &Value) -> Value {
         output.insert(key, value);
     }
     Value::Object(output)
+}
+
+fn parse_stringified_tool_inputs_in_message(message: &mut Message, executor: &Executor) {
+    let Content::Multiple(blocks) = &mut message.content else {
+        return;
+    };
+    for block in blocks {
+        let Block::ToolUse(tool_use) = block else {
+            continue;
+        };
+        if let Some(schema) = executor.tool_input_schema(&tool_use.name) {
+            tool_use.input = parse_stringified_tool_input(tool_use.input.clone(), &schema);
+        }
+    }
 }
 
 #[cfg(test)]
