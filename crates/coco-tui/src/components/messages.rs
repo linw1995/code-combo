@@ -566,7 +566,8 @@ impl Messages {
             Event::Ask(AskEvent::ToolUsePermission(id))
             | Event::Ask(AskEvent::TextEdit { id, .. })
             | Event::Answer(AnswerEvent::ToolOutput { id, .. })
-            | Event::Answer(AnswerEvent::ToolResult { id, .. }) => {
+            | Event::Answer(AnswerEvent::ToolResult { id, .. })
+            | Event::Answer(AnswerEvent::SubagentEvent { id, .. }) => {
                 if let Some(idx) = self.locate_tool_message(id) {
                     // Pass through the relative event to its component.
                     self.messages.write_untracked()[idx].handle_event(event);

@@ -418,6 +418,8 @@ impl Chat<'static> {
                 self.set_combo_thinking_active(false);
                 self.messages
                     .push(Message::system(Plain::new(message.to_string()).into()));
+                // Set chat status to Ready after combo tool error
+                self.set_ready();
                 global::trigger_schedule_session_save();
             }
             ComboEvent::ReplyToolResult { .. } => {
@@ -1023,6 +1025,8 @@ impl Chat<'static> {
                     }
                     .into(),
                 });
+            // Set chat status to Ready after all hunks rejected
+            self.set_ready();
         }
     }
 
@@ -1210,7 +1214,12 @@ impl Component for Chat<'static> {
             Event::Answer(AnswerEvent::Bot(msgs)) => {
                 self.messages.finalize_stream();
                 self.messages.reset_stream();
-                self.set_ready();
+                // Check if there are any tool uses that will be executed
+                let has_tool_use = msgs.iter().any(|m| matches!(m, BotMessage::ToolUse(_)));
+                if !has_tool_use {
+                    // Only set ready if no tools to execute
+                    self.set_ready();
+                }
                 let mut new_messages = Vec::with_capacity(msgs.len());
                 let mut combo_tool_ids = Vec::new();
                 for msg in msgs.iter().cloned() {
@@ -1324,6 +1333,11 @@ impl Component for Chat<'static> {
                     return;
                 }
                 self.dispatch_combo_event(combo_event);
+            }
+            Event::Answer(AnswerEvent::SubagentEvent { .. }) => {
+                // RunTask tool is executing, set chat status to Processing
+                self.set_processing();
+                let _ = self.messages.on_tool_event(event);
             }
             Event::Answer(AnswerEvent::ToolOutput { .. }) => {
                 let _ = self.messages.on_tool_event(event);
@@ -1531,6 +1545,8 @@ impl Component for Chat<'static> {
                             is_error: Some(true),
                             content: code_combo::Content::Text("User cancelled".to_string()),
                         });
+                    // Set chat status to Ready after cancellation
+                    self.set_ready();
                     // Trigger session save after tool cancellation
                     global::trigger_schedule_session_save();
                 }
