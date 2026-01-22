@@ -11,6 +11,7 @@ pub mod global;
 pub mod logging;
 mod mcp;
 mod provider;
+mod retry;
 mod runtime_overrides;
 mod text_edit;
 pub mod tools;
@@ -23,6 +24,7 @@ pub use error::*;
 pub use exec::*;
 pub use mcp::*;
 pub use provider::*;
+pub use retry::*;
 pub use runtime_overrides::*;
 pub use text_edit::*;
 

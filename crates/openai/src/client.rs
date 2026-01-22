@@ -1,14 +1,17 @@
 use std::{
     collections::VecDeque,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
+    time::Duration,
 };
 
+use backon::{ExponentialBuilder, Retryable};
 use bytes::Bytes;
 use futures_core::Stream;
 use reqwest::{StatusCode, Url, header::HeaderMap};
 use snafu::{ResultExt, Whatever};
-use tracing::trace;
+use tracing::{trace, warn};
 
 use crate::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ErrorResponse,
@@ -20,6 +23,33 @@ pub struct Client {
     base_url: Url,
     cli: reqwest::Client,
     has_version_prefix: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RetryAttempt {
+    pub attempt: usize,
+    pub max_attempts: usize,
+    pub delay: Duration,
+    pub error: String,
+}
+
+pub type RetryNotifier = Arc<dyn Fn(RetryAttempt) + Send + Sync>;
+
+#[derive(Clone)]
+pub struct RetryConfig {
+    pub max_attempts: usize,
+    pub max_delay: Duration,
+    pub notifier: Option<RetryNotifier>,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            max_delay: Duration::from_secs(60),
+            notifier: None,
+        }
+    }
 }
 
 type Result<T> = std::result::Result<T, Whatever>;
@@ -79,6 +109,7 @@ impl Client {
     pub async fn chat_completions(
         &self,
         mut request: ChatCompletionRequest,
+        retry: RetryConfig,
     ) -> Result<ChatCompletionResponse> {
         request.model = self.model.clone();
         request.stream = None;
@@ -87,29 +118,58 @@ impl Client {
             .base_url
             .join(self.api_path("chat/completions"))
             .whatever_context("build chat completions url")?;
-        let resp = self
-            .cli
-            .post(url)
-            .json(&request)
-            .send()
-            .await
-            .whatever_context("send chat completions request")?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "failed to read error response".to_string());
-            return Err(parse_error(status, &body));
-        }
-        resp.json::<ChatCompletionResponse>()
-            .await
-            .whatever_context("decode chat completions response")
+        let cli = self.cli.clone();
+        let request = request;
+        let url_clone = url.clone();
+        let notify = retry.notifier.clone();
+        let max_attempts = retry.max_attempts;
+        let mut attempts = 0usize;
+        let backoff = build_backoff(retry);
+        let result =
+            (|| {
+                let request = request.clone();
+                let url = url_clone.clone();
+                let cli = cli.clone();
+                async move {
+                    let resp =
+                        cli.post(url).json(&request).send().await.map_err(|err| {
+                            OpenAIRequestError::transport("chat completions", err)
+                        })?;
+                    let status = resp.status();
+                    if !status.is_success() {
+                        let body = resp
+                            .text()
+                            .await
+                            .unwrap_or_else(|err| format!("failed to read error response: {err}"));
+                        return Err(OpenAIRequestError::http_status(status, body));
+                    }
+                    resp.json::<ChatCompletionResponse>()
+                        .await
+                        .map_err(|err| OpenAIRequestError::decode("chat completions", err))
+                }
+            })
+            .retry(backoff)
+            .when(OpenAIRequestError::is_retryable)
+            .notify(move |err, dur| {
+                attempts = attempts.saturating_add(1);
+                if let Some(notify) = notify.as_ref() {
+                    notify(RetryAttempt {
+                        attempt: attempts,
+                        max_attempts,
+                        delay: dur,
+                        error: err.to_string(),
+                    });
+                }
+                warn!(error = %err, delay = ?dur, "retrying openai chat completions request");
+            })
+            .await;
+        result.map_err(OpenAIRequestError::into_whatever)
     }
 
     pub async fn chat_completions_stream(
         &self,
         mut request: ChatCompletionRequest,
+        retry: RetryConfig,
     ) -> Result<ChatCompletionStream> {
         request.model = self.model.clone();
         request.stream = Some(true);
@@ -120,22 +180,49 @@ impl Client {
             .base_url
             .join(self.api_path("chat/completions"))
             .whatever_context("build chat completions stream url")?;
-        let resp = self
-            .cli
-            .post(url)
-            .json(&request)
-            .send()
-            .await
-            .whatever_context("send chat completions stream request")?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "failed to read error response".to_string());
-            return Err(parse_error(status, &body));
-        }
-        Ok(ChatCompletionStream::new(resp))
+        let cli = self.cli.clone();
+        let request = request;
+        let url_clone = url.clone();
+        let notify = retry.notifier.clone();
+        let max_attempts = retry.max_attempts;
+        let mut attempts = 0usize;
+        let backoff = build_backoff(retry);
+        let result = (|| {
+            let request = request.clone();
+            let url = url_clone.clone();
+            let cli = cli.clone();
+            async move {
+                let resp =
+                    cli.post(url).json(&request).send().await.map_err(|err| {
+                        OpenAIRequestError::transport("chat completions stream", err)
+                    })?;
+                let status = resp.status();
+                if !status.is_success() {
+                    let body = resp
+                        .text()
+                        .await
+                        .unwrap_or_else(|err| format!("failed to read error response: {err}"));
+                    return Err(OpenAIRequestError::http_status(status, body));
+                }
+                Ok(ChatCompletionStream::new(resp))
+            }
+        })
+        .retry(backoff)
+        .when(OpenAIRequestError::is_retryable)
+        .notify(move |err, dur| {
+            attempts = attempts.saturating_add(1);
+            if let Some(notify) = notify.as_ref() {
+                notify(RetryAttempt {
+                    attempt: attempts,
+                    max_attempts,
+                    delay: dur,
+                    error: err.to_string(),
+                });
+            }
+            warn!(error = %err, delay = ?dur, "retrying openai chat completions stream request");
+        })
+        .await;
+        result.map_err(OpenAIRequestError::into_whatever)
     }
 }
 
@@ -152,6 +239,93 @@ fn parse_error(status: StatusCode, body: &str) -> Whatever {
     } else {
         <Whatever as snafu::FromString>::without_source(format!("openai error ({status}): {body}"))
     }
+}
+
+#[derive(Debug)]
+enum OpenAIRequestError {
+    Transport {
+        context: &'static str,
+        source: reqwest::Error,
+    },
+    HttpStatus {
+        status: StatusCode,
+        body: String,
+    },
+    Decode {
+        context: &'static str,
+        message: String,
+    },
+}
+
+impl OpenAIRequestError {
+    fn transport(context: &'static str, err: reqwest::Error) -> Self {
+        Self::Transport {
+            context,
+            source: err,
+        }
+    }
+
+    fn http_status(status: StatusCode, body: String) -> Self {
+        Self::HttpStatus { status, body }
+    }
+
+    fn decode(context: &'static str, err: reqwest::Error) -> Self {
+        Self::Decode {
+            context,
+            message: err.to_string(),
+        }
+    }
+
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::Transport { source, .. } => source.is_timeout() || source.is_connect(),
+            Self::HttpStatus { status, .. } => is_retryable_status(*status),
+            Self::Decode { .. } => false,
+        }
+    }
+
+    fn into_whatever(self) -> Whatever {
+        match self {
+            Self::Transport { context, source } => <Whatever as snafu::FromString>::without_source(
+                format!("send {context} request error: {source}"),
+            ),
+            Self::HttpStatus { status, body } => parse_error(status, &body),
+            Self::Decode { context, message } => <Whatever as snafu::FromString>::without_source(
+                format!("decode {context} response error: {message}"),
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for OpenAIRequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transport { source, .. } => write!(f, "transport error: {source}"),
+            Self::HttpStatus { status, .. } => write!(f, "http status {status}"),
+            Self::Decode { message, .. } => write!(f, "decode error: {message}"),
+        }
+    }
+}
+
+fn is_retryable_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::INTERNAL_SERVER_ERROR
+            | StatusCode::SERVICE_UNAVAILABLE
+    )
+}
+
+fn build_backoff(retry: RetryConfig) -> ExponentialBuilder {
+    let mut builder = ExponentialBuilder::default()
+        .with_jitter()
+        .with_max_times(retry.max_attempts);
+    if retry.max_delay == Duration::from_millis(0) {
+        builder = builder.without_max_delay();
+    } else {
+        builder = builder.with_max_delay(retry.max_delay);
+    }
+    builder
 }
 
 struct SseEvent {
@@ -322,4 +496,17 @@ fn parse_chat_completion_chunk(event: SseEvent) -> Result<Option<ChatCompletionC
     let chunk: ChatCompletionChunk =
         serde_json::from_str(text).whatever_context("decode chat completion chunk")?;
     Ok(Some(chunk))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retryable_status_codes() {
+        assert!(is_retryable_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_retryable_status(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(is_retryable_status(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(!is_retryable_status(StatusCode::BAD_REQUEST));
+    }
 }
