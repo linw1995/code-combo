@@ -8,7 +8,7 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout},
     prelude::Rect,
-    style::{Style, Stylize},
+    style::Style,
     text::{Line, Span},
     widgets::Wrap,
 };

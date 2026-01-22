@@ -2,7 +2,7 @@ use ratatui::{
     prelude::{Buffer, Rect},
     style::Style,
     text::{Line, Span, Text},
-    widgets::{Widget, WidgetRef, Wrap},
+    widgets::{Widget, Wrap},
 };
 
 use crate::global;
@@ -80,9 +80,9 @@ impl<'a> Paragraph<'a> {
     }
 }
 
-impl WidgetRef for Paragraph<'static> {
-    fn render_ref(&self, area: Rect, buf: &mut Buffer) {
-        self.build_widget().render_ref(area, buf);
+impl Widget for &Paragraph<'static> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        self.build_widget().render(area, buf);
     }
 }
 

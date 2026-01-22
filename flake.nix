@@ -66,6 +66,7 @@
 
                 outputHashes = {
                   "tree-sitter-diff-0.1.0" = "sha256-8rYLNGgoZSvvfqO2++nAgFKmvbkKJ3m+9B8bTXp6Us4=";
+                  "tui-textarea-0.7.0" = "sha256-3ENi0XCVkhJAj9mgMXXkCY2FZ1VcVrSjfidBCsYdfMA=";
                 };
               };
               cargoBuildFlags = ["-p" "coco-tui"];
