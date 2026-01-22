@@ -37,8 +37,9 @@ pub use executor::{ExecuteStatus, Executor, Input, Output};
 
 const DEFAULT_THINKING_BUDGET_TOKENS: usize = 1024;
 pub use config::{
-    AGENT_CONFIG_FILENAME, AgentConfig, AgentConfigError, SubagentConfig, SystemPromptConfig,
-    ToolsConfig, load_agent_config, load_agent_config_for_combo, load_agent_config_with_layers,
+    AGENT_CONFIG_FILENAME, AgentConfig, AgentConfigError, SubagentConfig, SubagentModelConfig,
+    SystemPromptConfig, ToolsConfig, load_agent_config, load_agent_config_for_combo,
+    load_agent_config_with_layers,
 };
 
 const PROMPT_REPLY_TOOL_NAME: &str = "combo_reply";
@@ -61,6 +62,9 @@ pub struct Agent {
 
     /// Shared context for run_combo tool.
     combo_context: Arc<Mutex<RunComboContext>>,
+
+    /// Shared context for run_task tool (if subagents are configured).
+    run_task_context: Option<Arc<Mutex<RunTaskContext>>>,
 }
 
 pub struct ChatResponse {
@@ -323,17 +327,23 @@ impl Agent {
 
         // Register run_task tool only if subagents are configured
         // Must be done before apply_tool_policies so it can be retained
-        if let Some(ref subagents) = agent_config.subagents
+        // Note: model_override is initially None, will be updated via set_model_override()
+        let run_task_context = if let Some(ref subagents) = agent_config.subagents
             && !subagents.is_empty()
         {
-            let run_task_context = RunTaskContext {
+            let context = Arc::new(Mutex::new(RunTaskContext {
                 subagents: subagents.clone(),
                 config: config.clone(),
                 executor: executor.clone(),
-            };
-            let run_task_tool = RunTaskTool::new(run_task_context);
+                model_override: None,
+                default_model: agent_config.default_model.clone(),
+            }));
+            let run_task_tool = RunTaskTool::new_with_shared_context(context.clone());
             executor.register_tool(std::sync::Arc::new(run_task_tool));
-        }
+            Some(context)
+        } else {
+            None
+        };
 
         // Register run_combo tool with empty combo list initially
         // Combos will be populated later via set_combos()
@@ -367,6 +377,7 @@ impl Agent {
             model_override: None,
             agent_config,
             combo_context,
+            run_task_context,
         }
     }
 
@@ -454,7 +465,11 @@ impl Agent {
 
     pub fn set_model_override(&mut self, model: Option<String>) {
         self.model_override = model.clone();
+        let model_for_combo = model.clone();
         self.update_combo_context(move |ctx| {
+            ctx.model_override = model_for_combo;
+        });
+        self.update_run_task_context(move |ctx| {
             ctx.model_override = model;
         });
     }
@@ -470,6 +485,21 @@ impl Agent {
         F: FnOnce(&mut RunComboContext) + Send + 'static,
     {
         let ctx = self.combo_context.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let mut guard = ctx.lock().await;
+                update(&mut guard);
+            });
+        }
+    }
+
+    fn update_run_task_context<F>(&self, update: F)
+    where
+        F: FnOnce(&mut RunTaskContext) + Send + 'static,
+    {
+        let Some(ctx) = self.run_task_context.clone() else {
+            return;
+        };
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 let mut guard = ctx.lock().await;

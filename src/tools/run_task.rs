@@ -19,7 +19,7 @@ use crate::{
     Config, OutputChunk,
     agent::{
         AgentConfig, ChatStreamUpdate, Content, ExecuteStatus, Executor, Message, StopReason,
-        SubagentConfig,
+        SubagentConfig, SubagentModelConfig,
     },
     exec::StreamKind,
     provider::{Block, ToolUse},
@@ -112,6 +112,10 @@ pub struct RunTaskContext {
     pub config: Config,
     /// Shared executor for permission inheritance.
     pub executor: Executor,
+    /// Model override inherited from parent agent.
+    pub model_override: Option<String>,
+    /// Default model inherited from parent agent config.
+    pub default_model: Option<String>,
 }
 
 /// Tool for delegating tasks to subagents.
@@ -125,6 +129,14 @@ impl RunTaskTool {
         Self {
             context: Arc::new(Mutex::new(context)),
         }
+    }
+
+    /// Create a new RunTaskTool with a shared context.
+    ///
+    /// This allows the caller to retain a reference to the context
+    /// for updating model_override when the parent agent's model changes.
+    pub fn new_with_shared_context(context: Arc<Mutex<RunTaskContext>>) -> Self {
+        Self { context }
     }
 
     /// Get the shared context for streaming execution.
@@ -233,7 +245,11 @@ where
     let ctx = context.lock().await;
 
     // Find subagent config
-    let subagent_config = ctx.subagents.iter().find(|s| s.name == input.subagent_name);
+    let subagent_config = ctx
+        .subagents
+        .iter()
+        .find(|s| s.name == input.subagent_name)
+        .cloned();
 
     let Some(subagent_config) = subagent_config else {
         let available: Vec<_> = ctx.subagents.iter().map(|s| s.name.as_str()).collect();
@@ -295,6 +311,8 @@ where
     // Clone config and executor for the subagent
     let subagent_base_config = ctx.config.clone();
     let mut parent_executor = ctx.executor.clone();
+    let parent_model_override = ctx.model_override.clone();
+    let parent_default_model = ctx.default_model.clone();
 
     // Drop lock before async operations
     drop(ctx);
@@ -305,10 +323,23 @@ where
         parent_executor.apply_tool_policies(Some(tools), None);
     }
 
-    // Override model if subagent has one configured
-    if let Some(ref model) = subagent_agent_config.default_model {
-        // TODO: Apply model override to subagent
-        debug!(model = %model, "Subagent has custom model configured");
+    // Determine model override for subagent with priority:
+    // 1. SubagentConfig.model field (from agent.toml [[subagents]] section)
+    //    - Inherit: explicitly inherit from parent
+    //    - Custom(model): use specified model
+    // 2. AgentConfig.default_model (from subagent's own config file)
+    // 3. Parent agent current model (override or default)
+    let subagent_model_override = resolve_subagent_model(
+        &subagent_config,
+        &subagent_agent_config,
+        parent_model_override,
+        parent_default_model,
+    );
+    if matches!(subagent_config.model, Some(SubagentModelConfig::Inherit)) {
+        debug!("Subagent configured to inherit model from parent");
+    }
+    if let Some(ref model) = subagent_model_override {
+        debug!(model = %model, "Subagent will use model");
     }
 
     // Build subagent system prompt
@@ -323,6 +354,7 @@ where
         parent_executor,
         subagent_system_prompt,
         input.prompt,
+        subagent_model_override,
         cancel_token,
         on_event_boxed,
     )
@@ -374,6 +406,20 @@ fn build_subagent_system_prompt(config: &AgentConfig, input: &RunTaskInput) -> S
     )
 }
 
+fn resolve_subagent_model(
+    subagent_config: &SubagentConfig,
+    subagent_agent_config: &AgentConfig,
+    parent_model_override: Option<String>,
+    parent_default_model: Option<String>,
+) -> Option<String> {
+    let parent_model = parent_model_override.or(parent_default_model);
+    match &subagent_config.model {
+        Some(SubagentModelConfig::Inherit) => parent_model,
+        Some(SubagentModelConfig::Custom(model)) => Some(model.clone()),
+        None => subagent_agent_config.default_model.clone().or(parent_model),
+    }
+}
+
 /// Execute the subagent loop.
 ///
 /// Returns a boxed future to break type-level recursion that would otherwise
@@ -383,6 +429,7 @@ fn execute_subagent(
     executor: Executor,
     system_prompt: String,
     initial_prompt: String,
+    model_override: Option<String>,
     cancel_token: CancellationToken,
     on_event: SubagentEventCallback,
 ) -> BoxFuture<'static, Result<RunTaskOutput, String>> {
@@ -492,6 +539,7 @@ fn execute_subagent(
         // Create subagent and configure it
         let mut subagent = Agent::new(config);
         subagent.set_system_prompt(&system_prompt);
+        subagent.set_model_override(model_override);
 
         // Send initial message
         let user_message = Message::user(Content::Text(initial_prompt));
@@ -826,5 +874,81 @@ mod tests {
         assert_eq!(json["success"], true);
         assert_eq!(json["turns"], 3);
         assert!(json.get("error").is_none() || json["error"].is_null());
+    }
+
+    fn make_subagent_config(model: Option<SubagentModelConfig>) -> SubagentConfig {
+        SubagentConfig {
+            name: "subagent".to_string(),
+            path: None,
+            description: None,
+            system_prompt: None,
+            tools: None,
+            model,
+        }
+    }
+
+    #[test]
+    fn resolve_subagent_model_inherit_uses_parent_override() {
+        let subagent = make_subagent_config(Some(SubagentModelConfig::Inherit));
+        let subagent_agent_config = AgentConfig::default();
+
+        let result = resolve_subagent_model(
+            &subagent,
+            &subagent_agent_config,
+            Some("parent-override".to_string()),
+            Some("parent-default".to_string()),
+        );
+
+        assert_eq!(result, Some("parent-override".to_string()));
+    }
+
+    #[test]
+    fn resolve_subagent_model_inherit_uses_parent_default_when_no_override() {
+        let subagent = make_subagent_config(Some(SubagentModelConfig::Inherit));
+        let subagent_agent_config = AgentConfig::default();
+
+        let result = resolve_subagent_model(
+            &subagent,
+            &subagent_agent_config,
+            None,
+            Some("parent-default".to_string()),
+        );
+
+        assert_eq!(result, Some("parent-default".to_string()));
+    }
+
+    #[test]
+    fn resolve_subagent_model_prefers_subagent_default_model() {
+        let subagent = make_subagent_config(None);
+        let subagent_agent_config = AgentConfig {
+            default_model: Some("subagent-model".to_string()),
+            ..Default::default()
+        };
+
+        let result = resolve_subagent_model(
+            &subagent,
+            &subagent_agent_config,
+            Some("parent-override".to_string()),
+            Some("parent-default".to_string()),
+        );
+
+        assert_eq!(result, Some("subagent-model".to_string()));
+    }
+
+    #[test]
+    fn resolve_subagent_model_custom_wins() {
+        let subagent = make_subagent_config(Some(SubagentModelConfig::Custom(
+            "custom-model".to_string(),
+        )));
+        let subagent_agent_config = AgentConfig::default();
+
+        let result = resolve_subagent_model(
+            &subagent,
+            &subagent_agent_config,
+            Some("parent-override".to_string()),
+            Some("parent-default".to_string()),
+        );
+
+        assert_eq!(result, Some("custom-model".to_string()));
     }
 }
