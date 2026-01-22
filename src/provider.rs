@@ -2,7 +2,7 @@ mod anthropic;
 mod openai;
 mod types;
 
-use std::pin::Pin;
+use std::{pin::Pin, time::Duration};
 
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -72,6 +72,7 @@ impl Client {
                     .maybe_thinking(thinking.map(anthropic_api::Thinking::from))
                     .maybe_temperature(temperature)
                     .maybe_max_tokens(max_tokens)
+                    .retry_config(anthropic_retry_config(request_options))
                     .call()
                     .await
                     .whatever_context_display("failed to send messages")?;
@@ -116,6 +117,7 @@ impl Client {
                     .maybe_thinking(thinking.map(anthropic_api::Thinking::from))
                     .maybe_temperature(temperature)
                     .maybe_max_tokens(max_tokens)
+                    .retry_config(anthropic_retry_config(request_options))
                     .call()
                     .await
                     .whatever_context_display("failed to send messages stream")?;
@@ -164,6 +166,7 @@ impl Client {
                         thinking.map(anthropic_api::Thinking::from),
                         temperature,
                         max_tokens,
+                        anthropic_retry_config(request_options),
                     )
                     .await
                     .whatever_context_display("failed to request tool choice")?;
@@ -208,6 +211,7 @@ impl Client {
                         thinking.map(anthropic_api::Thinking::from),
                         temperature,
                         max_tokens,
+                        anthropic_retry_config(request_options),
                     )
                     .await
                     .whatever_context_display("failed to request tool choice stream")?;
@@ -229,5 +233,12 @@ impl Client {
                 Ok(Box::pin(stream))
             }
         }
+    }
+}
+
+fn anthropic_retry_config(request_options: &RequestOptions) -> anthropic_api::RetryConfig {
+    anthropic_api::RetryConfig {
+        max_attempts: request_options.retry_max_attempts,
+        max_delay: Duration::from_millis(request_options.retry_max_delay_ms),
     }
 }

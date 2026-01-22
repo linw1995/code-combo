@@ -2,8 +2,10 @@ use std::{
     collections::VecDeque,
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
 
+use backon::{ExponentialBuilder, Retryable};
 use bon::bon;
 use bytes::Bytes;
 use futures_core::Stream;
@@ -11,9 +13,9 @@ use reqwest::{StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use snafu::{Whatever, prelude::*};
-use tracing::trace;
+use tracing::{trace, warn};
 
-use crate::{Block, Message, Role, Tool};
+use crate::{Block, Message, RetryConfig, Role, Tool};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -602,60 +604,107 @@ pub async fn messages_stream(
     client: &reqwest::Client,
     base_url: &Url,
     mut req: MessagesRequest,
+    retry_config: RetryConfig,
 ) -> Result<MessagesStream, Whatever> {
     let url = base_url
         .join("v1/messages")
         .whatever_context("join url error")?;
     req.stream = Some(true);
-    let req = serde_json::to_string(&req).whatever_context("encode request error")?;
-    let resp = client
-        .post(url)
-        .body(req.clone())
-        .header("Content-Type", "application/json")
-        .header("Accept", "text/event-stream")
-        .send()
-        .await
-        .whatever_context("send request error")?;
+    let body = serde_json::to_string(&req).whatever_context("encode request error")?;
+    let client = client.clone();
+    let url_clone = url.clone();
+    let backoff = build_backoff(retry_config);
+    let result = (|| {
+        let body = body.clone();
+        let url = url_clone.clone();
+        let client = client.clone();
+        async move {
+            let body_clone = body.clone();
+            let resp = client
+                .post(url)
+                .body(body_clone)
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .send()
+                .await
+                .map_err(|err| AnthropicRequestError::transport("messages stream", err))?;
 
-    let status = resp.status();
-    trace!(req, ?status, "messages stream API invoked");
+            let status = resp.status();
+            trace!(req = %body, ?status, "messages stream API invoked");
 
-    if !status.is_success() {
-        let resp = resp.text().await.whatever_context("read response error")?;
-        let message = format_error_message(status, &resp);
-        whatever!("{message}")
-    }
+            if !status.is_success() {
+                let resp = resp
+                    .text()
+                    .await
+                    .map_err(|err| AnthropicRequestError::transport("messages stream", err))?;
+                return Err(AnthropicRequestError::http_status(status, resp));
+            }
 
-    Ok(MessagesStream::new(resp))
+            Ok(MessagesStream::new(resp))
+        }
+    })
+    .retry(backoff)
+    .when(AnthropicRequestError::is_retryable)
+    .notify(|err, dur| {
+        warn!(
+            error = %err,
+            delay = ?dur,
+            "retrying anthropic messages stream request"
+        );
+    })
+    .await;
+    result.map_err(AnthropicRequestError::into_whatever)
 }
 
 pub async fn messages(
     client: &reqwest::Client,
     base_url: &Url,
     req: MessagesRequest,
+    retry_config: RetryConfig,
 ) -> Result<MessagesResponse, Whatever> {
     let url = base_url
         .join("v1/messages")
         .whatever_context("join url error")?;
-    let req = serde_json::to_string(&req).whatever_context("encode request error")?;
-    let resp = client
-        .post(url)
-        .body(req.clone())
-        .header("Content-Type", "application/json")
-        .send()
-        .await
-        .whatever_context("send request error")?;
+    let body = serde_json::to_string(&req).whatever_context("encode request error")?;
+    let client = client.clone();
+    let url_clone = url.clone();
+    let backoff = build_backoff(retry_config);
+    let result = (|| {
+        let body = body.clone();
+        let url = url_clone.clone();
+        let client = client.clone();
+        async move {
+            let body_clone = body.clone();
+            let resp = client
+                .post(url)
+                .body(body_clone)
+                .header("Content-Type", "application/json")
+                .send()
+                .await
+                .map_err(|err| AnthropicRequestError::transport("messages", err))?;
 
-    let status = resp.status();
-    let resp = resp.text().await.whatever_context("read response error")?;
-    trace!(req, resp, ?status, "messages API invoked");
+            let status = resp.status();
+            let resp_body = resp
+                .text()
+                .await
+                .map_err(|err| AnthropicRequestError::transport("messages", err))?;
+            trace!(req = %body, resp = %resp_body, ?status, "messages API invoked");
 
-    if !status.is_success() {
-        let message = format_error_message(status, &resp);
-        whatever!("{message}")
-    }
+            if !status.is_success() {
+                return Err(AnthropicRequestError::http_status(status, resp_body));
+            }
 
-    serde_json::from_str(&resp).whatever_context("decode response error")
+            serde_json::from_str(&resp_body)
+                .map_err(|err| AnthropicRequestError::decode("messages", err))
+        }
+    })
+    .retry(backoff)
+    .when(AnthropicRequestError::is_retryable)
+    .notify(|err, dur| {
+        warn!(error = %err, delay = ?dur, "retrying anthropic messages request");
+    })
+    .await;
+    result.map_err(AnthropicRequestError::into_whatever)
 }
 
 fn format_error_message(status: StatusCode, body: &str) -> String {
@@ -674,6 +723,108 @@ fn format_error_message(status: StatusCode, body: &str) -> String {
             message
         }
         Err(_) => format!("request failed with status {status}: {body}"),
+    }
+}
+
+#[derive(Debug)]
+enum AnthropicRequestError {
+    Transport {
+        context: &'static str,
+        source: reqwest::Error,
+    },
+    HttpStatus {
+        status: StatusCode,
+        body: String,
+    },
+    Decode {
+        context: &'static str,
+        message: String,
+    },
+}
+
+impl AnthropicRequestError {
+    fn transport(context: &'static str, err: reqwest::Error) -> Self {
+        Self::Transport {
+            context,
+            source: err,
+        }
+    }
+
+    fn http_status(status: StatusCode, body: String) -> Self {
+        Self::HttpStatus { status, body }
+    }
+
+    fn decode(context: &'static str, err: serde_json::Error) -> Self {
+        Self::Decode {
+            context,
+            message: err.to_string(),
+        }
+    }
+
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::Transport { source, .. } => source.is_timeout() || source.is_connect(),
+            Self::HttpStatus { status, .. } => is_retryable_status(*status),
+            Self::Decode { .. } => false,
+        }
+    }
+
+    fn into_whatever(self) -> Whatever {
+        match self {
+            Self::Transport { context, source } => <Whatever as snafu::FromString>::without_source(
+                format!("send {context} request error: {source}"),
+            ),
+            Self::HttpStatus { status, body } => {
+                <Whatever as snafu::FromString>::without_source(format_error_message(status, &body))
+            }
+            Self::Decode { context, message } => <Whatever as snafu::FromString>::without_source(
+                format!("decode {context} response error: {message}"),
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for AnthropicRequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transport { source, .. } => write!(f, "transport error: {source}"),
+            Self::HttpStatus { status, .. } => write!(f, "http status {status}"),
+            Self::Decode { message, .. } => write!(f, "decode error: {message}"),
+        }
+    }
+}
+
+fn is_retryable_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::INTERNAL_SERVER_ERROR
+            | StatusCode::SERVICE_UNAVAILABLE
+    )
+}
+
+fn build_backoff(retry: RetryConfig) -> ExponentialBuilder {
+    let mut builder = ExponentialBuilder::default()
+        .with_jitter()
+        .with_max_times(retry.max_attempts);
+    if retry.max_delay == Duration::from_millis(0) {
+        builder = builder.without_max_delay();
+    } else {
+        builder = builder.with_max_delay(retry.max_delay);
+    }
+    builder
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    #[test]
+    fn retryable_status_codes() {
+        assert!(is_retryable_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_retryable_status(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(is_retryable_status(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(!is_retryable_status(StatusCode::BAD_REQUEST));
     }
 }
 
@@ -808,7 +959,7 @@ mod tests {
         use snafu::Whatever;
 
         use crate::{
-            Message, MessagesRequest,
+            Message, MessagesRequest, RetryConfig,
             client::{messages::messages, tests::*},
         };
 
@@ -836,6 +987,7 @@ mod tests {
                     .messages(msgs)
                     .model(&model)
                     .build(),
+                RetryConfig::default(),
             )
             .await?;
             println!("{resp:?}");

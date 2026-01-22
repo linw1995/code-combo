@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
 
 use futures_core::Stream;
@@ -50,7 +51,8 @@ pub async fn messages(
         thinking,
         request_options,
     )?;
-    let response = client.chat_completions(request).await?;
+    let retry_config = retry_config_from_options(request_options);
+    let response = client.chat_completions(request, retry_config).await?;
     Ok(response_into_messages(response))
 }
 
@@ -71,8 +73,18 @@ pub async fn messages_stream(
         thinking,
         request_options,
     )?;
-    let stream = client.chat_completions_stream(request).await?;
+    let retry_config = retry_config_from_options(request_options);
+    let stream = client
+        .chat_completions_stream(request, retry_config)
+        .await?;
     Ok(OpenAIStream::new(stream))
+}
+
+fn retry_config_from_options(request_options: &RequestOptions) -> openai_api::RetryConfig {
+    openai_api::RetryConfig {
+        max_attempts: request_options.retry_max_attempts,
+        max_delay: Duration::from_millis(request_options.retry_max_delay_ms),
+    }
 }
 
 fn build_request(

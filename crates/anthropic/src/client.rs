@@ -1,5 +1,7 @@
 pub mod messages;
 
+use std::time::Duration;
+
 use reqwest::{
     Url,
     header::{HeaderMap, HeaderValue},
@@ -17,6 +19,21 @@ pub struct Client {
     model: String,
     base_url: Url,
     cli: reqwest::Client,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RetryConfig {
+    pub max_attempts: usize,
+    pub max_delay: Duration,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            max_delay: Duration::from_secs(60),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -50,6 +67,7 @@ impl Client {
         thinking: Option<Thinking>,
         temperature: Option<f64>,
         max_tokens: Option<usize>,
+        retry_config: RetryConfig,
     ) -> Result<messages::MessagesResponse, Whatever> {
         let req = build_request(
             &self.model,
@@ -61,7 +79,7 @@ impl Client {
             temperature,
             max_tokens,
         );
-        messages::messages(&self.cli, &self.base_url, req).await
+        messages::messages(&self.cli, &self.base_url, req, retry_config).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -74,6 +92,7 @@ impl Client {
         thinking: Option<Thinking>,
         temperature: Option<f64>,
         max_tokens: Option<usize>,
+        retry_config: RetryConfig,
     ) -> Result<messages::MessagesStream, Whatever> {
         let req = build_request(
             &self.model,
@@ -85,7 +104,7 @@ impl Client {
             temperature,
             max_tokens,
         );
-        messages::messages_stream(&self.cli, &self.base_url, req).await
+        messages::messages_stream(&self.cli, &self.base_url, req, retry_config).await
     }
 }
 
@@ -143,6 +162,7 @@ pub struct MessagesBuilder<'a> {
     thinking: Option<Thinking>,
     temperature: Option<f64>,
     max_tokens: Option<usize>,
+    retry_config: RetryConfig,
 }
 
 impl<'a> MessagesBuilder<'a> {
@@ -155,6 +175,7 @@ impl<'a> MessagesBuilder<'a> {
             thinking: None,
             temperature: None,
             max_tokens: None,
+            retry_config: RetryConfig::default(),
         }
     }
 
@@ -185,6 +206,11 @@ impl<'a> MessagesBuilder<'a> {
 
     pub fn maybe_max_tokens(mut self, max_tokens: Option<usize>) -> Self {
         self.max_tokens = max_tokens;
+        self
+    }
+
+    pub fn retry_config(mut self, retry_config: RetryConfig) -> Self {
+        self.retry_config = retry_config;
         self
     }
 
@@ -199,7 +225,13 @@ impl<'a> MessagesBuilder<'a> {
             self.temperature,
             self.max_tokens,
         );
-        messages::messages(&self.client.cli, &self.client.base_url, req).await
+        messages::messages(
+            &self.client.cli,
+            &self.client.base_url,
+            req,
+            self.retry_config,
+        )
+        .await
     }
 }
 
@@ -211,6 +243,7 @@ pub struct MessagesStreamBuilder<'a> {
     thinking: Option<Thinking>,
     temperature: Option<f64>,
     max_tokens: Option<usize>,
+    retry_config: RetryConfig,
 }
 
 impl<'a> MessagesStreamBuilder<'a> {
@@ -223,6 +256,7 @@ impl<'a> MessagesStreamBuilder<'a> {
             thinking: None,
             temperature: None,
             max_tokens: None,
+            retry_config: RetryConfig::default(),
         }
     }
 
@@ -256,6 +290,11 @@ impl<'a> MessagesStreamBuilder<'a> {
         self
     }
 
+    pub fn retry_config(mut self, retry_config: RetryConfig) -> Self {
+        self.retry_config = retry_config;
+        self
+    }
+
     pub async fn call(self) -> Result<messages::MessagesStream, Whatever> {
         let req = build_request(
             &self.client.model,
@@ -267,7 +306,13 @@ impl<'a> MessagesStreamBuilder<'a> {
             self.temperature,
             self.max_tokens,
         );
-        messages::messages_stream(&self.client.cli, &self.client.base_url, req).await
+        messages::messages_stream(
+            &self.client.cli,
+            &self.client.base_url,
+            req,
+            self.retry_config,
+        )
+        .await
     }
 }
 

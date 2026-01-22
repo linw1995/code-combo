@@ -49,6 +49,10 @@ pub struct ModelRequestConfig {
     pub max_tokens: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_budget_tokens: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_max_attempts: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_max_delay_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -58,7 +62,7 @@ pub struct ModelPreset {
     pub options: ModelRequestConfig,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RequestOptions {
     pub disable_tools: bool,
     pub disable_tool_choice: bool,
@@ -74,6 +78,8 @@ pub struct RequestOptions {
     pub temperature: Option<f32>,
     pub max_tokens: Option<usize>,
     pub thinking_budget_tokens: Option<usize>,
+    pub retry_max_attempts: usize,
+    pub retry_max_delay_ms: u64,
 }
 
 impl RequestOptions {
@@ -119,6 +125,38 @@ impl RequestOptions {
         }
         if let Some(value) = override_config.thinking_budget_tokens {
             self.thinking_budget_tokens = Some(value);
+        }
+        if let Some(value) = override_config.retry_max_attempts {
+            self.retry_max_attempts = value;
+        }
+        if let Some(value) = override_config.retry_max_delay_ms {
+            self.retry_max_delay_ms = value;
+        }
+    }
+}
+
+const DEFAULT_RETRY_MAX_ATTEMPTS: usize = 3;
+const DEFAULT_RETRY_MAX_DELAY_MS: u64 = 60_000;
+
+impl Default for RequestOptions {
+    fn default() -> Self {
+        Self {
+            disable_tools: false,
+            disable_tool_choice: false,
+            tool_choice_fallback: false,
+            thinking_blocks: ThinkingBlocksMode::default(),
+            ensure_toolcall_thinking: false,
+            disable_stream: false,
+            stringify_nested_tool_inputs: false,
+            offload_combo_reply: None,
+            combo_reply_retries: 0,
+            context_window: None,
+            can_reason: None,
+            temperature: None,
+            max_tokens: None,
+            thinking_budget_tokens: None,
+            retry_max_attempts: DEFAULT_RETRY_MAX_ATTEMPTS,
+            retry_max_delay_ms: DEFAULT_RETRY_MAX_DELAY_MS,
         }
     }
 }
