@@ -238,13 +238,33 @@ pub struct ToolsConfig {
 /// - `inherit`: Inherit the model from the parent agent
 /// - Custom model name: Use a specific model (e.g., "claude-3-opus")
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(try_from = "String", into = "String")]
 pub enum SubagentModelConfig {
     /// Inherit model configuration from parent agent.
-    #[serde(rename = "inherit")]
     Inherit,
     /// Use a custom model.
     Custom(String),
+}
+
+impl TryFrom<String> for SubagentModelConfig {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.eq_ignore_ascii_case("inherit") {
+            Ok(SubagentModelConfig::Inherit)
+        } else {
+            Ok(SubagentModelConfig::Custom(value))
+        }
+    }
+}
+
+impl From<SubagentModelConfig> for String {
+    fn from(value: SubagentModelConfig) -> Self {
+        match value {
+            SubagentModelConfig::Inherit => "inherit".to_string(),
+            SubagentModelConfig::Custom(model) => model,
+        }
+    }
 }
 
 /// Subagent configuration.
