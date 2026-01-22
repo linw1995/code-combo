@@ -232,6 +232,41 @@ pub struct ToolsConfig {
     pub deny: Option<Vec<String>>,
 }
 
+/// Model configuration for subagents.
+///
+/// Supports two modes:
+/// - `inherit`: Inherit the model from the parent agent
+/// - Custom model name: Use a specific model (e.g., "claude-3-opus")
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum SubagentModelConfig {
+    /// Inherit model configuration from parent agent.
+    Inherit,
+    /// Use a custom model.
+    Custom(String),
+}
+
+impl TryFrom<String> for SubagentModelConfig {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.eq_ignore_ascii_case("inherit") {
+            Ok(SubagentModelConfig::Inherit)
+        } else {
+            Ok(SubagentModelConfig::Custom(value))
+        }
+    }
+}
+
+impl From<SubagentModelConfig> for String {
+    fn from(value: SubagentModelConfig) -> Self {
+        match value {
+            SubagentModelConfig::Inherit => "inherit".to_string(),
+            SubagentModelConfig::Custom(model) => model,
+        }
+    }
+}
+
 /// Subagent configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SubagentConfig {
@@ -255,6 +290,12 @@ pub struct SubagentConfig {
     /// Tools available to this subagent.
     #[serde(default)]
     pub tools: Option<Vec<String>>,
+
+    /// Model configuration for this subagent.
+    /// - `inherit`: Inherit model from parent agent (default behavior if not specified)
+    /// - Custom model name: Use a specific model
+    #[serde(default)]
+    pub model: Option<SubagentModelConfig>,
 }
 
 /// Safe commands configuration.
@@ -420,6 +461,53 @@ path = "./agents/reviewer.toml"
         );
         assert_eq!(subagents[1].name, "reviewer");
         assert!(subagents[1].description.is_none());
+    }
+
+    #[test]
+    fn parse_subagent_model_inherit() {
+        let toml = r#"
+[agent]
+name = "main-agent"
+
+[[agent.subagents]]
+name = "coder"
+model = "inherit"
+"#;
+        let config = AgentConfig::from_toml(toml).expect("parse config");
+        let subagents = config.subagents.expect("subagents should be present");
+        assert_eq!(subagents[0].model, Some(SubagentModelConfig::Inherit));
+    }
+
+    #[test]
+    fn parse_subagent_model_custom() {
+        let toml = r#"
+[agent]
+name = "main-agent"
+
+[[agent.subagents]]
+name = "coder"
+model = "claude-3-opus"
+"#;
+        let config = AgentConfig::from_toml(toml).expect("parse config");
+        let subagents = config.subagents.expect("subagents should be present");
+        assert_eq!(
+            subagents[0].model,
+            Some(SubagentModelConfig::Custom("claude-3-opus".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_subagent_model_none() {
+        let toml = r#"
+[agent]
+name = "main-agent"
+
+[[agent.subagents]]
+name = "coder"
+"#;
+        let config = AgentConfig::from_toml(toml).expect("parse config");
+        let subagents = config.subagents.expect("subagents should be present");
+        assert!(subagents[0].model.is_none());
     }
 
     #[test]
