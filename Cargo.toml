@@ -102,3 +102,4 @@ time = { workspace = true, features = ["formatting"] }
 
 [patch.crates-io]
 tree-sitter-diff = { git = "https://github.com/tree-sitter-grammars/tree-sitter-diff.git", tag = "v0.1.0" }
+tui-textarea = { git = "https://github.com/phsym/tui-textarea.git", rev = "e2ec4d37eb5d638a9a2237e0145bcf908494a329" }
