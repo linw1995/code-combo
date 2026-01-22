@@ -346,7 +346,15 @@ impl<'a> Bash<'a> {
                 *requiring_confirmation = value;
             }
         }
-        self.rebuild_input();
+        if value {
+            // Need to rebuild input to add overlays for unsafe ranges
+            self.rebuild_input();
+        } else {
+            // Just clear overlays without rebuilding the entire widget.
+            // This preserves the existing syntax highlighting and prevents
+            // the visual flicker that would occur if we created a new placeholder.
+            self.input.clear_overlays();
+        }
     }
 
     fn push_chunk(&mut self, chunk: OutputChunk) {
