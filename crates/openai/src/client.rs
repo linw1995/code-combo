@@ -1,6 +1,7 @@
 use std::{
     collections::VecDeque,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
     time::Duration,
 };
@@ -24,10 +25,21 @@ pub struct Client {
     has_version_prefix: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
+pub struct RetryAttempt {
+    pub attempt: usize,
+    pub max_attempts: usize,
+    pub delay: Duration,
+    pub error: String,
+}
+
+pub type RetryNotifier = Arc<dyn Fn(RetryAttempt) + Send + Sync>;
+
+#[derive(Clone)]
 pub struct RetryConfig {
     pub max_attempts: usize,
     pub max_delay: Duration,
+    pub notifier: Option<RetryNotifier>,
 }
 
 impl Default for RetryConfig {
@@ -35,6 +47,7 @@ impl Default for RetryConfig {
         Self {
             max_attempts: 3,
             max_delay: Duration::from_secs(60),
+            notifier: None,
         }
     }
 }
@@ -108,6 +121,9 @@ impl Client {
         let cli = self.cli.clone();
         let request = request;
         let url_clone = url.clone();
+        let notify = retry.notifier.clone();
+        let max_attempts = retry.max_attempts;
+        let mut attempts = 0usize;
         let backoff = build_backoff(retry);
         let result =
             (|| {
@@ -134,7 +150,16 @@ impl Client {
             })
             .retry(backoff)
             .when(OpenAIRequestError::is_retryable)
-            .notify(|err, dur| {
+            .notify(move |err, dur| {
+                attempts = attempts.saturating_add(1);
+                if let Some(notify) = notify.as_ref() {
+                    notify(RetryAttempt {
+                        attempt: attempts,
+                        max_attempts,
+                        delay: dur,
+                        error: err.to_string(),
+                    });
+                }
                 warn!(error = %err, delay = ?dur, "retrying openai chat completions request");
             })
             .await;
@@ -158,6 +183,9 @@ impl Client {
         let cli = self.cli.clone();
         let request = request;
         let url_clone = url.clone();
+        let notify = retry.notifier.clone();
+        let max_attempts = retry.max_attempts;
+        let mut attempts = 0usize;
         let backoff = build_backoff(retry);
         let result = (|| {
             let request = request.clone();
@@ -181,7 +209,16 @@ impl Client {
         })
         .retry(backoff)
         .when(OpenAIRequestError::is_retryable)
-        .notify(|err, dur| {
+        .notify(move |err, dur| {
+            attempts = attempts.saturating_add(1);
+            if let Some(notify) = notify.as_ref() {
+                notify(RetryAttempt {
+                    attempt: attempts,
+                    max_attempts,
+                    delay: dur,
+                    error: err.to_string(),
+                });
+            }
             warn!(error = %err, delay = ?dur, "retrying openai chat completions stream request");
         })
         .await;

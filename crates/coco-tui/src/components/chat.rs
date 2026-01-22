@@ -5,8 +5,9 @@ use code_combo::tools::{
 };
 use code_combo::{
     Agent, Block as ChatBlock, ChatResponse, ChatStreamUpdate, Config, Content as ChatContent,
-    Message as ChatMessage, Output, RuntimeOverrides, Starter, StopReason, TextEdit, ToolUse,
-    UsageStats, discover_starters, load_runtime_overrides, save_runtime_overrides,
+    Message as ChatMessage, Output, RetryAttempt, RetryNotifier, RetryUpdate, RuntimeOverrides,
+    Starter, StopReason, TextEdit, ToolUse, UsageStats, discover_starters, load_runtime_overrides,
+    save_runtime_overrides,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -68,6 +69,7 @@ pub struct Chat<'a> {
     combo_tool_messages: HashSet<String>,
     pending_combo_tool_events: HashMap<String, Vec<ComboEvent>>,
     last_usage: Option<UsageStats>,
+    retry_status: Option<RetryAttempt>,
 
     token_schedule_session_save: Option<CancellationToken>,
     cancellation_guard: CancellationGuard,
@@ -218,6 +220,10 @@ impl Chat<'static> {
     pub fn new(config: Config) -> Self {
         let mut agent = Agent::new(config);
         agent.set_ignore_workspace_scripts(global::ignore_workspace_scripts());
+        agent.set_retry_notifier(Some(RetryNotifier::new(|update| {
+            let tx = global::event_tx();
+            tx.send(AnswerEvent::RetryUpdate { update }.into()).ok();
+        })));
 
         Self {
             state: State::default(),
@@ -234,6 +240,7 @@ impl Chat<'static> {
             combo_tool_messages: HashSet::new(),
             pending_combo_tool_events: HashMap::new(),
             last_usage: None,
+            retry_status: None,
             token_schedule_session_save: None,
             cancellation_guard: CancellationGuard::default(),
         }
@@ -841,7 +848,11 @@ impl Chat<'static> {
         };
         block = block
             .title_bottom(Line::from(""))
-            .title_bottom(self.widget_state_indicator())
+            .title_bottom(self.widget_state_indicator());
+        if let Some(line) = self.retry_indicator_line() {
+            block = block.title_bottom(line);
+        }
+        block = block
             .title_bottom(self.model_indicator())
             .title_bottom(self.auto_accept_indicator())
             .title_bottom(self.thinking_indicator());
@@ -888,6 +899,22 @@ impl Chat<'static> {
             format!(" {message} "),
             theme.ui.status_warning,
         )))
+    }
+
+    fn retry_indicator_line(&self) -> Option<Line<'static>> {
+        let retry = self.retry_status.as_ref()?;
+        let delay_ms = retry.delay.as_millis();
+        let delay_text = if delay_ms >= 1000 {
+            format!("{:.1}s", retry.delay.as_secs_f64())
+        } else {
+            format!("{delay_ms}ms")
+        };
+        let theme = global::theme();
+        let text = format!(
+            " retrying in {delay_text} (attempt {}/{}) ",
+            retry.attempt, retry.max_attempts
+        );
+        Some(Line::from(Span::styled(text, theme.ui.status_warning)))
     }
 
     fn widget_state_indicator(&self) -> Line<'_> {
@@ -1265,6 +1292,17 @@ impl Component for Chat<'static> {
                     Some(total) => add_usage(total, usage),
                     None => {
                         self.last_usage = Some(usage.clone());
+                    }
+                }
+                global::signal_dirty();
+            }
+            Event::Answer(AnswerEvent::RetryUpdate { update }) => {
+                match update {
+                    RetryUpdate::Attempt(attempt) => {
+                        self.retry_status = Some(attempt.clone());
+                    }
+                    RetryUpdate::Finished { .. } => {
+                        self.retry_status = None;
                     }
                 }
                 global::signal_dirty();

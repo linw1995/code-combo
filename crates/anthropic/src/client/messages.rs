@@ -15,7 +15,7 @@ use serde_json::{Map, Value};
 use snafu::{Whatever, prelude::*};
 use tracing::{trace, warn};
 
-use crate::{Block, Message, RetryConfig, Role, Tool};
+use crate::{Block, Message, RetryAttempt, RetryConfig, Role, Tool};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -613,6 +613,9 @@ pub async fn messages_stream(
     let body = serde_json::to_string(&req).whatever_context("encode request error")?;
     let client = client.clone();
     let url_clone = url.clone();
+    let notify = retry_config.notifier.clone();
+    let max_attempts = retry_config.max_attempts;
+    let mut attempts = 0usize;
     let backoff = build_backoff(retry_config);
     let result = (|| {
         let body = body.clone();
@@ -645,7 +648,16 @@ pub async fn messages_stream(
     })
     .retry(backoff)
     .when(AnthropicRequestError::is_retryable)
-    .notify(|err, dur| {
+    .notify(move |err, dur| {
+        attempts = attempts.saturating_add(1);
+        if let Some(notify) = notify.as_ref() {
+            notify(RetryAttempt {
+                attempt: attempts,
+                max_attempts,
+                delay: dur,
+                error: err.to_string(),
+            });
+        }
         warn!(
             error = %err,
             delay = ?dur,
@@ -668,6 +680,9 @@ pub async fn messages(
     let body = serde_json::to_string(&req).whatever_context("encode request error")?;
     let client = client.clone();
     let url_clone = url.clone();
+    let notify = retry_config.notifier.clone();
+    let max_attempts = retry_config.max_attempts;
+    let mut attempts = 0usize;
     let backoff = build_backoff(retry_config);
     let result = (|| {
         let body = body.clone();
@@ -700,7 +715,16 @@ pub async fn messages(
     })
     .retry(backoff)
     .when(AnthropicRequestError::is_retryable)
-    .notify(|err, dur| {
+    .notify(move |err, dur| {
+        attempts = attempts.saturating_add(1);
+        if let Some(notify) = notify.as_ref() {
+            notify(RetryAttempt {
+                attempt: attempts,
+                max_attempts,
+                delay: dur,
+                error: err.to_string(),
+            });
+        }
         warn!(error = %err, delay = ?dur, "retrying anthropic messages request");
     })
     .await;

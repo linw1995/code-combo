@@ -11,7 +11,10 @@ use snafu::Whatever;
 use ::anthropic as anthropic_api;
 use ::openai as openai_api;
 
-use crate::{ProviderConfig, ProviderKind, RequestOptions, Result, ResultDisplayExt};
+use crate::{
+    ProviderConfig, ProviderKind, RequestOptions, Result, ResultDisplayExt,
+    RetryAttempt as CoreRetryAttempt, RetryUpdate,
+};
 
 pub use types::*;
 
@@ -55,7 +58,7 @@ impl Client {
         thinking: Option<Thinking>,
         request_options: &RequestOptions,
     ) -> Result<MessagesResponse> {
-        match self {
+        let result: Result<MessagesResponse> = match self {
             Client::Anthropic(client) => {
                 let temperature = request_options.temperature.map(f64::from);
                 let max_tokens = request_options.max_tokens;
@@ -89,7 +92,9 @@ impl Client {
             )
             .await
             .whatever_context_display("failed to send messages"),
-        }
+        };
+        notify_retry_finished(request_options, result.is_ok());
+        result
     }
 
     pub async fn messages_stream(
@@ -100,7 +105,7 @@ impl Client {
         thinking: Option<Thinking>,
         request_options: &RequestOptions,
     ) -> Result<MessagesStream> {
-        match self {
+        let result: Result<MessagesStream> = match self {
             Client::Anthropic(client) => {
                 let temperature = request_options.temperature.map(f64::from);
                 let max_tokens = request_options.max_tokens;
@@ -138,7 +143,9 @@ impl Client {
                 .whatever_context_display("failed to send messages stream")?;
                 Ok(Box::pin(stream))
             }
-        }
+        };
+        notify_retry_finished(request_options, result.is_ok());
+        result
     }
 
     pub async fn messages_with_tool_choice(
@@ -150,7 +157,7 @@ impl Client {
         thinking: Option<Thinking>,
         request_options: &RequestOptions,
     ) -> Result<MessagesResponse> {
-        match self {
+        let result: Result<MessagesResponse> = match self {
             Client::Anthropic(client) => {
                 let temperature = request_options.temperature.map(f64::from);
                 let max_tokens = request_options.max_tokens;
@@ -183,7 +190,9 @@ impl Client {
             )
             .await
             .whatever_context_display("failed to request tool choice"),
-        }
+        };
+        notify_retry_finished(request_options, result.is_ok());
+        result
     }
 
     pub async fn messages_stream_with_tool_choice(
@@ -195,7 +204,7 @@ impl Client {
         thinking: Option<Thinking>,
         request_options: &RequestOptions,
     ) -> Result<MessagesStream> {
-        match self {
+        let result: Result<MessagesStream> = match self {
             Client::Anthropic(client) => {
                 let temperature = request_options.temperature.map(f64::from);
                 let max_tokens = request_options.max_tokens;
@@ -232,13 +241,34 @@ impl Client {
                 .whatever_context_display("failed to request tool choice stream")?;
                 Ok(Box::pin(stream))
             }
-        }
+        };
+        notify_retry_finished(request_options, result.is_ok());
+        result
+    }
+}
+
+fn notify_retry_finished(request_options: &RequestOptions, success: bool) {
+    if let Some(notifier) = &request_options.retry_notifier {
+        notifier.notify(RetryUpdate::Finished { success });
     }
 }
 
 fn anthropic_retry_config(request_options: &RequestOptions) -> anthropic_api::RetryConfig {
+    let notifier = request_options.retry_notifier.clone().map(|notifier| {
+        let inner: anthropic_api::RetryNotifier =
+            std::sync::Arc::new(move |attempt: anthropic_api::RetryAttempt| {
+                notifier.notify(RetryUpdate::Attempt(CoreRetryAttempt {
+                    attempt: attempt.attempt,
+                    max_attempts: attempt.max_attempts,
+                    delay: attempt.delay,
+                    error: attempt.error,
+                }));
+            });
+        inner
+    });
     anthropic_api::RetryConfig {
         max_attempts: request_options.retry_max_attempts,
         max_delay: Duration::from_millis(request_options.retry_max_delay_ms),
+        notifier,
     }
 }

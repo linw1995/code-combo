@@ -56,6 +56,7 @@ pub struct Agent {
     thinking_enabled: bool,
     thinking_cleanup_pending: bool,
     model_override: Option<String>,
+    retry_notifier: Option<crate::RetryNotifier>,
 
     /// Full agent configuration loaded at initialization
     agent_config: AgentConfig,
@@ -375,6 +376,7 @@ impl Agent {
             thinking_enabled: false,
             thinking_cleanup_pending: false,
             model_override: None,
+            retry_notifier: None,
             agent_config,
             combo_context,
             run_task_context,
@@ -472,6 +474,10 @@ impl Agent {
         self.update_run_task_context(move |ctx| {
             ctx.model_override = model;
         });
+    }
+
+    pub fn set_retry_notifier(&mut self, notifier: Option<crate::RetryNotifier>) {
+        self.retry_notifier = notifier;
     }
 
     pub fn set_ignore_workspace_scripts(&mut self, ignore: bool) {
@@ -1128,6 +1134,7 @@ impl Agent {
                 let model = Self::resolve_model(provider, selected_model);
                 let mut options = self.config.request_options_for_model(&model);
                 options.apply_override(&provider.request_overrides);
+                options.retry_notifier = self.retry_notifier.clone();
                 options
             }
             Err(_) => RequestOptions::default(),

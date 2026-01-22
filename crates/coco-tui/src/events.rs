@@ -1,5 +1,5 @@
 use code_combo::{
-    OutputChunk, Starter, TextEdit, ThinkingConfig, ToolUse, UsageStats,
+    OutputChunk, RetryUpdate, Starter, TextEdit, ThinkingConfig, ToolUse, UsageStats,
     tools::{ComboEvent as ComboToolEvent, Final, SubagentEvent},
 };
 use crossterm::event::{KeyEvent, MouseEvent};
@@ -46,6 +46,9 @@ pub enum AnswerEvent {
         index: usize,
         kind: BotStreamKind,
         text: String,
+    },
+    RetryUpdate {
+        update: RetryUpdate,
     },
     Cancelled,
     Usage {

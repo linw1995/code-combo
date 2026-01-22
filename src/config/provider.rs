@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::config::EnvString;
+use crate::{RetryNotifier, config::EnvString};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -80,6 +80,7 @@ pub struct RequestOptions {
     pub thinking_budget_tokens: Option<usize>,
     pub retry_max_attempts: usize,
     pub retry_max_delay_ms: u64,
+    pub retry_notifier: Option<RetryNotifier>,
 }
 
 impl RequestOptions {
@@ -157,6 +158,7 @@ impl Default for RequestOptions {
             thinking_budget_tokens: None,
             retry_max_attempts: DEFAULT_RETRY_MAX_ATTEMPTS,
             retry_max_delay_ms: DEFAULT_RETRY_MAX_DELAY_MS,
+            retry_notifier: None,
         }
     }
 }

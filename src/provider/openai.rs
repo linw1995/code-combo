@@ -11,12 +11,12 @@ use snafu::Whatever;
 
 use ::openai as openai_api;
 
-use crate::RequestOptions;
 use crate::provider::types::{
     Block, Content, ContentBlockDelta, Message, MessageDelta, MessagesResponse,
     MessagesStreamEvent, Role, StopReason, StreamErrorDetail, Thinking, Tool, ToolChoice, ToolUse,
     UsageStats,
 };
+use crate::{RequestOptions, RetryAttempt as CoreRetryAttempt, RetryUpdate};
 
 struct ToolCallState {
     #[allow(dead_code)]
@@ -81,9 +81,22 @@ pub async fn messages_stream(
 }
 
 fn retry_config_from_options(request_options: &RequestOptions) -> openai_api::RetryConfig {
+    let notifier = request_options.retry_notifier.clone().map(|notifier| {
+        let inner: openai_api::RetryNotifier =
+            std::sync::Arc::new(move |attempt: openai_api::RetryAttempt| {
+                notifier.notify(RetryUpdate::Attempt(CoreRetryAttempt {
+                    attempt: attempt.attempt,
+                    max_attempts: attempt.max_attempts,
+                    delay: attempt.delay,
+                    error: attempt.error,
+                }));
+            });
+        inner
+    });
     openai_api::RetryConfig {
         max_attempts: request_options.retry_max_attempts,
         max_delay: Duration::from_millis(request_options.retry_max_delay_ms),
+        notifier,
     }
 }
 

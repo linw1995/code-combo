@@ -1,6 +1,6 @@
 pub mod messages;
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use reqwest::{
     Url,
@@ -21,10 +21,21 @@ pub struct Client {
     cli: reqwest::Client,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
+pub struct RetryAttempt {
+    pub attempt: usize,
+    pub max_attempts: usize,
+    pub delay: Duration,
+    pub error: String,
+}
+
+pub type RetryNotifier = Arc<dyn Fn(RetryAttempt) + Send + Sync>;
+
+#[derive(Clone)]
 pub struct RetryConfig {
     pub max_attempts: usize,
     pub max_delay: Duration,
+    pub notifier: Option<RetryNotifier>,
 }
 
 impl Default for RetryConfig {
@@ -32,6 +43,7 @@ impl Default for RetryConfig {
         Self {
             max_attempts: 3,
             max_delay: Duration::from_secs(60),
+            notifier: None,
         }
     }
 }
