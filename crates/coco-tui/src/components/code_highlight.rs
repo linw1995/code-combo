@@ -178,6 +178,22 @@ impl<'a> CodeHighlight<'a> {
         }
     }
 
+    /// Clears all overlays without rebuilding the widget from scratch.
+    /// The existing highlighted widget is preserved until the next async rebuild completes.
+    /// This prevents the visual flicker that would occur if we created a new placeholder widget.
+    pub fn clear_overlays(&mut self) {
+        if self.state.overlays.is_empty() {
+            return;
+        }
+        self.state.overlays.clear();
+        self.source_dirty = true;
+        if let Some(width) = self.last_width
+            && self.pending_rx.is_none()
+        {
+            self.spawn_build(width);
+        }
+    }
+
     fn build_placeholder_widget(source: &str, base_style: Option<Style>) -> Paragraph<'static> {
         let base_style = base_style.unwrap_or_default();
         let lines = source
