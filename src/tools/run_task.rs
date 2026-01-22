@@ -742,7 +742,7 @@ fn summarize_tool_input(tool_name: &str, input: &Value) -> String {
             }
         }
         "read" => {
-            if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
+            if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
                 truncate_str(path, MAX_LEN)
             } else {
                 "(no path)".to_string()
@@ -756,7 +756,7 @@ fn summarize_tool_input(tool_name: &str, input: &Value) -> String {
             }
         }
         "str_replace" => {
-            if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
+            if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
                 truncate_str(path, MAX_LEN)
             } else {
                 "(no path)".to_string()
