@@ -33,6 +33,7 @@ use time::OffsetDateTime;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
+use uuid::Uuid;
 
 use super::{
     Action, AnswerEvent, AskEvent, BotMessage, BotStreamKind, CacheInvalidation, Combo,
@@ -488,17 +489,7 @@ impl Chat<'static> {
         tokio::task::spawn(task_combo_discover(cancel_token));
     }
 
-    fn spawn_combo_execute(&mut self, name: String, args: Vec<String>) {
-        // Generate a unique tool use id
-        let id = format!(
-            "toolu_{:016x}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-                % (1u128 << 64)
-        );
-
+    fn spawn_combo_execute(&mut self, id: String, name: String, args: Vec<String>) {
         // Create tool use for run_combo
         let tool_use = ToolUse {
             id,
@@ -547,18 +538,24 @@ impl Chat<'static> {
         }
     }
 
-    fn combo_tool_event_to_combo_event(&self, event: &ComboToolEvent) -> ComboEvent {
+    fn combo_tool_event_to_combo_event(&self, id: &str, event: &ComboToolEvent) -> ComboEvent {
         match event {
-            ComboToolEvent::NotFound { name } => ComboEvent::NotFound { name: name.clone() },
+            ComboToolEvent::NotFound { name } => ComboEvent::NotFound {
+                id: id.to_string(),
+                name: name.clone(),
+            },
             ComboToolEvent::Executing { name, command_line } => ComboEvent::Executing {
+                id: id.to_string(),
                 name: name.clone(),
                 command_line: command_line.clone(),
             },
             ComboToolEvent::Output { name, chunk } => ComboEvent::Output {
+                id: id.to_string(),
                 name: name.clone(),
                 chunk: chunk.clone(),
             },
             ComboToolEvent::RecordStart { name, tool_use } => ComboEvent::RecordStart {
+                id: id.to_string(),
                 name: name.clone(),
                 tool_use: tool_use.clone(),
             },
@@ -567,6 +564,7 @@ impl Chat<'static> {
                 tool_use_id,
                 chunk,
             } => ComboEvent::RecordOutput {
+                id: id.to_string(),
                 name: name.clone(),
                 tool_use_id: tool_use_id.clone(),
                 chunk: chunk.clone(),
@@ -577,6 +575,7 @@ impl Chat<'static> {
                 is_error,
                 output,
             } => ComboEvent::RecordEnd {
+                id: id.to_string(),
                 name: name.clone(),
                 tool_use_id: tool_use_id.clone(),
                 is_error: *is_error,
@@ -587,6 +586,7 @@ impl Chat<'static> {
                 prompt,
                 thinking,
             } => ComboEvent::Prompt {
+                id: id.to_string(),
                 name: name.clone(),
                 prompt: prompt.clone(),
                 thinking: thinking.clone(),
@@ -597,6 +597,7 @@ impl Chat<'static> {
                 kind,
                 text,
             } => ComboEvent::PromptStream {
+                id: id.to_string(),
                 name: name.clone(),
                 index: *index,
                 kind: match kind {
@@ -611,6 +612,7 @@ impl Chat<'static> {
                 thinking,
                 offload,
             } => ComboEvent::ReplyToolUse {
+                id: id.to_string(),
                 name: name.clone(),
                 tool_use: tool_use.clone(),
                 thinking: thinking.clone(),
@@ -622,6 +624,7 @@ impl Chat<'static> {
                 is_error,
                 output,
             } => ComboEvent::ReplyToolResult {
+                id: id.to_string(),
                 name: name.clone(),
                 tool_use_id: tool_use_id.clone(),
                 is_error: *is_error,
@@ -635,11 +638,15 @@ impl Chat<'static> {
                 starter,
                 exit_code,
             } => ComboEvent::Executed {
+                id: id.to_string(),
                 name: name.clone(),
                 starter: starter.clone(),
                 exit_code: *exit_code,
             },
-            ComboToolEvent::Cancelled { name } => ComboEvent::Cancelled { name: name.clone() },
+            ComboToolEvent::Cancelled { name } => ComboEvent::Cancelled {
+                id: Some(id.to_string()),
+                name: name.clone(),
+            },
         }
     }
 
@@ -1215,7 +1222,7 @@ impl Component for Chat<'static> {
                                     serde_json::from_value::<RunComboInput>(tool_use.input.clone())
                                 {
                                     combo_tool_ids.push(tool_use.id.clone());
-                                    Message::bot(Combo::new(&input.combo_name).into())
+                                    Message::bot(Combo::new(&tool_use.id, &input.combo_name).into())
                                 } else {
                                     Message::bot(Tool::new(tool_use.to_owned()).into())
                                 }
@@ -1308,7 +1315,7 @@ impl Component for Chat<'static> {
                 global::trigger_schedule_session_save();
             }
             Event::Answer(AnswerEvent::ComboToolEvent { id, event }) => {
-                let combo_event = self.combo_tool_event_to_combo_event(event);
+                let combo_event = self.combo_tool_event_to_combo_event(id, event);
                 if !self.combo_tool_messages.contains(id) {
                     self.pending_combo_tool_events
                         .entry(id.clone())
@@ -1490,9 +1497,10 @@ impl Component for Chat<'static> {
                     self.spawn_combo_discover();
                 }
                 ComboAction::Execute { name, args } => {
-                    let combo = Combo::new(name);
+                    let id = format!("toolu_{}", Uuid::new_v4().as_simple());
+                    let combo = Combo::new(&id, name);
                     self.messages.push(Message::user(combo.into()));
-                    self.spawn_combo_execute(name.clone(), args.clone());
+                    self.spawn_combo_execute(id, name.clone(), args.clone());
                     debug!("Combo message pushed");
                 }
             },
@@ -1709,6 +1717,7 @@ async fn discover_combo_starters(
     if result.cancelled || cancel_token.is_cancelled() {
         tx.send(
             ComboEvent::Cancelled {
+                id: None,
                 name: name.map(str::to_string),
             }
             .into(),

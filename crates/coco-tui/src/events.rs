@@ -88,34 +88,41 @@ pub enum ComboEvent {
     },
 
     Executing {
+        id: String,
         name: String,
         command_line: String,
     },
     RecordStart {
+        id: String,
         name: String,
         tool_use: ToolUse,
     },
     Output {
+        id: String,
         name: String,
         chunk: OutputChunk,
     },
     RecordOutput {
+        id: String,
         name: String,
         tool_use_id: String,
         chunk: OutputChunk,
     },
     RecordEnd {
+        id: String,
         name: String,
         tool_use_id: String,
         is_error: bool,
         output: Final,
     },
     Prompt {
+        id: String,
         name: String,
         prompt: String,
         thinking: Option<ThinkingConfig>,
     },
     PromptStream {
+        id: String,
         name: String,
         index: usize,
         kind: BotStreamKind,
@@ -123,6 +130,7 @@ pub enum ComboEvent {
     },
     /// Reply tool use from prompt, with optional offload via bash
     ReplyToolUse {
+        id: String,
         name: String,
         tool_use: ToolUse,
         thinking: Vec<String>,
@@ -131,12 +139,14 @@ pub enum ComboEvent {
     },
     /// Result of offload reply bash execution
     ReplyToolResult {
+        id: String,
         name: String,
         tool_use_id: String,
         is_error: bool,
         output: Final,
     },
     Executed {
+        id: String,
         name: String,
         starter: Starter,
         exit_code: Option<i32>,
@@ -147,9 +157,11 @@ pub enum ComboEvent {
     },
 
     NotFound {
+        id: String,
         name: String,
     },
     Cancelled {
+        id: Option<String>,
         name: Option<String>,
     },
 }

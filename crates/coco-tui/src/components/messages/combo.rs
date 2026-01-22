@@ -58,6 +58,7 @@ enum ComboView {
 
 #[derive(Serialize, Deserialize)]
 struct Inner {
+    tool_use_id: String,
     name: String,
     #[serde(default)]
     command_line: String,
@@ -74,6 +75,7 @@ struct Inner {
 impl Default for Inner {
     fn default() -> Self {
         Self {
+            tool_use_id: String::new(),
             name: String::new(),
             command_line: String::new(),
             is_error: false,
@@ -114,9 +116,10 @@ fn default_preview_lines() -> StreamedLines {
 }
 
 impl Combo {
-    pub fn new(name: &str) -> Self {
+    pub fn new(tool_use_id: &str, name: &str) -> Self {
         Self {
             state: State::new(Inner {
+                tool_use_id: tool_use_id.to_string(),
                 name: name.to_string(),
                 starter_state: StarterState::Executing,
                 ..Default::default()
@@ -132,6 +135,10 @@ impl Combo {
             is_recording: false,
             combo_stream_suppressed: false,
         }
+    }
+
+    fn matches_id(&self, id: &str) -> bool {
+        self.state.tool_use_id == id
     }
 
     fn has_collapsible_body(&self) -> bool {
@@ -303,14 +310,14 @@ impl Combo {
 
     fn on_combo_event(&mut self, event: &ComboEvent) {
         match event {
-            ComboEvent::NotFound { name } => {
-                if &self.state.name == name {
+            ComboEvent::NotFound { id, .. } => {
+                if self.matches_id(id) {
                     self.state.write().starter_state = StarterState::NotFound
                 }
             }
-            ComboEvent::Output { name, chunk } => self.on_ouput_event(name, chunk, None),
-            ComboEvent::RecordStart { name, tool_use } => {
-                if &self.state.name == name {
+            ComboEvent::Output { id, chunk, .. } => self.on_ouput_event(id, chunk, None),
+            ComboEvent::RecordStart { id, tool_use, .. } => {
+                if self.matches_id(id) {
                     self.is_recording = true;
                     self.combo_stream_suppressed = true;
                     self.clear_combo_stream();
@@ -319,17 +326,19 @@ impl Combo {
                 }
             }
             ComboEvent::RecordOutput {
-                name,
+                id,
                 tool_use_id,
                 chunk,
-            } => self.on_ouput_event(name, chunk, Some(tool_use_id.as_str())),
+                ..
+            } => self.on_ouput_event(id, chunk, Some(tool_use_id.as_str())),
             ComboEvent::RecordEnd {
-                name,
+                id,
                 tool_use_id,
                 is_error,
                 output,
+                ..
             } => {
-                if &self.state.name == name {
+                if self.matches_id(id) {
                     self.forward_result_to_child(tool_use_id, *is_error, output.clone());
                     self.has_child_output = false;
                     self.is_recording = false;
@@ -337,31 +346,33 @@ impl Combo {
                     self.clear_combo_stream();
                 }
             }
-            ComboEvent::Prompt { name, prompt, .. } => {
-                if &self.state.name == name {
+            ComboEvent::Prompt { id, prompt, .. } => {
+                if self.matches_id(id) {
                     self.messages.finalize_stream();
                     self.messages.reset_stream();
                     self.push_prompt(prompt);
                 }
             }
             ComboEvent::PromptStream {
-                name,
+                id,
                 index,
                 kind,
                 text,
+                ..
             } => {
-                if &self.state.name == name {
+                if self.matches_id(id) {
                     self.messages
                         .append_stream_text(*index, *kind, text.clone());
                 }
             }
             ComboEvent::ReplyToolUse {
-                name,
+                id,
                 tool_use,
                 thinking,
                 offload,
+                ..
             } => {
-                if &self.state.name == name {
+                if self.matches_id(id) {
                     self.messages.finalize_stream();
                     self.messages.reset_stream();
                     for block in thinking {
@@ -375,17 +386,20 @@ impl Combo {
                 }
             }
             ComboEvent::ReplyToolResult {
-                name,
+                id,
                 tool_use_id,
                 is_error,
                 output,
+                ..
             } => {
-                if &self.state.name == name {
+                if self.matches_id(id) {
                     self.forward_result_to_child(tool_use_id, *is_error, output.clone());
                 }
             }
-            ComboEvent::Executing { name, command_line } => {
-                if &self.state.name == name {
+            ComboEvent::Executing {
+                id, command_line, ..
+            } => {
+                if self.matches_id(id) {
                     self.clear_child_focus();
                     self.has_child_output = false;
                     self.is_recording = false;
@@ -404,11 +418,12 @@ impl Combo {
                 }
             }
             ComboEvent::Executed {
-                name,
+                id,
                 starter,
                 exit_code,
+                ..
             } => {
-                if &self.state.name == name {
+                if self.matches_id(id) {
                     let mut state = self.state.write();
                     let error_message = match (&starter.combo, *exit_code) {
                         (Err(err), _) => {
@@ -435,12 +450,8 @@ impl Combo {
                     self.has_child_output = false;
                 }
             }
-            ComboEvent::Cancelled { name } => {
-                if name
-                    .as_ref()
-                    .map(|name| name == &self.state.name)
-                    .unwrap_or(true)
-                {
+            ComboEvent::Cancelled { id, .. } => {
+                if id.as_ref().map(|id| self.matches_id(id)).unwrap_or(true) {
                     self.clear_child_focus();
                     self.has_child_output = false;
                     self.is_recording = false;
@@ -463,8 +474,8 @@ impl Combo {
         }
     }
 
-    fn on_ouput_event(&mut self, name: &str, chunk: &OutputChunk, tool_use_id: Option<&str>) {
-        if self.state.name != name {
+    fn on_ouput_event(&mut self, id: &str, chunk: &OutputChunk, tool_use_id: Option<&str>) {
+        if !self.matches_id(id) {
             return;
         }
         if let Some(tool_use_id) = tool_use_id
@@ -1046,6 +1057,9 @@ mod tests {
     use super::*;
     use code_combo::tools::{BASH_TOOL_NAME, BashInput};
 
+    const TEST_ID: &str = "test_combo_id";
+    const TEST_NAME: &str = "demo";
+
     fn test_key_z() -> KeyEvent {
         KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE)
     }
@@ -1081,15 +1095,17 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn combo_is_collapsed_by_default_and_toggles_with_z() {
-        let mut combo = Combo::new("demo");
+        let mut combo = Combo::new(TEST_ID, TEST_NAME);
         combo.handle_event(&Event::Combo(ComboEvent::Prompt {
-            name: "demo".to_string(),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
             prompt: "line1".to_string(),
             thinking: None,
         }));
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
-            name: "demo".to_string(),
-            starter: make_starter("demo"),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
+            starter: make_starter(TEST_NAME),
             exit_code: None,
         }));
 
@@ -1104,13 +1120,15 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn combo_is_visible_while_executing() {
-        let mut combo = Combo::new("demo");
+        let mut combo = Combo::new(TEST_ID, TEST_NAME);
         combo.handle_event(&Event::Combo(ComboEvent::Executing {
-            name: "demo".to_string(),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
             command_line: "demo".to_string(),
         }));
         combo.handle_event(&Event::Combo(ComboEvent::Output {
-            name: "demo".to_string(),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
             chunk: code_combo::OutputChunk {
                 timestamp: 0,
                 stream: code_combo::StreamKind::Stdout,
@@ -1125,15 +1143,17 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn combo_persists_collapsed_state() {
-        let mut combo = Combo::new("demo");
+        let mut combo = Combo::new(TEST_ID, TEST_NAME);
         combo.handle_event(&Event::Combo(ComboEvent::Prompt {
-            name: "demo".to_string(),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
             prompt: "line1".to_string(),
             thinking: None,
         }));
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
-            name: "demo".to_string(),
-            starter: make_starter("demo"),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
+            starter: make_starter(TEST_NAME),
             exit_code: None,
         }));
         combo.handle_action(&Action::Blur);
@@ -1147,10 +1167,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn combo_marks_error_on_nonzero_exit() {
-        let mut combo = Combo::new("demo");
+        let mut combo = Combo::new(TEST_ID, TEST_NAME);
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
-            name: "demo".to_string(),
-            starter: make_starter("demo"),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
+            starter: make_starter(TEST_NAME),
             exit_code: Some(1),
         }));
 
@@ -1159,34 +1180,40 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn combo_enters_and_exits_actionable_messages_with_enter_and_esc() {
-        let mut combo = Combo::new("demo");
+        let mut combo = Combo::new(TEST_ID, TEST_NAME);
         combo.handle_event(&Event::Combo(ComboEvent::Executing {
-            name: "demo".to_string(),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
             command_line: "demo".to_string(),
         }));
         combo.handle_event(&Event::Combo(ComboEvent::RecordStart {
-            name: "demo".to_string(),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
             tool_use: make_tool_use("combo_record_demo_0", "echo 1"),
         }));
         combo.handle_event(&Event::Combo(ComboEvent::RecordEnd {
-            name: "demo".to_string(),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
             tool_use_id: "combo_record_demo_0".to_string(),
             is_error: false,
             output: Final::Message("ok".to_string()),
         }));
         combo.handle_event(&Event::Combo(ComboEvent::RecordStart {
-            name: "demo".to_string(),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
             tool_use: make_tool_use("combo_record_demo_1", "echo 2"),
         }));
         combo.handle_event(&Event::Combo(ComboEvent::RecordEnd {
-            name: "demo".to_string(),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
             tool_use_id: "combo_record_demo_1".to_string(),
             is_error: false,
             output: Final::Message("ok".to_string()),
         }));
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
-            name: "demo".to_string(),
-            starter: make_starter("demo"),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
+            starter: make_starter(TEST_NAME),
             exit_code: None,
         }));
 
@@ -1204,34 +1231,40 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn combo_moves_actionable_messages_with_jk() {
-        let mut combo = Combo::new("demo");
+        let mut combo = Combo::new(TEST_ID, TEST_NAME);
         combo.handle_event(&Event::Combo(ComboEvent::Executing {
-            name: "demo".to_string(),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
             command_line: "demo".to_string(),
         }));
         combo.handle_event(&Event::Combo(ComboEvent::RecordStart {
-            name: "demo".to_string(),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
             tool_use: make_tool_use("combo_record_demo_0", "echo 1"),
         }));
         combo.handle_event(&Event::Combo(ComboEvent::RecordEnd {
-            name: "demo".to_string(),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
             tool_use_id: "combo_record_demo_0".to_string(),
             is_error: false,
             output: Final::Message("ok".to_string()),
         }));
         combo.handle_event(&Event::Combo(ComboEvent::RecordStart {
-            name: "demo".to_string(),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
             tool_use: make_tool_use("combo_record_demo_1", "echo 2"),
         }));
         combo.handle_event(&Event::Combo(ComboEvent::RecordEnd {
-            name: "demo".to_string(),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
             tool_use_id: "combo_record_demo_1".to_string(),
             is_error: false,
             output: Final::Message("ok".to_string()),
         }));
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
-            name: "demo".to_string(),
-            starter: make_starter("demo"),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
+            starter: make_starter(TEST_NAME),
             exit_code: None,
         }));
 
@@ -1247,19 +1280,22 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn combo_routes_output_to_child_component() {
-        let mut combo = Combo::new("demo");
+        let mut combo = Combo::new(TEST_ID, TEST_NAME);
         let tool_use = make_tool_use("combo_record_demo_0", "echo 1");
         combo.handle_event(&Event::Combo(ComboEvent::Executing {
-            name: "demo".to_string(),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
             command_line: "demo".to_string(),
         }));
         combo.handle_event(&Event::Combo(ComboEvent::RecordStart {
-            name: "demo".to_string(),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
             tool_use,
         }));
 
         combo.handle_event(&Event::Combo(ComboEvent::RecordOutput {
-            name: "demo".to_string(),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
             tool_use_id: "combo_record_demo_0".to_string(),
             chunk: code_combo::OutputChunk {
                 timestamp: 0,
@@ -1275,19 +1311,22 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn combo_suppresses_stream_until_new_output_after_record() {
-        let mut combo = Combo::new("demo");
+        let mut combo = Combo::new(TEST_ID, TEST_NAME);
         let tool_use = make_tool_use("combo_record_demo_0", "echo 1");
         combo.handle_event(&Event::Combo(ComboEvent::Executing {
-            name: "demo".to_string(),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
             command_line: "demo".to_string(),
         }));
         combo.handle_event(&Event::Combo(ComboEvent::RecordStart {
-            name: "demo".to_string(),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
             tool_use,
         }));
 
         combo.handle_event(&Event::Combo(ComboEvent::Output {
-            name: "demo".to_string(),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
             chunk: code_combo::OutputChunk {
                 timestamp: 0,
                 stream: code_combo::StreamKind::Stdout,
@@ -1300,7 +1339,8 @@ mod tests {
         assert!(combo.preview_lines.is_empty());
 
         combo.handle_event(&Event::Combo(ComboEvent::RecordEnd {
-            name: "demo".to_string(),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
             tool_use_id: "combo_record_demo_0".to_string(),
             is_error: false,
             output: Final::Message("ok".to_string()),
@@ -1311,7 +1351,8 @@ mod tests {
         assert!(combo.preview_lines.is_empty());
 
         combo.handle_event(&Event::Combo(ComboEvent::Output {
-            name: "demo".to_string(),
+            id: TEST_ID.to_string(),
+            name: TEST_NAME.to_string(),
             chunk: code_combo::OutputChunk {
                 timestamp: 0,
                 stream: code_combo::StreamKind::Stdout,
