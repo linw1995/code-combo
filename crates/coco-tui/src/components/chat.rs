@@ -1294,7 +1294,10 @@ impl Chat<'static> {
             }
         }
         let breadcrumb = crumbs.join(" / ");
-        Line::from(Span::styled(breadcrumb, theme.ui.folded_hint))
+        Line::from(Span::styled(
+            format!(" {} ", breadcrumb),
+            theme.ui.folded_hint,
+        ))
     }
 
     fn store_combo_transcript(&mut self, id: String, name: String, messages: Vec<ChatMessage>) {
