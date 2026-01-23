@@ -4,7 +4,7 @@
 //! - [`Agent`] - The main agent struct for chat interactions
 //! - [`AgentConfig`] - Configuration types for customizing agents
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::provider::{
     Block, Client, ContentBlockDelta, MessagesStreamEvent, Role, Thinking, ToolChoice,
@@ -17,8 +17,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::{
-    Config, PromptSchema, ProviderConfig, RequestOptions, Result, ResultDisplayExt,
-    ThinkingBlocksMode, ThinkingConfig,
+    Config, Error, PromptSchema, ProviderConfig, RequestOptions, Result, ResultDisplayExt,
+    RetryAttempt as CoreRetryAttempt, RetryUpdate, StreamError, ThinkingBlocksMode, ThinkingConfig,
     tools::{ComboInfo, RunComboContext, RunComboTool, RunTaskContext, RunTaskTool},
 };
 use executor::PermissionControl;
@@ -78,6 +78,7 @@ pub struct ChatResponse {
 pub enum ChatStreamUpdate {
     Plain { index: usize, text: String },
     Thinking { index: usize, text: String },
+    Reset,
 }
 
 pub struct PromptReply {
@@ -98,6 +99,8 @@ struct StreamAccumulator {
     stop_reason: Option<StopReason>,
     usage: Option<crate::provider::UsageStats>,
 }
+
+const STREAM_RETRY_BASE_DELAY_MS: u64 = 200;
 
 impl StreamAccumulator {
     fn new() -> Self {
@@ -291,6 +294,53 @@ impl StreamAccumulator {
             tool_use.input = input;
         }
         Ok(())
+    }
+}
+
+fn should_retry_stream_error(err: &StreamError) -> bool {
+    err.is_retryable()
+}
+
+fn stream_retry_delay(attempt: usize, max_delay: Duration) -> Duration {
+    let shift = attempt.saturating_sub(1).min(30) as u32;
+    let multiplier = 1u64 << shift;
+    let delay_ms = STREAM_RETRY_BASE_DELAY_MS.saturating_mul(multiplier);
+    let mut delay = Duration::from_millis(delay_ms);
+    if max_delay != Duration::from_millis(0) && delay > max_delay {
+        delay = max_delay;
+    }
+    delay
+}
+
+fn notify_stream_retry_attempt(
+    request_options: &RequestOptions,
+    attempt: usize,
+    delay: Duration,
+    err: &StreamError,
+) {
+    if let Some(notifier) = &request_options.retry_notifier {
+        notifier.notify(RetryUpdate::Attempt(CoreRetryAttempt {
+            attempt,
+            max_attempts: request_options.retry_max_attempts,
+            delay,
+            error: err.to_string(),
+        }));
+    }
+}
+
+fn notify_stream_retry_finished(request_options: &RequestOptions, success: bool) {
+    if let Some(notifier) = &request_options.retry_notifier {
+        notifier.notify(RetryUpdate::Finished { success });
+    }
+}
+
+async fn wait_for_retry(delay: Duration, cancel_token: &CancellationToken) -> bool {
+    if delay == Duration::from_millis(0) {
+        return true;
+    }
+    tokio::select! {
+        _ = cancel_token.cancelled() => false,
+        _ = tokio::time::sleep(delay) => true,
     }
 }
 
@@ -663,55 +713,115 @@ impl Agent {
             messages.clone()
         };
         let messages = self.prepare_messages_for_request(messages, request_options);
-        let tools = self.provider_tools_for_request(request_options);
+        let max_attempts = request_options.retry_max_attempts;
+        let max_delay = Duration::from_millis(request_options.retry_max_delay_ms);
+        let mut attempt = 0usize;
+        let mut retried = false;
 
-        let mut stream = client
-            .messages_stream(
-                Some(&self.system_prompt),
-                messages,
-                tools,
-                thinking,
-                request_options,
-            )
-            .await
-            .inspect_err(|err| {
-                warn!("send messsages stream error: {err:?}");
-            })
-            .whatever_context_display("failed to send messages stream")?;
+        loop {
+            let tools = self.provider_tools_for_request(request_options);
+            let stream_result = client
+                .messages_stream(
+                    Some(&self.system_prompt),
+                    messages.clone(),
+                    tools,
+                    thinking.clone(),
+                    request_options,
+                )
+                .await
+                .inspect_err(|err| {
+                    warn!("send messsages stream error: {err:?}");
+                })
+                .whatever_context_display("failed to send messages stream");
 
-        let mut accumulator = StreamAccumulator::new();
-        while let Some(event) = tokio::select! {
-            _ = cancel_token.cancelled() => {
-                whatever!("chat stream cancelled");
+            let mut stream = match stream_result {
+                Ok(stream) => stream,
+                Err(err) => {
+                    if retried {
+                        notify_stream_retry_finished(request_options, false);
+                    }
+                    return Err(err);
+                }
+            };
+
+            let mut accumulator = StreamAccumulator::new();
+            let mut stream_error: Option<StreamError> = None;
+            loop {
+                let event = tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        if retried {
+                            notify_stream_retry_finished(request_options, false);
+                        }
+                        whatever!("chat stream cancelled");
+                    }
+                    event = stream.next() => event,
+                };
+                let Some(event) = event else {
+                    break;
+                };
+                let event = match event {
+                    Ok(event) => event,
+                    Err(err) => {
+                        stream_error = Some(err.with_context("read messages stream error"));
+                        break;
+                    }
+                };
+                let action = match accumulator.handle_event(event, &mut on_update) {
+                    Ok(action) => action,
+                    Err(err) => {
+                        stream_error = Some(StreamError::decode(format!(
+                            "parse messages stream error: {err}"
+                        )));
+                        break;
+                    }
+                };
+                if matches!(action, StreamAction::Stop) {
+                    break;
+                }
             }
-            event = stream.next() => event,
-        } {
-            let event = event.whatever_context_display("read messages stream error")?;
-            let action = accumulator
-                .handle_event(event, &mut on_update)
-                .whatever_context("parse messages stream error")?;
-            if matches!(action, StreamAction::Stop) {
-                break;
+
+            if let Some(err) = stream_error {
+                if should_retry_stream_error(&err) && attempt < max_attempts {
+                    attempt += 1;
+                    retried = true;
+                    let delay = stream_retry_delay(attempt, max_delay);
+                    notify_stream_retry_attempt(request_options, attempt, delay, &err);
+                    on_update(ChatStreamUpdate::Reset);
+                    if !wait_for_retry(delay, &cancel_token).await {
+                        if retried {
+                            notify_stream_retry_finished(request_options, false);
+                        }
+                        whatever!("chat stream cancelled");
+                    }
+                    continue;
+                }
+                if retried {
+                    notify_stream_retry_finished(request_options, false);
+                }
+                return Err(Error::stream(err.kind, err.message));
             }
+
+            let (blocks, stop_reason, usage) = accumulator.finish();
+            let message = if blocks.is_empty() {
+                Message::assistant(Content::Multiple(Vec::default()))
+            } else {
+                let mut msg = Message::assistant(Content::Multiple(blocks));
+                if request_options.stringify_nested_tool_inputs {
+                    parse_stringified_tool_inputs_in_message(&mut msg, &self.executor);
+                }
+                self.messages.lock().await.push(msg.clone());
+                msg
+            };
+            self.mark_thinking_cleanup_pending(stop_reason.as_ref());
+            if retried {
+                notify_stream_retry_finished(request_options, true);
+            }
+            return Ok(ChatResponse {
+                message,
+                stop_reason,
+                usage,
+            });
         }
-
-        let (blocks, stop_reason, usage) = accumulator.finish();
-        let message = if blocks.is_empty() {
-            Message::assistant(Content::Multiple(Vec::default()))
-        } else {
-            let mut msg = Message::assistant(Content::Multiple(blocks));
-            if request_options.stringify_nested_tool_inputs {
-                parse_stringified_tool_inputs_in_message(&mut msg, &self.executor);
-            }
-            self.messages.lock().await.push(msg.clone());
-            msg
-        };
-        self.mark_thinking_cleanup_pending(stop_reason.as_ref());
-        Ok(ChatResponse {
-            message,
-            stop_reason,
-            usage,
-        })
     }
 
     pub async fn reply_prompt(
@@ -918,7 +1028,13 @@ impl Agent {
                 }
                 event = stream.next() => event,
             } {
-                let event = event.whatever_context_display("read prompt reply stream error")?;
+                let event = match event {
+                    Ok(event) => event,
+                    Err(err) => {
+                        let err = err.with_context("read prompt reply stream error");
+                        return Err(Error::stream(err.kind, err.message));
+                    }
+                };
                 let action = accumulator
                     .handle_event(event, &mut on_update)
                     .whatever_context("parse prompt reply stream error")?;
@@ -1690,6 +1806,18 @@ mod tests {
             Block::Thinking { thinking, .. } => assert_eq!(thinking, "Reasoning"),
             other => panic!("unexpected block: {other:?}"),
         }
+    }
+
+    #[test]
+    fn retry_stream_error_heuristics() {
+        let err = StreamError::transport("read stream chunk error: broken pipe".to_string());
+        assert!(should_retry_stream_error(&err));
+
+        let err = StreamError::decode("decode stream event data".to_string());
+        assert!(!should_retry_stream_error(&err));
+
+        let err = StreamError::decode("chat stream cancelled".to_string());
+        assert!(!should_retry_stream_error(&err));
     }
 
     #[test]

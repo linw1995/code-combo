@@ -16,7 +16,7 @@ use crate::provider::types::{
     MessagesStreamEvent, Role, StopReason, StreamErrorDetail, Thinking, Tool, ToolChoice, ToolUse,
     UsageStats,
 };
-use crate::{RequestOptions, RetryAttempt as CoreRetryAttempt, RetryUpdate};
+use crate::{RequestOptions, RetryAttempt as CoreRetryAttempt, RetryUpdate, StreamError};
 
 struct ToolCallState {
     #[allow(dead_code)]
@@ -376,6 +376,13 @@ fn parse_tool_arguments(arguments: &str) -> Value {
     serde_json::from_str(arguments).unwrap_or_else(|_| Value::String(arguments.to_string()))
 }
 
+fn map_stream_error(err: openai_api::StreamError) -> StreamError {
+    match err.kind {
+        openai_api::StreamErrorKind::Transport => StreamError::transport(err.message),
+        openai_api::StreamErrorKind::Decode => StreamError::decode(err.message),
+    }
+}
+
 fn map_finish_reason(reason: String) -> Option<StopReason> {
     match reason.as_str() {
         "stop" => Some(StopReason::EndTurn),
@@ -468,7 +475,7 @@ impl OpenAIStream {
 }
 
 impl Stream for OpenAIStream {
-    type Item = Result<MessagesStreamEvent, Whatever>;
+    type Item = std::result::Result<MessagesStreamEvent, StreamError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -481,7 +488,9 @@ impl Stream for OpenAIStream {
             }
             match Pin::new(&mut this.inner).poll_next(cx) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Some(Err(err))) => return Poll::Ready(Some(Err(err))),
+                Poll::Ready(Some(Err(err))) => {
+                    return Poll::Ready(Some(Err(map_stream_error(err))));
+                }
                 Poll::Ready(Some(Ok(chunk))) => {
                     let openai_api::ChatCompletionChunk { choices, usage } = chunk;
                     if let Some(usage) = usage {

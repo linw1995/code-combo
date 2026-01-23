@@ -422,7 +422,8 @@ impl Chat<'static> {
             | ComboEvent::RecordStart { .. }
             | ComboEvent::RecordOutput { .. }
             | ComboEvent::RecordEnd { .. }
-            | ComboEvent::PromptStream { .. } => {
+            | ComboEvent::PromptStream { .. }
+            | ComboEvent::PromptStreamReset { .. } => {
                 self.set_processing();
             }
             ComboEvent::Prompt { thinking, .. } => {
@@ -645,6 +646,10 @@ impl Chat<'static> {
                     ComboStreamKind::Thinking => BotStreamKind::Thinking,
                 },
                 text: text.clone(),
+            },
+            ComboToolEvent::PromptStreamReset { name } => ComboEvent::PromptStreamReset {
+                id: id.to_string(),
+                name: name.clone(),
             },
             ComboToolEvent::ReplyToolUse {
                 name,
@@ -2278,19 +2283,39 @@ async fn task_chat(mut agent: Agent, content: ChatContent, cancel_token: Cancell
         let thinking_seen_stream = thinking_seen.clone();
         let resp = agent
             .chat_stream(msg, cancel_token.clone(), move |update| {
-                let (index, kind, text) = match update {
+                match update {
+                    ChatStreamUpdate::Reset => {
+                        plain_seen_stream.store(false, Ordering::Relaxed);
+                        thinking_seen_stream.store(false, Ordering::Relaxed);
+                        stream_tx.send(AnswerEvent::BotStreamReset.into()).ok();
+                    }
                     ChatStreamUpdate::Plain { index, text } => {
                         plain_seen_stream.store(true, Ordering::Relaxed);
-                        (index, BotStreamKind::Plain, text)
+                        stream_tx
+                            .send(
+                                AnswerEvent::BotStream {
+                                    index,
+                                    kind: BotStreamKind::Plain,
+                                    text,
+                                }
+                                .into(),
+                            )
+                            .ok();
                     }
                     ChatStreamUpdate::Thinking { index, text } => {
                         thinking_seen_stream.store(true, Ordering::Relaxed);
-                        (index, BotStreamKind::Thinking, text)
+                        stream_tx
+                            .send(
+                                AnswerEvent::BotStream {
+                                    index,
+                                    kind: BotStreamKind::Thinking,
+                                    text,
+                                }
+                                .into(),
+                            )
+                            .ok();
                     }
                 };
-                stream_tx
-                    .send(AnswerEvent::BotStream { index, kind, text }.into())
-                    .ok();
             })
             .await;
         streamed_plain = plain_seen.load(Ordering::Relaxed);
@@ -2349,19 +2374,39 @@ async fn task_chat_with_history(mut agent: Agent, cancel_token: CancellationToke
         let thinking_seen_stream = thinking_seen.clone();
         let resp = agent
             .chat_stream_with_history(cancel_token.clone(), move |update| {
-                let (index, kind, text) = match update {
+                match update {
+                    ChatStreamUpdate::Reset => {
+                        plain_seen_stream.store(false, Ordering::Relaxed);
+                        thinking_seen_stream.store(false, Ordering::Relaxed);
+                        stream_tx.send(AnswerEvent::BotStreamReset.into()).ok();
+                    }
                     ChatStreamUpdate::Plain { index, text } => {
                         plain_seen_stream.store(true, Ordering::Relaxed);
-                        (index, BotStreamKind::Plain, text)
+                        stream_tx
+                            .send(
+                                AnswerEvent::BotStream {
+                                    index,
+                                    kind: BotStreamKind::Plain,
+                                    text,
+                                }
+                                .into(),
+                            )
+                            .ok();
                     }
                     ChatStreamUpdate::Thinking { index, text } => {
                         thinking_seen_stream.store(true, Ordering::Relaxed);
-                        (index, BotStreamKind::Thinking, text)
+                        stream_tx
+                            .send(
+                                AnswerEvent::BotStream {
+                                    index,
+                                    kind: BotStreamKind::Thinking,
+                                    text,
+                                }
+                                .into(),
+                            )
+                            .ok();
                     }
                 };
-                stream_tx
-                    .send(AnswerEvent::BotStream { index, kind, text }.into())
-                    .ok();
             })
             .await;
         streamed_plain = plain_seen.load(Ordering::Relaxed);

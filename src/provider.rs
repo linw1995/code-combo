@@ -4,9 +4,9 @@ mod types;
 
 use std::{pin::Pin, time::Duration};
 
+use crate::StreamError;
 use futures_core::Stream;
 use futures_util::StreamExt;
-use snafu::Whatever;
 
 use ::anthropic as anthropic_api;
 use ::openai as openai_api;
@@ -19,7 +19,7 @@ use crate::{
 pub use types::*;
 
 pub type MessagesStream =
-    Pin<Box<dyn Stream<Item = std::result::Result<MessagesStreamEvent, Whatever>> + Send>>;
+    Pin<Box<dyn Stream<Item = std::result::Result<MessagesStreamEvent, StreamError>> + Send>>;
 
 pub enum Client {
     Anthropic(anthropic_api::Client),
@@ -126,7 +126,8 @@ impl Client {
                     .call()
                     .await
                     .whatever_context_display("failed to send messages stream")?;
-                let mapped = stream.map(|event| event.map(Into::into));
+                let mapped =
+                    stream.map(|event| event.map(Into::into).map_err(map_anthropic_stream_error));
                 Ok(Box::pin(mapped))
             }
             Client::OpenAI(client) => {
@@ -224,7 +225,8 @@ impl Client {
                     )
                     .await
                     .whatever_context_display("failed to request tool choice stream")?;
-                let mapped = stream.map(|event| event.map(Into::into));
+                let mapped =
+                    stream.map(|event| event.map(Into::into).map_err(map_anthropic_stream_error));
                 Ok(Box::pin(mapped))
             }
             Client::OpenAI(client) => {
@@ -270,5 +272,12 @@ fn anthropic_retry_config(request_options: &RequestOptions) -> anthropic_api::Re
         max_attempts: request_options.retry_max_attempts,
         max_delay: Duration::from_millis(request_options.retry_max_delay_ms),
         notifier,
+    }
+}
+
+fn map_anthropic_stream_error(err: anthropic_api::StreamError) -> StreamError {
+    match err.kind {
+        anthropic_api::StreamErrorKind::Transport => StreamError::transport(err.message),
+        anthropic_api::StreamErrorKind::Decode => StreamError::decode(err.message),
     }
 }

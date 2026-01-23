@@ -35,6 +35,42 @@ pub struct RetryAttempt {
 
 pub type RetryNotifier = Arc<dyn Fn(RetryAttempt) + Send + Sync>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamErrorKind {
+    Transport,
+    Decode,
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamError {
+    pub kind: StreamErrorKind,
+    pub message: String,
+}
+
+impl StreamError {
+    fn transport(context: &'static str, err: impl std::fmt::Display) -> Self {
+        Self {
+            kind: StreamErrorKind::Transport,
+            message: format!("{context}: {err}"),
+        }
+    }
+
+    fn decode(context: &'static str, err: impl std::fmt::Display) -> Self {
+        Self {
+            kind: StreamErrorKind::Decode,
+            message: format!("{context}: {err}"),
+        }
+    }
+}
+
+impl std::fmt::Display for StreamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for StreamError {}
+
 #[derive(Clone)]
 pub struct RetryConfig {
     pub max_attempts: usize,
@@ -280,7 +316,7 @@ impl OpenAIRequestError {
         match self {
             Self::Transport { source, .. } => source.is_timeout() || source.is_connect(),
             Self::HttpStatus { status, .. } => is_retryable_status(*status),
-            Self::Decode { .. } => false,
+            Self::Decode { .. } => true,
         }
     }
 
@@ -366,7 +402,7 @@ impl SseEventStream {
         Some(line)
     }
 
-    fn process_line(&mut self, line: &[u8]) -> Result<()> {
+    fn process_line(&mut self, line: &[u8]) -> std::result::Result<(), StreamError> {
         if line.is_empty() {
             self.flush_event();
             return Ok(());
@@ -391,7 +427,7 @@ impl SseEventStream {
 }
 
 impl Stream for SseEventStream {
-    type Item = Result<SseEvent>;
+    type Item = std::result::Result<SseEvent, StreamError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -405,10 +441,10 @@ impl Stream for SseEventStream {
             match Pin::new(&mut this.inner).poll_next(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Some(Err(err))) => {
-                    let message = format!("read stream chunk error: {err}");
-                    return Poll::Ready(Some(Err(
-                        <Whatever as snafu::FromString>::without_source(message),
-                    )));
+                    return Poll::Ready(Some(Err(StreamError::transport(
+                        "read stream chunk error",
+                        err,
+                    ))));
                 }
                 Poll::Ready(Some(Ok(chunk))) => {
                     this.buffer.extend_from_slice(&chunk);
@@ -449,7 +485,7 @@ impl ChatCompletionStream {
 }
 
 impl Stream for ChatCompletionStream {
-    type Item = Result<ChatCompletionChunk>;
+    type Item = std::result::Result<ChatCompletionChunk, StreamError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -483,18 +519,20 @@ fn trim_leading_space(bytes: &[u8]) -> &[u8] {
     }
 }
 
-fn parse_chat_completion_chunk(event: SseEvent) -> Result<Option<ChatCompletionChunk>> {
+fn parse_chat_completion_chunk(
+    event: SseEvent,
+) -> std::result::Result<Option<ChatCompletionChunk>, StreamError> {
     if event.data.is_empty() {
         return Ok(None);
     }
-    let text =
-        std::str::from_utf8(&event.data).whatever_context("stream event data is not utf-8")?;
+    let text = std::str::from_utf8(&event.data)
+        .map_err(|err| StreamError::decode("stream event data is not utf-8", err))?;
     trace!(%text, "openai stream event");
     if text.trim() == "[DONE]" {
         return Ok(None);
     }
-    let chunk: ChatCompletionChunk =
-        serde_json::from_str(text).whatever_context("decode chat completion chunk")?;
+    let chunk: ChatCompletionChunk = serde_json::from_str(text)
+        .map_err(|err| StreamError::decode("decode chat completion chunk", err))?;
     Ok(Some(chunk))
 }
 
@@ -508,5 +546,14 @@ mod tests {
         assert!(is_retryable_status(StatusCode::INTERNAL_SERVER_ERROR));
         assert!(is_retryable_status(StatusCode::SERVICE_UNAVAILABLE));
         assert!(!is_retryable_status(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn retryable_decode_errors() {
+        let err = OpenAIRequestError::Decode {
+            context: "chat completions",
+            message: "bad json".to_string(),
+        };
+        assert!(err.is_retryable());
     }
 }

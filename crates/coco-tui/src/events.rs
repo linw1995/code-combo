@@ -132,6 +132,10 @@ pub enum ComboEvent {
         kind: BotStreamKind,
         text: String,
     },
+    PromptStreamReset {
+        id: String,
+        name: String,
+    },
     /// Reply tool use from prompt, with optional offload via bash
     ReplyToolUse {
         id: String,

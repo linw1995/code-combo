@@ -1,5 +1,7 @@
 use snafu::prelude::*;
 
+use crate::StreamErrorKind;
+
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
@@ -8,6 +10,12 @@ pub enum Error {
         message: String,
         #[snafu(source(from(Box<dyn std::error::Error + Send + Sync + 'static>, Some)))]
         source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
+        backtrace: snafu::Backtrace,
+    },
+    #[snafu(display("{message}"))]
+    Stream {
+        kind: StreamErrorKind,
+        message: String,
         backtrace: snafu::Backtrace,
     },
 }
@@ -27,5 +35,22 @@ where
         self.map_err(|err| {
             <Error as snafu::FromString>::without_source(format!("{context}: {err}"))
         })
+    }
+}
+
+impl Error {
+    pub fn stream(kind: StreamErrorKind, message: impl Into<String>) -> Self {
+        StreamSnafu {
+            kind,
+            message: message.into(),
+        }
+        .build()
+    }
+
+    pub fn stream_kind(&self) -> Option<StreamErrorKind> {
+        match self {
+            Error::Stream { kind, .. } => Some(*kind),
+            _ => None,
+        }
     }
 }
