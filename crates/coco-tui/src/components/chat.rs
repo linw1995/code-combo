@@ -1,7 +1,7 @@
 use coco_macro::ComponentExt;
 use code_combo::tools::{
     ComboEvent as ComboToolEvent, ComboInfo, ComboStreamKind, Final, RUN_COMBO_TOOL_NAME,
-    RunComboInput,
+    RunComboInput, SubagentEvent,
 };
 use code_combo::{
     Agent, Block as ChatBlock, ChatResponse, ChatStreamUpdate, Config, Content as ChatContent,
@@ -76,6 +76,20 @@ pub struct Chat<'a> {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+struct ComboTranscript {
+    id: String,
+    name: String,
+    messages: Vec<ChatMessage>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct SubagentTranscript {
+    id: String,
+    name: String,
+    messages: Vec<ChatMessage>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 struct Inner {
     state: ChatState,
     focus: Focus,
@@ -96,6 +110,10 @@ struct Inner {
     #[serde(default)]
     system_prompt: Option<String>,
     messages: Vec<code_combo::Message>,
+    #[serde(default)]
+    combo_transcripts: Vec<ComboTranscript>,
+    #[serde(default)]
+    subagent_transcripts: Vec<SubagentTranscript>,
 }
 
 impl Default for Inner {
@@ -104,6 +122,8 @@ impl Default for Inner {
         Self {
             system_prompt: None,
             messages: vec![],
+            combo_transcripts: Vec::new(),
+            subagent_transcripts: Vec::new(),
             state: ChatState::Ready,
             focus: Focus::Input,
             auto_accept_edits: false,
@@ -432,6 +452,9 @@ impl Chat<'static> {
             ComboEvent::ReplyToolResult { .. } => {
                 // Result is handled by Combo component
             }
+            ComboEvent::Transcript { id, name, messages } => {
+                self.store_combo_transcript(id.clone(), name.clone(), messages.clone());
+            }
         }
     }
 
@@ -655,6 +678,11 @@ impl Chat<'static> {
             ComboToolEvent::Cancelled { name } => ComboEvent::Cancelled {
                 id: Some(id.to_string()),
                 name: name.clone(),
+            },
+            ComboToolEvent::Transcript { name, messages } => ComboEvent::Transcript {
+                id: id.to_string(),
+                name: name.clone(),
+                messages: messages.clone(),
             },
         }
     }
@@ -1062,12 +1090,21 @@ impl Chat<'static> {
         let agent_messages = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(self.agent.dump_messages())
         });
+        let (combo_transcripts, subagent_transcripts) = {
+            let state = self.state.read();
+            (
+                state.combo_transcripts.clone(),
+                state.subagent_transcripts.clone(),
+            )
+        };
 
         self.transcript.clear();
         let iter = agent_messages
             .into_iter()
             .map(|message| Message::system(TranscriptMessage::new(message).into()));
         self.transcript.extend(iter);
+        self.append_combo_transcripts(combo_transcripts);
+        self.append_subagent_transcripts(subagent_transcripts);
         self.view = ViewMode::Transcript;
         global::signal_dirty();
     }
@@ -1076,6 +1113,85 @@ impl Chat<'static> {
         self.view = ViewMode::Chat;
         self.update_focus(Focus::InputBlur);
         global::signal_dirty();
+    }
+
+    fn append_combo_transcripts(&mut self, transcripts: Vec<ComboTranscript>) {
+        for transcript in transcripts {
+            if transcript.messages.is_empty() {
+                continue;
+            }
+            let header = format!("Combo transcript: {} ({})", transcript.name, transcript.id);
+            self.transcript
+                .push(Message::system(Plain::new(header).into()).with_role_prefix(false));
+            let iter = transcript
+                .messages
+                .into_iter()
+                .map(|message| Message::system(TranscriptMessage::new(message).into()));
+            self.transcript.extend(iter);
+        }
+    }
+
+    fn append_subagent_transcripts(&mut self, transcripts: Vec<SubagentTranscript>) {
+        for transcript in transcripts {
+            if transcript.messages.is_empty() {
+                continue;
+            }
+            let header = format!(
+                "Subagent transcript: {} ({})",
+                transcript.name, transcript.id
+            );
+            self.transcript
+                .push(Message::system(Plain::new(header).into()).with_role_prefix(false));
+            let iter = transcript
+                .messages
+                .into_iter()
+                .map(|message| Message::system(TranscriptMessage::new(message).into()));
+            self.transcript.extend(iter);
+        }
+    }
+
+    fn store_combo_transcript(&mut self, id: String, name: String, messages: Vec<ChatMessage>) {
+        if messages.is_empty() {
+            return;
+        }
+        {
+            let mut state = self.state.write();
+            if let Some(existing) = state
+                .combo_transcripts
+                .iter_mut()
+                .find(|entry| entry.id == id)
+            {
+                existing.name = name;
+                existing.messages = messages;
+            } else {
+                state
+                    .combo_transcripts
+                    .push(ComboTranscript { id, name, messages });
+            }
+        }
+        global::trigger_schedule_session_save();
+    }
+
+    fn store_subagent_transcript(&mut self, id: String, name: String, messages: Vec<ChatMessage>) {
+        if messages.is_empty() {
+            return;
+        }
+        {
+            let mut state = self.state.write();
+            if let Some(existing) = state
+                .subagent_transcripts
+                .iter_mut()
+                .find(|entry| entry.id == id)
+            {
+                existing.name = name;
+                existing.messages = messages;
+            } else {
+                state
+                    .subagent_transcripts
+                    .push(SubagentTranscript { id, name, messages });
+            }
+        }
+        global::trigger_schedule_session_save();
     }
 
     /// Handle the "New Session" command
@@ -1372,10 +1488,22 @@ impl Component for Chat<'static> {
                 }
                 self.dispatch_combo_event(combo_event);
             }
-            Event::Answer(AnswerEvent::SubagentEvent { .. }) => {
+            evt @ Event::Answer(AnswerEvent::SubagentEvent { id, event }) => {
+                if let SubagentEvent::Transcript {
+                    subagent_name,
+                    messages,
+                } = event
+                {
+                    self.store_subagent_transcript(
+                        id.clone(),
+                        subagent_name.clone(),
+                        messages.clone(),
+                    );
+                    return;
+                }
                 // RunTask tool is executing, set chat status to Processing
                 self.set_processing();
-                let _ = self.messages.on_tool_event(event);
+                let _ = self.messages.on_tool_event(evt);
             }
             Event::Answer(AnswerEvent::ToolOutput { .. }) => {
                 let _ = self.messages.on_tool_event(event);
