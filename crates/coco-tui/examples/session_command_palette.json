@@ -15,6 +15,10 @@
                 "shortcut": "<C-s>"
             },
             {
+                "name": "Regenerate Session Summary",
+                "shortcut": null
+            },
+            {
                 "name": "Switch Theme",
                 "shortcut": "<C-l>"
             }

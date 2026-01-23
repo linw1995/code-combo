@@ -77,6 +77,7 @@ impl From<ToolAction> for Action {
 pub enum CommandPaletteAction {
     NewSession,
     Transcript,
+    RegenerateSessionSummary,
     RestoreSession(PersistentSessionMetadata),
     SwitchTheme(String),
     SwitchModel(Option<String>),

@@ -27,6 +27,7 @@ use crate::{
 const COMMAND_NEW_SESSION: &str = "New Session";
 const COMMAND_TRANSCRIPT: &str = "Transcript";
 const COMMAND_SWITCH_SESSION: &str = "Switch Session";
+const COMMAND_REGENERATE_SUMMARY: &str = "Regenerate Session Summary";
 const COMMAND_SWITCH_THEME: &str = "Switch Theme";
 const COMMAND_SWITCH_MODEL: &str = "Switch Model";
 const COMMAND_SHELL: &str = "Shell";
@@ -306,6 +307,10 @@ impl CommandPalette {
                 shortcut: Some("<C-s>".to_string()),
             },
             Command {
+                name: COMMAND_REGENERATE_SUMMARY.to_string(),
+                shortcut: None,
+            },
+            Command {
                 name: COMMAND_SWITCH_THEME.to_string(),
                 shortcut: Some("<C-l>".to_string()),
             },
@@ -541,7 +546,15 @@ impl CommandPalette {
             .updated_at
             .format(&Rfc3339)
             .unwrap_or_else(|_| "unknown".to_string());
-        format!("{} [{}]", metadata.name, updated_at)
+        let summary = metadata
+            .summary
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        match summary {
+            Some(summary) => format!("{} [{}]", summary, updated_at),
+            None => format!("{} [{}]", metadata.name, updated_at),
+        }
     }
 
     fn on_enter(&mut self) -> Option<CommandPaletteAction> {
@@ -555,6 +568,9 @@ impl CommandPalette {
                     Some(COMMAND_SWITCH_SESSION) => {
                         self.open_session_switcher();
                         None
+                    }
+                    Some(COMMAND_REGENERATE_SUMMARY) => {
+                        Some(CommandPaletteAction::RegenerateSessionSummary)
                     }
                     Some(COMMAND_SWITCH_THEME) => {
                         self.open_theme_switcher();
