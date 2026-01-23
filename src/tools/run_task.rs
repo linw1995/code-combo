@@ -491,16 +491,25 @@ fn execute_subagent(
 
         // Helper to emit stream updates as Output events, aggregating into lines
         let emit_update = move |update: ChatStreamUpdate| {
-            let (buffer, stream, prefix) = match &update {
-                ChatStreamUpdate::Plain { .. } => (&plain_buf_for_emit, StreamKind::Stdout, ""),
-                ChatStreamUpdate::Thinking { .. } => {
-                    (&thinking_buf_for_emit, StreamKind::Stderr, "[thinking] ")
+            let (buffer, stream, prefix, text) = match update {
+                ChatStreamUpdate::Reset => {
+                    if let Ok(mut buf) = plain_buf_for_emit.lock() {
+                        buf.clear();
+                    }
+                    if let Ok(mut buf) = thinking_buf_for_emit.lock() {
+                        buf.clear();
+                    }
+                    return;
                 }
-            };
-
-            let text = match update {
-                ChatStreamUpdate::Plain { text, .. } => text,
-                ChatStreamUpdate::Thinking { text, .. } => text,
+                ChatStreamUpdate::Plain { text, .. } => {
+                    (&plain_buf_for_emit, StreamKind::Stdout, "", text)
+                }
+                ChatStreamUpdate::Thinking { text, .. } => (
+                    &thinking_buf_for_emit,
+                    StreamKind::Stderr,
+                    "[thinking] ",
+                    text,
+                ),
             };
 
             let mut buf = buffer.lock().unwrap();

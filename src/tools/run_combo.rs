@@ -127,6 +127,11 @@ pub enum ComboEvent {
         /// Streamed text.
         text: String,
     },
+    /// Reset prompt stream for combo reply.
+    PromptStreamReset {
+        /// Combo name.
+        name: String,
+    },
     /// Reply tool use from prompt.
     ReplyToolUse {
         /// Combo name.
@@ -638,25 +643,46 @@ async fn execute_combo(
                                         thinking.clone(),
                                         cancel_token.clone(),
                                         move |update| {
-                                            let (index, kind, text) = match update {
+                                            match update {
+                                                ChatStreamUpdate::Reset => {
+                                                    thinking_seen_stream.store(
+                                                        false,
+                                                        std::sync::atomic::Ordering::Relaxed,
+                                                    );
+                                                    emit_combo_event(
+                                                        &on_event_stream,
+                                                        ComboEvent::PromptStreamReset {
+                                                            name: stream_name.clone(),
+                                                        },
+                                                    );
+                                                }
                                                 ChatStreamUpdate::Plain { index, text } => {
-                                                    (index, ComboStreamKind::Plain, text)
+                                                    emit_combo_event(
+                                                        &on_event_stream,
+                                                        ComboEvent::PromptStream {
+                                                            name: stream_name.clone(),
+                                                            index,
+                                                            kind: ComboStreamKind::Plain,
+                                                            text,
+                                                        },
+                                                    );
                                                 }
                                                 ChatStreamUpdate::Thinking { index, text } => {
-                                                    thinking_seen_stream
-                                                        .store(true, std::sync::atomic::Ordering::Relaxed);
-                                                    (index, ComboStreamKind::Thinking, text)
+                                                    thinking_seen_stream.store(
+                                                        true,
+                                                        std::sync::atomic::Ordering::Relaxed,
+                                                    );
+                                                    emit_combo_event(
+                                                        &on_event_stream,
+                                                        ComboEvent::PromptStream {
+                                                            name: stream_name.clone(),
+                                                            index,
+                                                            kind: ComboStreamKind::Thinking,
+                                                            text,
+                                                        },
+                                                    );
                                                 }
-                                            };
-                                            emit_combo_event(
-                                                &on_event_stream,
-                                                ComboEvent::PromptStream {
-                                                    name: stream_name.clone(),
-                                                    index,
-                                                    kind,
-                                                    text,
-                                                },
-                                            );
+                                            }
                                         },
                                     )
                                     .await
@@ -1268,22 +1294,37 @@ async fn handle_offload_combo_reply(
     let on_event_stream = on_event.clone();
     let stream_name = combo_name.to_string();
     let chat_response = agent
-        .chat_stream_with_history(cancel_token.clone(), move |update| {
-            let (index, kind, text) = match update {
-                ChatStreamUpdate::Plain { index, text } => (index, ComboStreamKind::Plain, text),
-                ChatStreamUpdate::Thinking { index, text } => {
-                    (index, ComboStreamKind::Thinking, text)
-                }
-            };
-            emit_combo_event(
-                &on_event_stream,
-                ComboEvent::PromptStream {
-                    name: stream_name.clone(),
-                    index,
-                    kind,
-                    text,
-                },
-            );
+        .chat_stream_with_history(cancel_token.clone(), move |update| match update {
+            ChatStreamUpdate::Reset => {
+                emit_combo_event(
+                    &on_event_stream,
+                    ComboEvent::PromptStreamReset {
+                        name: stream_name.clone(),
+                    },
+                );
+            }
+            ChatStreamUpdate::Plain { index, text } => {
+                emit_combo_event(
+                    &on_event_stream,
+                    ComboEvent::PromptStream {
+                        name: stream_name.clone(),
+                        index,
+                        kind: ComboStreamKind::Plain,
+                        text,
+                    },
+                );
+            }
+            ChatStreamUpdate::Thinking { index, text } => {
+                emit_combo_event(
+                    &on_event_stream,
+                    ComboEvent::PromptStream {
+                        name: stream_name.clone(),
+                        index,
+                        kind: ComboStreamKind::Thinking,
+                        text,
+                    },
+                );
+            }
         })
         .await
         .map_err(|e| ComboReplyError::ChatFailed {

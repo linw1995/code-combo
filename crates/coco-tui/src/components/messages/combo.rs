@@ -353,6 +353,12 @@ impl Combo {
                     self.push_prompt(prompt);
                 }
             }
+            ComboEvent::PromptStreamReset { id, .. } => {
+                if self.matches_id(id) {
+                    self.messages.finalize_stream();
+                    self.messages.reset_stream();
+                }
+            }
             ComboEvent::PromptStream {
                 id,
                 index,

@@ -13,6 +13,7 @@ mod mcp;
 mod provider;
 mod retry;
 mod runtime_overrides;
+mod stream_error;
 mod text_edit;
 pub mod tools;
 pub mod version;
@@ -26,6 +27,7 @@ pub use mcp::*;
 pub use provider::*;
 pub use retry::*;
 pub use runtime_overrides::*;
+pub use stream_error::*;
 pub use text_edit::*;
 
 #[cfg(test)]
