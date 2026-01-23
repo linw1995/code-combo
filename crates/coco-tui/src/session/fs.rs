@@ -10,6 +10,8 @@ use crate::error::Result;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistentSessionMetadata {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: time::OffsetDateTime,
     #[serde(with = "time::serde::rfc3339")]
@@ -23,6 +25,10 @@ impl PersistentSessionMetadata {
 
     pub fn metadata_filename(&self) -> String {
         format!("{}.metadata.json", self.created_at.unix_timestamp_nanos())
+    }
+
+    pub fn metadata_filename_for_created_at(created_at: time::OffsetDateTime) -> String {
+        format!("{}.metadata.json", created_at.unix_timestamp_nanos())
     }
 }
 
@@ -44,13 +50,14 @@ impl PersistentSession {
     pub fn to_metadata(&self) -> PersistentSessionMetadata {
         PersistentSessionMetadata {
             name: self.name.clone(),
+            summary: None,
             created_at: self.created_at,
             updated_at: self.updated_at,
         }
     }
 }
 
-async fn load_session_metadata(
+pub async fn load_session_metadata(
     session_dir: &Path,
     filename: &str,
 ) -> Result<PersistentSessionMetadata> {
@@ -116,7 +123,11 @@ pub async fn list_session(session_dir: &Path) -> Result<Vec<PersistentSessionMet
     Ok(sessions)
 }
 
-pub async fn save_session(session_dir: &Path, session: PersistentSession) -> Result<()> {
+pub async fn save_session(
+    session_dir: &Path,
+    session: PersistentSession,
+    summary: Option<String>,
+) -> Result<()> {
     // Save full session
     let json =
         serde_json::to_string_pretty(&session).whatever_context("failed to serialize session")?;
@@ -127,7 +138,18 @@ pub async fn save_session(session_dir: &Path, session: PersistentSession) -> Res
         .whatever_context("failed to write session to file")?;
 
     // Save metadata
-    let metadata = session.to_metadata();
+    let mut metadata = session.to_metadata();
+    let summary = match summary {
+        Some(summary) => Some(summary),
+        None => {
+            let filename = metadata.metadata_filename();
+            load_session_metadata(session_dir, &filename)
+                .await
+                .ok()
+                .and_then(|metadata| metadata.summary)
+        }
+    };
+    metadata.summary = summary;
     let metadata_json =
         serde_json::to_string_pretty(&metadata).whatever_context("failed to serialize metadata")?;
 

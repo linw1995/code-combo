@@ -181,6 +181,7 @@ enum TranscriptScope {
 }
 
 const CTRL_C_WINDOW: Duration = Duration::from_secs(2);
+const SESSION_SUMMARY_MAX_LEN: usize = 80;
 #[derive(Debug, Default)]
 struct CancellationGuard {
     last_hit: State<Option<Instant>>,
@@ -317,7 +318,7 @@ impl Chat<'static> {
         });
     }
 
-    fn schedule_save_task(&mut self, save_at: Instant) {
+    fn schedule_save_task(&mut self, save_at: Instant, force_summary_refresh: bool) {
         // Cancel existing timer if any
         if let Some(token) = self.token_schedule_session_save.take() {
             token.cancel();
@@ -348,18 +349,60 @@ impl Chat<'static> {
                 return;
             }
 
-            let now = time::OffsetDateTime::now_utc();
-            let persistent_session = crate::session::PersistentSession {
-                name: state.name.clone(),
-                inner: session::save_related(&state, messages),
-                created_at: state.created_at,
-                updated_at: now,
-            };
-
             tokio::select! {
                 _ = token.cancelled() => (),
                 _ = tokio::time::sleep_until(save_at) => {
-                    if let Err(e) = crate::session::save_session(&session_dir, persistent_session).await {
+                    let summary = if force_summary_refresh {
+                        generate_session_summary(
+                            &state.messages,
+                            state.model_override.clone(),
+                            state.thinking_enabled,
+                        )
+                        .await
+                    } else {
+                        let metadata_filename =
+                            session::PersistentSessionMetadata::metadata_filename_for_created_at(
+                                state.created_at,
+                            );
+                        let metadata_path = session_dir.join(&metadata_filename);
+                        let metadata_exists = match tokio::fs::try_exists(&metadata_path).await {
+                            Ok(exists) => exists,
+                            Err(err) => {
+                                warn!(?err, "failed to check session metadata");
+                                true
+                            }
+                        };
+                        if metadata_exists {
+                            match session::load_session_metadata(&session_dir, &metadata_filename)
+                                .await
+                            {
+                                Ok(metadata) => metadata.summary,
+                                Err(err) => {
+                                    warn!(?err, "failed to load session metadata");
+                                    None
+                                }
+                            }
+                        } else {
+                            generate_session_summary(
+                                &state.messages,
+                                state.model_override.clone(),
+                                state.thinking_enabled,
+                            )
+                            .await
+                        }
+                    };
+                    let now = time::OffsetDateTime::now_utc();
+                    let persistent_session = crate::session::PersistentSession {
+                        name: state.name.clone(),
+                        inner: session::save_related(&state, messages),
+                        created_at: state.created_at,
+                        updated_at: now,
+                    };
+
+                    if let Err(e) =
+                        crate::session::save_session(&session_dir, persistent_session, summary)
+                            .await
+                    {
                         warn!(?e, "failed to save session");
                     } else {
                         debug!("Session saved successfully");
@@ -370,11 +413,16 @@ impl Chat<'static> {
     }
 
     fn save_at(&mut self, save_at: Instant) {
-        self.schedule_save_task(save_at);
+        self.schedule_save_task(save_at, false);
     }
 
     fn save_now(&mut self) {
-        self.schedule_save_task(Instant::now());
+        self.schedule_save_task(Instant::now(), false);
+    }
+
+    fn regenerate_session_summary(&mut self) {
+        self.state.write_untracked().updated_at = OffsetDateTime::now_utc();
+        self.schedule_save_task(Instant::now(), true);
     }
 
     fn restore_last_session(&mut self) {
@@ -1961,6 +2009,10 @@ impl Component for Chat<'static> {
                     self.update_focus(Focus::InputBlur);
                     self.open_transcript();
                 }
+                CommandPaletteAction::RegenerateSessionSummary => {
+                    self.update_focus(Focus::InputBlur);
+                    self.regenerate_session_summary();
+                }
                 CommandPaletteAction::RestoreSession(metadata) => {
                     self.update_focus(Focus::InputBlur);
                     if !self.messages.is_empty() {
@@ -2117,6 +2169,80 @@ fn add_usage(total: &mut UsageStats, delta: &UsageStats) {
     }
     if let Some(delta_total) = delta.total_tokens {
         total.total_tokens = Some(total.total_tokens.unwrap_or(0) + delta_total);
+    }
+}
+
+fn session_summary_prompt() -> String {
+    format!(
+        "Write a short session summary for a session switcher list. Return a single line (max {SESSION_SUMMARY_MAX_LEN} chars), plain text only, no quotes. Focus on the user's goal and progress. If there is no meaningful content, return an empty string."
+    )
+}
+
+async fn generate_session_summary(
+    messages: &[ChatMessage],
+    model_override: Option<String>,
+    thinking_enabled: bool,
+) -> Option<String> {
+    if messages.is_empty() {
+        return None;
+    }
+
+    let config = global::config().await;
+    let config_dir = config.config_dir.clone();
+    let workspace_dir = global::workspace_dir().to_path_buf();
+    let mut summary_agent = Agent::new(config);
+    summary_agent
+        .setup_system_prompt_async(&config_dir, &workspace_dir)
+        .await;
+    summary_agent.apply_tool_policies(Some(&[]), None);
+    summary_agent.set_model_override(model_override);
+    summary_agent.set_thinking_enabled(thinking_enabled);
+    summary_agent.restore_messages(messages).await;
+
+    let response = match summary_agent
+        .chat(ChatMessage::user(ChatContent::Text(
+            session_summary_prompt(),
+        )))
+        .await
+    {
+        Ok(response) => response,
+        Err(err) => {
+            warn!(?err, "failed to generate session summary");
+            return None;
+        }
+    };
+    let raw = extract_text_response(&response.message);
+    sanitize_session_summary(&raw)
+}
+
+fn extract_text_response(message: &ChatMessage) -> String {
+    match &message.content {
+        ChatContent::Text(text) => text.clone(),
+        ChatContent::Multiple(blocks) => blocks
+            .iter()
+            .filter_map(|block| {
+                if let ChatBlock::Text { text } = block {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
+fn sanitize_session_summary(raw: &str) -> Option<String> {
+    let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = collapsed.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let summary: String = trimmed.chars().take(SESSION_SUMMARY_MAX_LEN).collect();
+    if summary.is_empty() {
+        None
+    } else {
+        Some(summary)
     }
 }
 
@@ -2714,5 +2840,24 @@ mod tests {
             parsed.get("_truncated").and_then(|value| value.as_bool()),
             Some(true)
         );
+    }
+
+    #[test]
+    fn sanitize_session_summary_collapses_whitespace() {
+        let raw = "  Hello   world\nsecond   line  ";
+        let summary = sanitize_session_summary(raw).expect("expected summary");
+        assert_eq!(summary, "Hello world second line");
+    }
+
+    #[test]
+    fn sanitize_session_summary_truncates() {
+        let raw = "a".repeat(SESSION_SUMMARY_MAX_LEN + 20);
+        let summary = sanitize_session_summary(&raw).expect("expected summary");
+        assert_eq!(summary.len(), SESSION_SUMMARY_MAX_LEN);
+    }
+
+    #[test]
+    fn sanitize_session_summary_empty_returns_none() {
+        assert!(sanitize_session_summary("   \n\t").is_none());
     }
 }
