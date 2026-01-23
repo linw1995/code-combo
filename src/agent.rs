@@ -297,10 +297,6 @@ impl StreamAccumulator {
     }
 }
 
-fn should_retry_stream_error(err: &StreamError) -> bool {
-    err.is_retryable()
-}
-
 fn stream_retry_delay(attempt: usize, max_delay: Duration) -> Duration {
     let shift = attempt.saturating_sub(1).min(30) as u32;
     let multiplier = 1u64 << shift;
@@ -781,7 +777,7 @@ impl Agent {
             }
 
             if let Some(err) = stream_error {
-                if should_retry_stream_error(&err) && attempt < max_attempts {
+                if err.is_retryable() && attempt < max_attempts {
                     attempt += 1;
                     retried = true;
                     let delay = stream_retry_delay(attempt, max_delay);
@@ -1811,13 +1807,13 @@ mod tests {
     #[test]
     fn retry_stream_error_heuristics() {
         let err = StreamError::transport("read stream chunk error: broken pipe".to_string());
-        assert!(should_retry_stream_error(&err));
+        assert!(err.is_retryable());
 
         let err = StreamError::decode("decode stream event data".to_string());
-        assert!(!should_retry_stream_error(&err));
+        assert!(!err.is_retryable());
 
         let err = StreamError::decode("chat stream cancelled".to_string());
-        assert!(!should_retry_stream_error(&err));
+        assert!(!err.is_retryable());
     }
 
     #[test]
