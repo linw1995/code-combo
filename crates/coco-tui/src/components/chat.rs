@@ -1,7 +1,7 @@
 use coco_macro::ComponentExt;
 use code_combo::tools::{
     ComboEvent as ComboToolEvent, ComboInfo, ComboStreamKind, Final, RUN_COMBO_TOOL_NAME,
-    RunComboInput, SubagentEvent,
+    RUN_TASK_TOOL_NAME, RunComboInput, RunTaskInput, SubagentEvent,
 };
 use code_combo::{
     Agent, Block as ChatBlock, ChatResponse, ChatStreamUpdate, Config, Content as ChatContent,
@@ -40,8 +40,7 @@ use super::{
     Action, AnswerEvent, AskEvent, BotMessage, BotStreamKind, CacheInvalidation, Combo,
     ComboAction, ComboEvent, CommandPaletteAction, Component, Event, Input, Message, Messages,
     NavigationKey, NavigationResult, Plain, SessionAction, ShortcutHints, ShortcutHintsPanel,
-    Thinking, Tool, ToolAction, TranscriptLink, TranscriptLinkKind, TranscriptLinkTarget,
-    TranscriptMessage,
+    Thinking, Tool, ToolAction, TranscriptLinkKind, TranscriptLinkTarget, TranscriptMessage,
 };
 use crate::{
     components::{CommandPalette, Content, Persistable},
@@ -1133,8 +1132,8 @@ impl Chat<'static> {
         let agent_messages = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(self.agent.dump_messages())
         });
-        self.append_transcript_messages(agent_messages);
-        self.append_transcript_links();
+        let link_map = self.build_transcript_link_map(&agent_messages);
+        self.append_transcript_messages(agent_messages, &link_map);
     }
 
     fn build_combo_transcript(&mut self, id: &str, name: &str) {
@@ -1145,7 +1144,9 @@ impl Chat<'static> {
                 .push(Message::system(Plain::new(message).into()).with_role_prefix(false));
             return;
         };
-        self.append_transcript_messages(entry.messages.clone());
+        let messages = entry.messages.clone();
+        let link_map = self.build_transcript_link_map(&messages);
+        self.append_transcript_messages(messages, &link_map);
     }
 
     fn build_subagent_transcript(&mut self, id: &str, name: &str) {
@@ -1160,63 +1161,69 @@ impl Chat<'static> {
                 .push(Message::system(Plain::new(message).into()).with_role_prefix(false));
             return;
         };
-        self.append_transcript_messages(entry.messages.clone());
+        let messages = entry.messages.clone();
+        let link_map = self.build_transcript_link_map(&messages);
+        self.append_transcript_messages(messages, &link_map);
     }
 
-    fn append_transcript_messages(&mut self, messages: Vec<ChatMessage>) {
-        let iter = messages
-            .into_iter()
-            .map(|message| Message::system(TranscriptMessage::new(message).into()));
+    fn append_transcript_messages(
+        &mut self,
+        messages: Vec<ChatMessage>,
+        link_map: &HashMap<String, TranscriptLinkTarget>,
+    ) {
+        let iter = messages.into_iter().map(|message| {
+            Message::system(TranscriptMessage::new_with_links(message, link_map).into())
+        });
         self.transcript.extend(iter);
     }
 
-    fn append_transcript_links(&mut self) {
-        let state = self.state.read();
-        if state.combo_transcripts.is_empty() && state.subagent_transcripts.is_empty() {
-            return;
-        }
-
-        self.transcript
-            .push(Message::system(Plain::new(String::new()).into()).with_role_prefix(false));
-
-        if !state.combo_transcripts.is_empty() {
-            self.transcript.push(
-                Message::system(Plain::new("Combo transcripts:".to_string()).into())
-                    .with_role_prefix(false),
-            );
-            for entry in &state.combo_transcripts {
-                let target = TranscriptLinkTarget {
-                    kind: TranscriptLinkKind::Combo,
-                    id: entry.id.clone(),
-                    name: entry.name.clone(),
+    fn build_transcript_link_map(
+        &self,
+        messages: &[ChatMessage],
+    ) -> HashMap<String, TranscriptLinkTarget> {
+        let mut map = HashMap::new();
+        for message in messages {
+            let ChatContent::Multiple(blocks) = &message.content else {
+                continue;
+            };
+            for block in blocks {
+                let ChatBlock::ToolUse(tool_use) = block else {
+                    continue;
                 };
-                let link = TranscriptLink::new(target, entry.messages.len());
-                self.transcript
-                    .push(Message::system(link.into()).with_role_prefix(false));
+                match tool_use.name.as_str() {
+                    RUN_COMBO_TOOL_NAME => {
+                        if let Ok(input) =
+                            serde_json::from_value::<RunComboInput>(tool_use.input.clone())
+                        {
+                            map.insert(
+                                tool_use.id.clone(),
+                                TranscriptLinkTarget {
+                                    kind: TranscriptLinkKind::Combo,
+                                    id: tool_use.id.clone(),
+                                    name: input.combo_name,
+                                },
+                            );
+                        }
+                    }
+                    RUN_TASK_TOOL_NAME => {
+                        if let Ok(input) =
+                            serde_json::from_value::<RunTaskInput>(tool_use.input.clone())
+                        {
+                            map.insert(
+                                tool_use.id.clone(),
+                                TranscriptLinkTarget {
+                                    kind: TranscriptLinkKind::Subagent,
+                                    id: tool_use.id.clone(),
+                                    name: input.subagent_name,
+                                },
+                            );
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
-
-        if !state.subagent_transcripts.is_empty() {
-            if !state.combo_transcripts.is_empty() {
-                self.transcript.push(
-                    Message::system(Plain::new(String::new()).into()).with_role_prefix(false),
-                );
-            }
-            self.transcript.push(
-                Message::system(Plain::new("Subagent transcripts:".to_string()).into())
-                    .with_role_prefix(false),
-            );
-            for entry in &state.subagent_transcripts {
-                let target = TranscriptLinkTarget {
-                    kind: TranscriptLinkKind::Subagent,
-                    id: entry.id.clone(),
-                    name: entry.name.clone(),
-                };
-                let link = TranscriptLink::new(target, entry.messages.len());
-                self.transcript
-                    .push(Message::system(link.into()).with_role_prefix(false));
-            }
-        }
+        map
     }
 
     fn ensure_transcript_focus(&mut self) {
@@ -1242,8 +1249,8 @@ impl Chat<'static> {
 
     fn transcript_selected_link_target(&self) -> Option<TranscriptLinkTarget> {
         self.transcript
-            .selected_message_as::<TranscriptLink>()
-            .map(|link| link.target())
+            .selected_message_as::<TranscriptMessage>()
+            .and_then(|message| message.link_target())
     }
 
     fn open_transcript_link(&mut self) {
