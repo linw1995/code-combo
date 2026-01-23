@@ -330,6 +330,12 @@ impl Messages {
         self.focus.get()
     }
 
+    pub fn selected_message_as<T: 'static>(&self) -> Option<&T> {
+        let idx = self.focus.get()?;
+        let message = self.messages.read().get(idx)?;
+        message.content_as_any().downcast_ref::<T>()
+    }
+
     fn update_focus(&mut self, new_focus: Option<usize>) {
         let old_focus = self.focus.get();
         if old_focus == new_focus {

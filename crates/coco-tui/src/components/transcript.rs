@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use coco_macro::{ComponentExt, ContentComponentExt};
 use code_combo::{Block as ChatBlock, Content as ChatContent, Message as ChatMessage};
 use ratatui::{
@@ -10,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    components::{CodeHighlight, Component, Content, ContentComponent, Persistable},
+    components::{CodeHighlight, Component, Content, ContentComponent, Persistable, ShortcutHints},
     error::Result,
     session::{self, Session},
     widgets::Paragraph,
@@ -26,6 +28,7 @@ struct TranscriptState {
 pub struct TranscriptMessage {
     state: TranscriptState,
     segments: Vec<Box<dyn ContentComponent>>,
+    link_target: Option<TranscriptLinkTarget>,
 }
 
 const INDENT_STEP: u16 = 2;
@@ -70,6 +73,20 @@ impl Content for TranscriptPlain {
 }
 
 impl ContentComponent for TranscriptPlain {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptLinkKind {
+    Combo,
+    Subagent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscriptLinkTarget {
+    pub kind: TranscriptLinkKind,
+    pub id: String,
+    pub name: String,
+}
 
 #[derive(Serialize, Deserialize)]
 struct TranscriptTextState {
@@ -255,6 +272,8 @@ impl ContentComponent for TranscriptThinking {}
 #[derive(Serialize, Deserialize)]
 struct TranscriptToolUseState {
     tool_use: code_combo::ToolUse,
+    #[serde(default)]
+    link_target: Option<TranscriptLinkTarget>,
 }
 
 #[derive(ComponentExt, ContentComponentExt)]
@@ -265,11 +284,12 @@ struct TranscriptToolUse {
 }
 
 impl TranscriptToolUse {
-    fn new(tool_use: &code_combo::ToolUse) -> Self {
+    fn new(tool_use: &code_combo::ToolUse, link_target: Option<TranscriptLinkTarget>) -> Self {
         let input = json_component(&tool_use.input);
         Self {
             state: TranscriptToolUseState {
                 tool_use: tool_use.clone(),
+                link_target,
             },
             input,
         }
@@ -283,7 +303,7 @@ impl Persistable for TranscriptToolUse {
 
     fn load(session: Session) -> Result<Self> {
         let state: TranscriptToolUseState = session::load(session)?;
-        Ok(Self::new(&state.tool_use))
+        Ok(Self::new(&state.tool_use, state.link_target))
     }
 }
 
@@ -346,6 +366,18 @@ impl Content for TranscriptToolUse {
         let body_height = child_height(self.input.as_ref(), width, INDENT_STEP * 2);
         header_height + id_height + name_height + input_height + body_height
     }
+
+    fn is_actionable(&self) -> bool {
+        self.state.link_target.is_some()
+    }
+
+    fn shortcut_hints(&self) -> ShortcutHints {
+        if self.state.link_target.is_some() {
+            ShortcutHints::from_visible(&[("Open", "Enter")])
+        } else {
+            ShortcutHints::default()
+        }
+    }
 }
 
 impl ContentComponent for TranscriptToolUse {}
@@ -355,6 +387,8 @@ struct TranscriptToolResultState {
     tool_use_id: String,
     is_error: Option<bool>,
     content: ChatContent,
+    #[serde(default)]
+    link_target: Option<TranscriptLinkTarget>,
 }
 
 #[derive(ComponentExt, ContentComponentExt)]
@@ -365,13 +399,19 @@ struct TranscriptToolResult {
 }
 
 impl TranscriptToolResult {
-    fn new(tool_use_id: &str, is_error: Option<bool>, content: &ChatContent) -> Self {
+    fn new(
+        tool_use_id: &str,
+        is_error: Option<bool>,
+        content: &ChatContent,
+        link_target: Option<TranscriptLinkTarget>,
+    ) -> Self {
         let content_section = TranscriptContentSection::new(content, true);
         Self {
             state: TranscriptToolResultState {
                 tool_use_id: tool_use_id.to_string(),
                 is_error,
                 content: content.clone(),
+                link_target,
             },
             content: content_section,
         }
@@ -389,6 +429,7 @@ impl Persistable for TranscriptToolResult {
             &state.tool_use_id,
             state.is_error,
             &state.content,
+            state.link_target,
         ))
     }
 }
@@ -469,6 +510,18 @@ impl Content for TranscriptToolResult {
         total += child_height(&self.content, width, INDENT_STEP * 2);
         total
     }
+
+    fn is_actionable(&self) -> bool {
+        self.state.link_target.is_some()
+    }
+
+    fn shortcut_hints(&self) -> ShortcutHints {
+        if self.state.link_target.is_some() {
+            ShortcutHints::from_visible(&[("Open", "Enter")])
+        } else {
+            ShortcutHints::default()
+        }
+    }
 }
 
 impl ContentComponent for TranscriptToolResult {}
@@ -488,7 +541,22 @@ struct TranscriptBlocks {
 
 impl TranscriptBlocks {
     fn new(blocks: &[ChatBlock], detect_json: bool) -> Self {
-        let items = build_block_items(blocks, detect_json);
+        let items = build_block_items(blocks, detect_json, &HashMap::new());
+        Self {
+            state: TranscriptBlocksState {
+                blocks: blocks.to_vec(),
+                detect_json,
+            },
+            items,
+        }
+    }
+
+    fn new_with_links(
+        blocks: &[ChatBlock],
+        detect_json: bool,
+        link_map: &HashMap<String, TranscriptLinkTarget>,
+    ) -> Self {
+        let items = build_block_items(blocks, detect_json, link_map);
         Self {
             state: TranscriptBlocksState {
                 blocks: blocks.to_vec(),
@@ -561,6 +629,22 @@ impl TranscriptBlocksSection {
     fn new(content: &ChatContent, detect_json: bool) -> Self {
         let blocks = blocks_from_content(content);
         let blocks = TranscriptBlocks::new(&blocks, detect_json);
+        Self {
+            state: TranscriptBlocksSectionState {
+                content: content.clone(),
+                detect_json,
+            },
+            blocks,
+        }
+    }
+
+    fn new_with_links(
+        content: &ChatContent,
+        detect_json: bool,
+        link_map: &HashMap<String, TranscriptLinkTarget>,
+    ) -> Self {
+        let blocks = blocks_from_content(content);
+        let blocks = TranscriptBlocks::new_with_links(&blocks, detect_json, link_map);
         Self {
             state: TranscriptBlocksSectionState {
                 content: content.clone(),
@@ -689,24 +773,61 @@ impl Content for TranscriptContentSection {
 impl ContentComponent for TranscriptContentSection {}
 
 impl TranscriptMessage {
-    pub fn new(message: ChatMessage) -> Self {
-        let segments = build_segments(&message);
+    pub fn new_with_links(
+        message: ChatMessage,
+        link_map: &HashMap<String, TranscriptLinkTarget>,
+    ) -> Self {
+        let segments = build_segments(&message, link_map);
+        let link_target = message_link_target(&message, link_map);
         Self {
             state: TranscriptState { message },
             segments,
+            link_target,
         }
+    }
+
+    pub fn link_target(&self) -> Option<TranscriptLinkTarget> {
+        self.link_target.clone()
     }
 }
 
-fn build_segments(message: &ChatMessage) -> Vec<Box<dyn ContentComponent>> {
+fn build_segments(
+    message: &ChatMessage,
+    link_map: &HashMap<String, TranscriptLinkTarget>,
+) -> Vec<Box<dyn ContentComponent>> {
     let role = match message.role {
         code_combo::Role::User => "user",
         code_combo::Role::Assistant => "assistant",
     };
     vec![
         TranscriptPlain::new(format!("role: {role}")).into(),
-        TranscriptBlocksSection::new(&message.content, false).into(),
+        TranscriptBlocksSection::new_with_links(&message.content, false, link_map).into(),
     ]
+}
+
+fn message_link_target(
+    message: &ChatMessage,
+    link_map: &HashMap<String, TranscriptLinkTarget>,
+) -> Option<TranscriptLinkTarget> {
+    let ChatContent::Multiple(blocks) = &message.content else {
+        return None;
+    };
+    for block in blocks {
+        match block {
+            ChatBlock::ToolUse(tool_use) => {
+                if let Some(target) = link_map.get(&tool_use.id) {
+                    return Some(target.clone());
+                }
+            }
+            ChatBlock::ToolResult { tool_use_id, .. } => {
+                if let Some(target) = link_map.get(tool_use_id) {
+                    return Some(target.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn blocks_from_content(content: &ChatContent) -> Vec<ChatBlock> {
@@ -716,26 +837,42 @@ fn blocks_from_content(content: &ChatContent) -> Vec<ChatBlock> {
     }
 }
 
-fn build_block_items(blocks: &[ChatBlock], detect_json: bool) -> Vec<Box<dyn ContentComponent>> {
+fn build_block_items(
+    blocks: &[ChatBlock],
+    detect_json: bool,
+    link_map: &HashMap<String, TranscriptLinkTarget>,
+) -> Vec<Box<dyn ContentComponent>> {
     blocks
         .iter()
-        .map(|block| block_component(block, detect_json))
+        .map(|block| block_component(block, detect_json, link_map))
         .collect()
 }
 
-fn block_component(block: &ChatBlock, detect_json: bool) -> Box<dyn ContentComponent> {
+fn block_component(
+    block: &ChatBlock,
+    detect_json: bool,
+    link_map: &HashMap<String, TranscriptLinkTarget>,
+) -> Box<dyn ContentComponent> {
     match block {
         ChatBlock::Text { text } => TranscriptText::new(text, detect_json).into(),
         ChatBlock::Thinking {
             thinking,
             signature,
         } => TranscriptThinking::new(thinking, signature.clone()).into(),
-        ChatBlock::ToolUse(tool_use) => TranscriptToolUse::new(tool_use).into(),
+        ChatBlock::ToolUse(tool_use) => {
+            TranscriptToolUse::new(tool_use, link_map.get(&tool_use.id).cloned()).into()
+        }
         ChatBlock::ToolResult {
             tool_use_id,
             is_error,
             content,
-        } => TranscriptToolResult::new(tool_use_id, *is_error, content).into(),
+        } => TranscriptToolResult::new(
+            tool_use_id,
+            *is_error,
+            content,
+            link_map.get(tool_use_id).cloned(),
+        )
+        .into(),
     }
 }
 
@@ -822,7 +959,7 @@ impl Persistable for TranscriptMessage {
 
     fn load(session: Session) -> Result<Self> {
         let state: TranscriptState = session::load(session)?;
-        Ok(Self::new(state.message))
+        Ok(Self::new_with_links(state.message, &HashMap::new()))
     }
 }
 
@@ -851,6 +988,18 @@ impl Content for TranscriptMessage {
             .iter()
             .map(|segment| segment.height(width))
             .sum()
+    }
+
+    fn is_actionable(&self) -> bool {
+        self.link_target.is_some()
+    }
+
+    fn shortcut_hints(&self) -> ShortcutHints {
+        if self.link_target.is_some() {
+            ShortcutHints::from_visible(&[("Open", "Enter")])
+        } else {
+            ShortcutHints::default()
+        }
     }
 }
 

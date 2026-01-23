@@ -450,6 +450,7 @@ impl<'a> RunTask<'a> {
                 drop(state);
                 self.rebuild_output();
             }
+            SubagentEvent::Transcript { .. } => {}
         }
     }
 

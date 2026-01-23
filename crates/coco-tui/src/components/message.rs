@@ -161,6 +161,10 @@ impl Message {
         false
     }
 
+    pub fn content_as_any(&self) -> &dyn Any {
+        self.content.as_any()
+    }
+
     pub fn content_as_mut_any(&mut self) -> &mut dyn Any {
         self.content.as_mut_any()
     }

@@ -101,6 +101,13 @@ pub enum SubagentEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         input_summary: Option<String>,
     },
+    /// Transcript messages captured for the subagent.
+    Transcript {
+        /// Subagent name.
+        subagent_name: String,
+        /// Transcript messages for the subagent.
+        messages: Vec<Message>,
+    },
 }
 
 /// Configuration needed to create and run subagent instances.
@@ -352,11 +359,14 @@ where
     let result = execute_subagent(
         subagent_base_config,
         parent_executor,
-        subagent_system_prompt,
-        input.prompt,
-        subagent_model_override,
-        cancel_token,
-        on_event_boxed,
+        SubagentExecutionParams {
+            system_prompt: subagent_system_prompt,
+            initial_prompt: input.prompt,
+            model_override: subagent_model_override,
+            cancel_token,
+            subagent_name: input.subagent_name.clone(),
+            on_event: on_event_boxed,
+        },
     )
     .await;
 
@@ -420,6 +430,22 @@ fn resolve_subagent_model(
     }
 }
 
+/// Parameters for executing a subagent.
+struct SubagentExecutionParams {
+    /// System prompt for the subagent.
+    system_prompt: String,
+    /// Initial prompt from the user.
+    initial_prompt: String,
+    /// Model override to use (if any).
+    model_override: Option<String>,
+    /// Cancellation token for the operation.
+    cancel_token: CancellationToken,
+    /// Name of the subagent.
+    subagent_name: String,
+    /// Callback for subagent events.
+    on_event: SubagentEventCallback,
+}
+
 /// Execute the subagent loop.
 ///
 /// Returns a boxed future to break type-level recursion that would otherwise
@@ -427,11 +453,7 @@ fn resolve_subagent_model(
 fn execute_subagent(
     config: Config,
     executor: Executor,
-    system_prompt: String,
-    initial_prompt: String,
-    model_override: Option<String>,
-    cancel_token: CancellationToken,
-    on_event: SubagentEventCallback,
+    params: SubagentExecutionParams,
 ) -> BoxFuture<'static, Result<RunTaskOutput, String>> {
     use crate::agent::Agent;
 
@@ -447,8 +469,8 @@ fn execute_subagent(
         };
 
         // Clone Arc for closures
-        let on_event_for_emit = on_event.clone();
-        let on_event_for_update = on_event.clone();
+        let on_event_for_emit = params.on_event.clone();
+        let on_event_for_update = params.on_event.clone();
 
         // Helper to emit events
         let emit_event = move |event: SubagentEvent| {
@@ -526,7 +548,7 @@ fn execute_subagent(
 
             // Emit remaining content
             for (stream, line) in lines_to_emit {
-                if let Ok(mut f) = on_event.lock() {
+                if let Ok(mut f) = params.on_event.lock() {
                     (*f)(&SubagentEvent::Output(OutputChunk {
                         timestamp: now_ms(),
                         stream,
@@ -538,18 +560,18 @@ fn execute_subagent(
 
         // Create subagent and configure it
         let mut subagent = Agent::new(config);
-        subagent.set_system_prompt(&system_prompt);
-        subagent.set_model_override(model_override);
+        subagent.set_system_prompt(&params.system_prompt);
+        subagent.set_model_override(params.model_override);
 
         // Send initial message
-        let user_message = Message::user(Content::Text(initial_prompt));
+        let user_message = Message::user(Content::Text(params.initial_prompt));
 
         let mut turns = 0;
         let max_turns = 50; // Prevent infinite loops
 
         // Initial chat
         let response = subagent
-            .chat_stream(user_message, cancel_token.clone(), &emit_update)
+            .chat_stream(user_message, params.cancel_token.clone(), &emit_update)
             .await
             .map_err(|e| format!("Subagent chat failed: {}", e))?;
 
@@ -562,15 +584,17 @@ fn execute_subagent(
 
         debug!(?stop_reason, turns, "Subagent initial response");
 
+        let mut output: Option<RunTaskOutput> = None;
+
         while matches!(stop_reason, Some(StopReason::ToolUse)) && turns < max_turns {
-            if cancel_token.is_cancelled() {
-                flush_buffers();
-                return Ok(RunTaskOutput {
+            if params.cancel_token.is_cancelled() {
+                output = Some(RunTaskOutput {
                     success: false,
-                    response: final_response,
+                    response: final_response.clone(),
                     turns,
                     error: Some("Cancelled".to_string()),
                 });
+                break;
             }
 
             // Extract and execute tool calls
@@ -596,7 +620,7 @@ fn execute_subagent(
                 });
 
                 // Clone info for the execute_with_output callback
-                let on_event_for_exec = on_event.clone();
+                let on_event_for_exec = params.on_event.clone();
                 let tool_id_for_perm = tool_use.id.clone();
                 let tool_name_for_perm = tool_use.name.clone();
                 let input_summary_for_perm = input_summary.clone();
@@ -614,7 +638,7 @@ fn execute_subagent(
                         &tool_use.id,
                         &tool_use.name,
                         input,
-                        cancel_token.clone(),
+                        params.cancel_token.clone(),
                         |output| match &output {
                             crate::agent::Output::ToolOutput(chunk) => {
                                 if let Ok(mut f) = on_event_for_exec.lock() {
@@ -714,7 +738,7 @@ fn execute_subagent(
 
             // Continue conversation
             let next_response = subagent
-                .chat_stream_with_history(cancel_token.clone(), &emit_update)
+                .chat_stream_with_history(params.cancel_token.clone(), &emit_update)
                 .await
                 .map_err(|e| format!("Subagent continuation failed: {}", e))?;
 
@@ -726,21 +750,30 @@ fn execute_subagent(
             debug!(?stop_reason, turns, "Subagent continuation response");
         }
 
-        debug!(
-            turns,
-            response_len = final_response.len(),
-            "Subagent execution completed, exiting loop"
-        );
+        if output.is_none() {
+            debug!(
+                turns,
+                response_len = final_response.len(),
+                "Subagent execution completed, exiting loop"
+            );
+            output = Some(RunTaskOutput {
+                success: true,
+                response: final_response,
+                turns,
+                error: None,
+            });
+        }
 
         // Flush any remaining buffered content before returning
         flush_buffers();
 
-        Ok(RunTaskOutput {
-            success: true,
-            response: final_response,
-            turns,
-            error: None,
-        })
+        let transcript_messages = subagent.dump_messages().await;
+        emit_event(SubagentEvent::Transcript {
+            subagent_name: params.subagent_name,
+            messages: transcript_messages,
+        });
+
+        Ok(output.expect("subagent output should be set"))
     })
 }
 

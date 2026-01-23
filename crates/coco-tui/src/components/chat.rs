@@ -1,7 +1,7 @@
 use coco_macro::ComponentExt;
 use code_combo::tools::{
     ComboEvent as ComboToolEvent, ComboInfo, ComboStreamKind, Final, RUN_COMBO_TOOL_NAME,
-    RunComboInput,
+    RUN_TASK_TOOL_NAME, RunComboInput, RunTaskInput, SubagentEvent,
 };
 use code_combo::{
     Agent, Block as ChatBlock, ChatResponse, ChatStreamUpdate, Config, Content as ChatContent,
@@ -40,7 +40,7 @@ use super::{
     Action, AnswerEvent, AskEvent, BotMessage, BotStreamKind, CacheInvalidation, Combo,
     ComboAction, ComboEvent, CommandPaletteAction, Component, Event, Input, Message, Messages,
     NavigationKey, NavigationResult, Plain, SessionAction, ShortcutHints, ShortcutHintsPanel,
-    Thinking, Tool, ToolAction, TranscriptMessage,
+    Thinking, Tool, ToolAction, TranscriptLinkKind, TranscriptLinkTarget, TranscriptMessage,
 };
 use crate::{
     components::{CommandPalette, Content, Persistable},
@@ -70,9 +70,24 @@ pub struct Chat<'a> {
     pending_combo_tool_events: HashMap<String, Vec<ComboEvent>>,
     last_usage: Option<UsageStats>,
     retry_status: Option<RetryAttempt>,
+    transcript_scopes: Vec<TranscriptScope>,
 
     token_schedule_session_save: Option<CancellationToken>,
     cancellation_guard: CancellationGuard,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ComboTranscript {
+    id: String,
+    name: String,
+    messages: Vec<ChatMessage>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct SubagentTranscript {
+    id: String,
+    name: String,
+    messages: Vec<ChatMessage>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -96,6 +111,10 @@ struct Inner {
     #[serde(default)]
     system_prompt: Option<String>,
     messages: Vec<code_combo::Message>,
+    #[serde(default)]
+    combo_transcripts: Vec<ComboTranscript>,
+    #[serde(default)]
+    subagent_transcripts: Vec<SubagentTranscript>,
 }
 
 impl Default for Inner {
@@ -104,6 +123,8 @@ impl Default for Inner {
         Self {
             system_prompt: None,
             messages: vec![],
+            combo_transcripts: Vec::new(),
+            subagent_transcripts: Vec::new(),
             state: ChatState::Ready,
             focus: Focus::Input,
             auto_accept_edits: false,
@@ -151,6 +172,12 @@ enum Focus {
 enum ViewMode {
     Chat,
     Transcript,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum TranscriptScope {
+    Combo { id: String, name: String },
+    Subagent { id: String, name: String },
 }
 
 const CTRL_C_WINDOW: Duration = Duration::from_secs(2);
@@ -241,6 +268,7 @@ impl Chat<'static> {
             pending_combo_tool_events: HashMap::new(),
             last_usage: None,
             retry_status: None,
+            transcript_scopes: Vec::new(),
             token_schedule_session_save: None,
             cancellation_guard: CancellationGuard::default(),
         }
@@ -431,6 +459,9 @@ impl Chat<'static> {
             }
             ComboEvent::ReplyToolResult { .. } => {
                 // Result is handled by Combo component
+            }
+            ComboEvent::Transcript { id, name, messages } => {
+                self.store_combo_transcript(id.clone(), name.clone(), messages.clone());
             }
         }
     }
@@ -656,6 +687,11 @@ impl Chat<'static> {
                 id: Some(id.to_string()),
                 name: name.clone(),
             },
+            ComboToolEvent::Transcript { name, messages } => ComboEvent::Transcript {
+                id: id.to_string(),
+                name: name.clone(),
+                messages: messages.clone(),
+            },
         }
     }
 
@@ -813,7 +849,12 @@ impl Chat<'static> {
 
     fn transcript_shortcut_hints(&self) -> ShortcutHints {
         let mut hints = self.transcript.shortcut_hints();
-        hints.push_visible(&[("Back", "Esc")]);
+        let back_label = if self.transcript_scopes.is_empty() {
+            "Close"
+        } else {
+            "Back"
+        };
+        hints.push_visible(&[(back_label, "Esc")]);
         hints.push_visible(&[("Up", "k"), ("Down", "j")]);
         hints.push_hidden(&[("Scroll Up", "C-y"), ("Down", "C-e")]);
         hints.push_hidden(&[("Scroll+ Up", "C-u"), ("Down", "C-d")]);
@@ -1059,15 +1100,8 @@ impl Chat<'static> {
 
     fn open_transcript(&mut self) {
         self.update_focus(Focus::InputBlur);
-        let agent_messages = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.agent.dump_messages())
-        });
-
-        self.transcript.clear();
-        let iter = agent_messages
-            .into_iter()
-            .map(|message| Message::system(TranscriptMessage::new(message).into()));
-        self.transcript.extend(iter);
+        self.transcript_scopes.clear();
+        self.rebuild_transcript_view();
         self.view = ViewMode::Transcript;
         global::signal_dirty();
     }
@@ -1075,7 +1109,260 @@ impl Chat<'static> {
     fn close_transcript(&mut self) {
         self.view = ViewMode::Chat;
         self.update_focus(Focus::InputBlur);
+        self.transcript_scopes.clear();
         global::signal_dirty();
+    }
+
+    fn rebuild_transcript_view(&mut self) {
+        self.transcript.clear();
+        let scope = self.transcript_scopes.last().cloned();
+        match scope {
+            None => self.build_root_transcript(),
+            Some(TranscriptScope::Combo { id, name }) => {
+                self.build_combo_transcript(&id, &name);
+            }
+            Some(TranscriptScope::Subagent { id, name }) => {
+                self.build_subagent_transcript(&id, &name);
+            }
+        }
+        self.ensure_transcript_focus();
+    }
+
+    fn build_root_transcript(&mut self) {
+        let agent_messages = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.agent.dump_messages())
+        });
+        let link_map = self.build_transcript_link_map(&agent_messages);
+        self.append_transcript_messages(agent_messages, &link_map);
+    }
+
+    fn build_combo_transcript(&mut self, id: &str, name: &str) {
+        let state = self.state.read();
+        let Some(entry) = state.combo_transcripts.iter().find(|entry| entry.id == id) else {
+            let message = format!("Combo transcript not found: {} ({})", name, id);
+            self.transcript
+                .push(Message::system(Plain::new(message).into()).with_role_prefix(false));
+            return;
+        };
+        let messages = entry.messages.clone();
+        let link_map = self.build_transcript_link_map(&messages);
+        self.append_transcript_messages(messages, &link_map);
+    }
+
+    fn build_subagent_transcript(&mut self, id: &str, name: &str) {
+        let state = self.state.read();
+        let Some(entry) = state
+            .subagent_transcripts
+            .iter()
+            .find(|entry| entry.id == id)
+        else {
+            let message = format!("Subagent transcript not found: {} ({})", name, id);
+            self.transcript
+                .push(Message::system(Plain::new(message).into()).with_role_prefix(false));
+            return;
+        };
+        let messages = entry.messages.clone();
+        let link_map = self.build_transcript_link_map(&messages);
+        self.append_transcript_messages(messages, &link_map);
+    }
+
+    fn append_transcript_messages(
+        &mut self,
+        messages: Vec<ChatMessage>,
+        link_map: &HashMap<String, TranscriptLinkTarget>,
+    ) {
+        let iter = messages.into_iter().map(|message| {
+            Message::system(TranscriptMessage::new_with_links(message, link_map).into())
+        });
+        self.transcript.extend(iter);
+    }
+
+    fn build_transcript_link_map(
+        &self,
+        messages: &[ChatMessage],
+    ) -> HashMap<String, TranscriptLinkTarget> {
+        let mut map = HashMap::new();
+        for message in messages {
+            let ChatContent::Multiple(blocks) = &message.content else {
+                continue;
+            };
+            for block in blocks {
+                let ChatBlock::ToolUse(tool_use) = block else {
+                    continue;
+                };
+                match tool_use.name.as_str() {
+                    RUN_COMBO_TOOL_NAME => {
+                        if let Ok(input) =
+                            serde_json::from_value::<RunComboInput>(tool_use.input.clone())
+                        {
+                            map.insert(
+                                tool_use.id.clone(),
+                                TranscriptLinkTarget {
+                                    kind: TranscriptLinkKind::Combo,
+                                    id: tool_use.id.clone(),
+                                    name: input.combo_name,
+                                },
+                            );
+                        }
+                    }
+                    RUN_TASK_TOOL_NAME => {
+                        if let Ok(input) =
+                            serde_json::from_value::<RunTaskInput>(tool_use.input.clone())
+                        {
+                            map.insert(
+                                tool_use.id.clone(),
+                                TranscriptLinkTarget {
+                                    kind: TranscriptLinkKind::Subagent,
+                                    id: tool_use.id.clone(),
+                                    name: input.subagent_name,
+                                },
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        map
+    }
+
+    fn ensure_transcript_focus(&mut self) {
+        if self.transcript.selected_idx().is_none() && !self.transcript.is_empty() {
+            self.transcript.focus(0);
+        }
+    }
+
+    fn move_transcript_selection(&mut self, key: NavigationKey) {
+        if self.transcript.selected_idx().is_none() {
+            match key {
+                NavigationKey::Down => {
+                    let _ = self.transcript.focus(0);
+                }
+                NavigationKey::Up => {
+                    let _ = self.transcript.select_last();
+                }
+            }
+            return;
+        }
+        let _ = self.transcript.handle_navigation(key);
+    }
+
+    fn transcript_selected_link_target(&self) -> Option<TranscriptLinkTarget> {
+        self.transcript
+            .selected_message_as::<TranscriptMessage>()
+            .and_then(|message| message.link_target())
+    }
+
+    fn open_transcript_link(&mut self) {
+        let Some(target) = self.transcript_selected_link_target() else {
+            return;
+        };
+        let scope = match target.kind {
+            TranscriptLinkKind::Combo => TranscriptScope::Combo {
+                id: target.id,
+                name: target.name,
+            },
+            TranscriptLinkKind::Subagent => TranscriptScope::Subagent {
+                id: target.id,
+                name: target.name,
+            },
+        };
+        self.transcript_scopes.push(scope);
+        self.rebuild_transcript_view();
+    }
+
+    fn back_or_close_transcript(&mut self) {
+        if self.transcript_scopes.pop().is_some() {
+            self.rebuild_transcript_view();
+        } else {
+            self.close_transcript();
+        }
+    }
+
+    fn transcript_breadcrumb_line(&self) -> Line<'static> {
+        let theme = global::theme();
+        let mut crumbs = vec!["Transcript".to_string()];
+        if self.transcript_scopes.is_empty() {
+            crumbs.push("Root".to_string());
+        } else {
+            for scope in &self.transcript_scopes {
+                let label = match scope {
+                    TranscriptScope::Combo { name, .. } => format!("Combo: {}", name),
+                    TranscriptScope::Subagent { name, .. } => format!("Subagent: {}", name),
+                };
+                crumbs.push(label);
+            }
+        }
+        let breadcrumb = crumbs.join(" / ");
+        Line::from(Span::styled(breadcrumb, theme.ui.folded_hint))
+    }
+
+    fn store_combo_transcript(&mut self, id: String, name: String, messages: Vec<ChatMessage>) {
+        if messages.is_empty() {
+            return;
+        }
+        let should_refresh = if self.view == ViewMode::Transcript {
+            match self.transcript_scopes.last() {
+                None => true,
+                Some(TranscriptScope::Combo { id: scope_id, .. }) => scope_id == &id,
+                _ => false,
+            }
+        } else {
+            false
+        };
+        {
+            let mut state = self.state.write();
+            if let Some(existing) = state
+                .combo_transcripts
+                .iter_mut()
+                .find(|entry| entry.id == id)
+            {
+                existing.name = name;
+                existing.messages = messages;
+            } else {
+                state
+                    .combo_transcripts
+                    .push(ComboTranscript { id, name, messages });
+            }
+        }
+        global::trigger_schedule_session_save();
+        if should_refresh {
+            self.rebuild_transcript_view();
+        }
+    }
+
+    fn store_subagent_transcript(&mut self, id: String, name: String, messages: Vec<ChatMessage>) {
+        if messages.is_empty() {
+            return;
+        }
+        let should_refresh = if self.view == ViewMode::Transcript {
+            match self.transcript_scopes.last() {
+                None => true,
+                Some(TranscriptScope::Subagent { id: scope_id, .. }) => scope_id == &id,
+                _ => false,
+            }
+        } else {
+            false
+        };
+        {
+            let mut state = self.state.write();
+            if let Some(existing) = state
+                .subagent_transcripts
+                .iter_mut()
+                .find(|entry| entry.id == id)
+            {
+                existing.name = name;
+                existing.messages = messages;
+            } else {
+                state
+                    .subagent_transcripts
+                    .push(SubagentTranscript { id, name, messages });
+            }
+        }
+        global::trigger_schedule_session_save();
+        if should_refresh {
+            self.rebuild_transcript_view();
+        }
     }
 
     /// Handle the "New Session" command
@@ -1372,10 +1659,22 @@ impl Component for Chat<'static> {
                 }
                 self.dispatch_combo_event(combo_event);
             }
-            Event::Answer(AnswerEvent::SubagentEvent { .. }) => {
+            evt @ Event::Answer(AnswerEvent::SubagentEvent { id, event }) => {
+                if let SubagentEvent::Transcript {
+                    subagent_name,
+                    messages,
+                } = event
+                {
+                    self.store_subagent_transcript(
+                        id.clone(),
+                        subagent_name.clone(),
+                        messages.clone(),
+                    );
+                    return;
+                }
                 // RunTask tool is executing, set chat status to Processing
                 self.set_processing();
-                let _ = self.messages.on_tool_event(event);
+                let _ = self.messages.on_tool_event(evt);
             }
             Event::Answer(AnswerEvent::ToolOutput { .. }) => {
                 let _ = self.messages.on_tool_event(event);
@@ -1426,12 +1725,19 @@ impl Component for Chat<'static> {
         }
         if self.view == ViewMode::Transcript {
             match (key.modifiers, key.code) {
-                (KM::NONE, Esc) => self.close_transcript(),
+                (KM::NONE, Esc) | (KM::NONE, Backspace) => self.back_or_close_transcript(),
+                (KM::NONE, Enter) => self.open_transcript_link(),
                 (KM::NONE, Char('k')) => {
-                    self.transcript.scroll_up(1);
+                    self.move_transcript_selection(NavigationKey::Up);
                 }
                 (KM::NONE, Char('j')) => {
-                    self.transcript.scroll_down(1);
+                    self.move_transcript_selection(NavigationKey::Down);
+                }
+                (KM::NONE, Up) => {
+                    self.move_transcript_selection(NavigationKey::Up);
+                }
+                (KM::NONE, Down) => {
+                    self.move_transcript_selection(NavigationKey::Down);
                 }
                 (KM::CONTROL, Char('y')) => {
                     self.transcript.scroll_up(1);
@@ -1735,6 +2041,7 @@ impl Chat<'static> {
         bottom_block = bottom_block
             .title_bottom(Line::from(""))
             .title_bottom(Line::from(" Transcript ").bold());
+        bottom_block = bottom_block.title_bottom(self.transcript_breadcrumb_line());
         let hints = self.transcript_shortcut_hints();
         bottom_block = self
             .shortcut_hints

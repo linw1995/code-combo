@@ -1,5 +1,6 @@
 use code_combo::{
-    OutputChunk, RetryUpdate, Starter, TextEdit, ThinkingConfig, ToolUse, UsageStats,
+    Message as ChatMessage, OutputChunk, RetryUpdate, Starter, TextEdit, ThinkingConfig, ToolUse,
+    UsageStats,
     tools::{ComboEvent as ComboToolEvent, Final, SubagentEvent},
 };
 use crossterm::event::{KeyEvent, MouseEvent};
@@ -166,6 +167,11 @@ pub enum ComboEvent {
     Cancelled {
         id: Option<String>,
         name: Option<String>,
+    },
+    Transcript {
+        id: String,
+        name: String,
+        messages: Vec<ChatMessage>,
     },
 }
 

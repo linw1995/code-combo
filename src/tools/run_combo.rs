@@ -168,6 +168,13 @@ pub enum ComboEvent {
         /// Combo name if available.
         name: Option<String>,
     },
+    /// Transcript messages collected during combo execution.
+    Transcript {
+        /// Combo name.
+        name: String,
+        /// Transcript messages for the combo reply agent.
+        messages: Vec<Message>,
+    },
 }
 
 /// Information about a discovered combo.
@@ -725,6 +732,7 @@ async fn execute_combo(
                     exit_code,
                 },
             );
+            emit_combo_transcript(&on_event_for_emit, &combo_name, &reply_agent).await;
             return Err(format!("Join error: {}", err));
         }
     };
@@ -752,6 +760,7 @@ async fn execute_combo(
                 name: Some(combo_name.clone()),
             },
         );
+        emit_combo_transcript(&on_event_for_emit, &combo_name, &reply_agent).await;
         return Ok(RunComboOutput {
             success: false,
             summary: "Combo execution was cancelled".to_string(),
@@ -771,6 +780,7 @@ async fn execute_combo(
 
     // Check combo result
     if let Err(e) = starter.combo {
+        emit_combo_transcript(&on_event_for_emit, &combo_name, &reply_agent).await;
         return Ok(RunComboOutput {
             success: false,
             summary: summary_parts.join("\n"),
@@ -804,6 +814,8 @@ async fn execute_combo(
         }
     };
 
+    emit_combo_transcript(&on_event_for_emit, &combo_name, &reply_agent).await;
+
     Ok(RunComboOutput {
         success,
         summary,
@@ -820,6 +832,20 @@ fn emit_combo_event(on_event: &ComboEventCallback, event: ComboEvent) {
     if let Ok(mut f) = on_event.lock() {
         (*f)(&event);
     }
+}
+
+async fn emit_combo_transcript(on_event: &ComboEventCallback, name: &str, agent: &Agent) {
+    let messages = agent.dump_messages().await;
+    if messages.is_empty() {
+        return;
+    }
+    emit_combo_event(
+        on_event,
+        ComboEvent::Transcript {
+            name: name.to_string(),
+            messages,
+        },
+    );
 }
 
 fn build_reply_agent(
