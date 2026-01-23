@@ -40,7 +40,8 @@ use super::{
     Action, AnswerEvent, AskEvent, BotMessage, BotStreamKind, CacheInvalidation, Combo,
     ComboAction, ComboEvent, CommandPaletteAction, Component, Event, Input, Message, Messages,
     NavigationKey, NavigationResult, Plain, SessionAction, ShortcutHints, ShortcutHintsPanel,
-    Thinking, Tool, ToolAction, TranscriptMessage,
+    Thinking, Tool, ToolAction, TranscriptLink, TranscriptLinkKind, TranscriptLinkTarget,
+    TranscriptMessage,
 };
 use crate::{
     components::{CommandPalette, Content, Persistable},
@@ -70,6 +71,7 @@ pub struct Chat<'a> {
     pending_combo_tool_events: HashMap<String, Vec<ComboEvent>>,
     last_usage: Option<UsageStats>,
     retry_status: Option<RetryAttempt>,
+    transcript_scopes: Vec<TranscriptScope>,
 
     token_schedule_session_save: Option<CancellationToken>,
     cancellation_guard: CancellationGuard,
@@ -173,6 +175,12 @@ enum ViewMode {
     Transcript,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+enum TranscriptScope {
+    Combo { id: String, name: String },
+    Subagent { id: String, name: String },
+}
+
 const CTRL_C_WINDOW: Duration = Duration::from_secs(2);
 #[derive(Debug, Default)]
 struct CancellationGuard {
@@ -261,6 +269,7 @@ impl Chat<'static> {
             pending_combo_tool_events: HashMap::new(),
             last_usage: None,
             retry_status: None,
+            transcript_scopes: Vec::new(),
             token_schedule_session_save: None,
             cancellation_guard: CancellationGuard::default(),
         }
@@ -841,7 +850,12 @@ impl Chat<'static> {
 
     fn transcript_shortcut_hints(&self) -> ShortcutHints {
         let mut hints = self.transcript.shortcut_hints();
-        hints.push_visible(&[("Back", "Esc")]);
+        let back_label = if self.transcript_scopes.is_empty() {
+            "Close"
+        } else {
+            "Back"
+        };
+        hints.push_visible(&[(back_label, "Esc")]);
         hints.push_visible(&[("Up", "k"), ("Down", "j")]);
         hints.push_hidden(&[("Scroll Up", "C-y"), ("Down", "C-e")]);
         hints.push_hidden(&[("Scroll+ Up", "C-u"), ("Down", "C-d")]);
@@ -1087,24 +1101,8 @@ impl Chat<'static> {
 
     fn open_transcript(&mut self) {
         self.update_focus(Focus::InputBlur);
-        let agent_messages = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.agent.dump_messages())
-        });
-        let (combo_transcripts, subagent_transcripts) = {
-            let state = self.state.read();
-            (
-                state.combo_transcripts.clone(),
-                state.subagent_transcripts.clone(),
-            )
-        };
-
-        self.transcript.clear();
-        let iter = agent_messages
-            .into_iter()
-            .map(|message| Message::system(TranscriptMessage::new(message).into()));
-        self.transcript.extend(iter);
-        self.append_combo_transcripts(combo_transcripts);
-        self.append_subagent_transcripts(subagent_transcripts);
+        self.transcript_scopes.clear();
+        self.rebuild_transcript_view();
         self.view = ViewMode::Transcript;
         global::signal_dirty();
     }
@@ -1112,48 +1110,199 @@ impl Chat<'static> {
     fn close_transcript(&mut self) {
         self.view = ViewMode::Chat;
         self.update_focus(Focus::InputBlur);
+        self.transcript_scopes.clear();
         global::signal_dirty();
     }
 
-    fn append_combo_transcripts(&mut self, transcripts: Vec<ComboTranscript>) {
-        for transcript in transcripts {
-            if transcript.messages.is_empty() {
-                continue;
+    fn rebuild_transcript_view(&mut self) {
+        self.transcript.clear();
+        let scope = self.transcript_scopes.last().cloned();
+        match scope {
+            None => self.build_root_transcript(),
+            Some(TranscriptScope::Combo { id, name }) => {
+                self.build_combo_transcript(&id, &name);
             }
-            let header = format!("Combo transcript: {} ({})", transcript.name, transcript.id);
+            Some(TranscriptScope::Subagent { id, name }) => {
+                self.build_subagent_transcript(&id, &name);
+            }
+        }
+        self.ensure_transcript_focus();
+    }
+
+    fn build_root_transcript(&mut self) {
+        let agent_messages = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.agent.dump_messages())
+        });
+        self.append_transcript_messages(agent_messages);
+        self.append_transcript_links();
+    }
+
+    fn build_combo_transcript(&mut self, id: &str, name: &str) {
+        let state = self.state.read();
+        let Some(entry) = state.combo_transcripts.iter().find(|entry| entry.id == id) else {
+            let message = format!("Combo transcript not found: {} ({})", name, id);
             self.transcript
-                .push(Message::system(Plain::new(header).into()).with_role_prefix(false));
-            let iter = transcript
-                .messages
-                .into_iter()
-                .map(|message| Message::system(TranscriptMessage::new(message).into()));
-            self.transcript.extend(iter);
+                .push(Message::system(Plain::new(message).into()).with_role_prefix(false));
+            return;
+        };
+        self.append_transcript_messages(entry.messages.clone());
+    }
+
+    fn build_subagent_transcript(&mut self, id: &str, name: &str) {
+        let state = self.state.read();
+        let Some(entry) = state
+            .subagent_transcripts
+            .iter()
+            .find(|entry| entry.id == id)
+        else {
+            let message = format!("Subagent transcript not found: {} ({})", name, id);
+            self.transcript
+                .push(Message::system(Plain::new(message).into()).with_role_prefix(false));
+            return;
+        };
+        self.append_transcript_messages(entry.messages.clone());
+    }
+
+    fn append_transcript_messages(&mut self, messages: Vec<ChatMessage>) {
+        let iter = messages
+            .into_iter()
+            .map(|message| Message::system(TranscriptMessage::new(message).into()));
+        self.transcript.extend(iter);
+    }
+
+    fn append_transcript_links(&mut self) {
+        let state = self.state.read();
+        if state.combo_transcripts.is_empty() && state.subagent_transcripts.is_empty() {
+            return;
+        }
+
+        self.transcript
+            .push(Message::system(Plain::new(String::new()).into()).with_role_prefix(false));
+
+        if !state.combo_transcripts.is_empty() {
+            self.transcript.push(
+                Message::system(Plain::new("Combo transcripts:".to_string()).into())
+                    .with_role_prefix(false),
+            );
+            for entry in &state.combo_transcripts {
+                let target = TranscriptLinkTarget {
+                    kind: TranscriptLinkKind::Combo,
+                    id: entry.id.clone(),
+                    name: entry.name.clone(),
+                };
+                let link = TranscriptLink::new(target, entry.messages.len());
+                self.transcript
+                    .push(Message::system(link.into()).with_role_prefix(false));
+            }
+        }
+
+        if !state.subagent_transcripts.is_empty() {
+            if !state.combo_transcripts.is_empty() {
+                self.transcript.push(
+                    Message::system(Plain::new(String::new()).into()).with_role_prefix(false),
+                );
+            }
+            self.transcript.push(
+                Message::system(Plain::new("Subagent transcripts:".to_string()).into())
+                    .with_role_prefix(false),
+            );
+            for entry in &state.subagent_transcripts {
+                let target = TranscriptLinkTarget {
+                    kind: TranscriptLinkKind::Subagent,
+                    id: entry.id.clone(),
+                    name: entry.name.clone(),
+                };
+                let link = TranscriptLink::new(target, entry.messages.len());
+                self.transcript
+                    .push(Message::system(link.into()).with_role_prefix(false));
+            }
         }
     }
 
-    fn append_subagent_transcripts(&mut self, transcripts: Vec<SubagentTranscript>) {
-        for transcript in transcripts {
-            if transcript.messages.is_empty() {
-                continue;
-            }
-            let header = format!(
-                "Subagent transcript: {} ({})",
-                transcript.name, transcript.id
-            );
-            self.transcript
-                .push(Message::system(Plain::new(header).into()).with_role_prefix(false));
-            let iter = transcript
-                .messages
-                .into_iter()
-                .map(|message| Message::system(TranscriptMessage::new(message).into()));
-            self.transcript.extend(iter);
+    fn ensure_transcript_focus(&mut self) {
+        if self.transcript.selected_idx().is_none() && !self.transcript.is_empty() {
+            self.transcript.focus(0);
         }
+    }
+
+    fn move_transcript_selection(&mut self, key: NavigationKey) {
+        if self.transcript.selected_idx().is_none() {
+            match key {
+                NavigationKey::Down => {
+                    let _ = self.transcript.focus(0);
+                }
+                NavigationKey::Up => {
+                    let _ = self.transcript.select_last();
+                }
+            }
+            return;
+        }
+        let _ = self.transcript.handle_navigation(key);
+    }
+
+    fn transcript_selected_link_target(&self) -> Option<TranscriptLinkTarget> {
+        self.transcript
+            .selected_message_as::<TranscriptLink>()
+            .map(|link| link.target())
+    }
+
+    fn open_transcript_link(&mut self) {
+        let Some(target) = self.transcript_selected_link_target() else {
+            return;
+        };
+        let scope = match target.kind {
+            TranscriptLinkKind::Combo => TranscriptScope::Combo {
+                id: target.id,
+                name: target.name,
+            },
+            TranscriptLinkKind::Subagent => TranscriptScope::Subagent {
+                id: target.id,
+                name: target.name,
+            },
+        };
+        self.transcript_scopes.push(scope);
+        self.rebuild_transcript_view();
+    }
+
+    fn back_or_close_transcript(&mut self) {
+        if self.transcript_scopes.pop().is_some() {
+            self.rebuild_transcript_view();
+        } else {
+            self.close_transcript();
+        }
+    }
+
+    fn transcript_breadcrumb_line(&self) -> Line<'static> {
+        let theme = global::theme();
+        let mut crumbs = vec!["Transcript".to_string()];
+        if self.transcript_scopes.is_empty() {
+            crumbs.push("Root".to_string());
+        } else {
+            for scope in &self.transcript_scopes {
+                let label = match scope {
+                    TranscriptScope::Combo { name, .. } => format!("Combo: {}", name),
+                    TranscriptScope::Subagent { name, .. } => format!("Subagent: {}", name),
+                };
+                crumbs.push(label);
+            }
+        }
+        let breadcrumb = crumbs.join(" / ");
+        Line::from(Span::styled(breadcrumb, theme.ui.folded_hint))
     }
 
     fn store_combo_transcript(&mut self, id: String, name: String, messages: Vec<ChatMessage>) {
         if messages.is_empty() {
             return;
         }
+        let should_refresh = if self.view == ViewMode::Transcript {
+            match self.transcript_scopes.last() {
+                None => true,
+                Some(TranscriptScope::Combo { id: scope_id, .. }) => scope_id == &id,
+                _ => false,
+            }
+        } else {
+            false
+        };
         {
             let mut state = self.state.write();
             if let Some(existing) = state
@@ -1170,12 +1319,24 @@ impl Chat<'static> {
             }
         }
         global::trigger_schedule_session_save();
+        if should_refresh {
+            self.rebuild_transcript_view();
+        }
     }
 
     fn store_subagent_transcript(&mut self, id: String, name: String, messages: Vec<ChatMessage>) {
         if messages.is_empty() {
             return;
         }
+        let should_refresh = if self.view == ViewMode::Transcript {
+            match self.transcript_scopes.last() {
+                None => true,
+                Some(TranscriptScope::Subagent { id: scope_id, .. }) => scope_id == &id,
+                _ => false,
+            }
+        } else {
+            false
+        };
         {
             let mut state = self.state.write();
             if let Some(existing) = state
@@ -1192,6 +1353,9 @@ impl Chat<'static> {
             }
         }
         global::trigger_schedule_session_save();
+        if should_refresh {
+            self.rebuild_transcript_view();
+        }
     }
 
     /// Handle the "New Session" command
@@ -1554,12 +1718,19 @@ impl Component for Chat<'static> {
         }
         if self.view == ViewMode::Transcript {
             match (key.modifiers, key.code) {
-                (KM::NONE, Esc) => self.close_transcript(),
+                (KM::NONE, Esc) | (KM::NONE, Backspace) => self.back_or_close_transcript(),
+                (KM::NONE, Enter) => self.open_transcript_link(),
                 (KM::NONE, Char('k')) => {
-                    self.transcript.scroll_up(1);
+                    self.move_transcript_selection(NavigationKey::Up);
                 }
                 (KM::NONE, Char('j')) => {
-                    self.transcript.scroll_down(1);
+                    self.move_transcript_selection(NavigationKey::Down);
+                }
+                (KM::NONE, Up) => {
+                    self.move_transcript_selection(NavigationKey::Up);
+                }
+                (KM::NONE, Down) => {
+                    self.move_transcript_selection(NavigationKey::Down);
                 }
                 (KM::CONTROL, Char('y')) => {
                     self.transcript.scroll_up(1);
@@ -1863,6 +2034,7 @@ impl Chat<'static> {
         bottom_block = bottom_block
             .title_bottom(Line::from(""))
             .title_bottom(Line::from(" Transcript ").bold());
+        bottom_block = bottom_block.title_bottom(self.transcript_breadcrumb_line());
         let hints = self.transcript_shortcut_hints();
         bottom_block = self
             .shortcut_hints

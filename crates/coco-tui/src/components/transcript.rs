@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    components::{CodeHighlight, Component, Content, ContentComponent, Persistable},
+    components::{CodeHighlight, Component, Content, ContentComponent, Persistable, ShortcutHints},
     error::Result,
     session::{self, Session},
     widgets::Paragraph,
@@ -70,6 +70,96 @@ impl Content for TranscriptPlain {
 }
 
 impl ContentComponent for TranscriptPlain {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptLinkKind {
+    Combo,
+    Subagent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscriptLinkTarget {
+    pub kind: TranscriptLinkKind,
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct TranscriptLinkState {
+    target: TranscriptLinkTarget,
+    message_count: usize,
+}
+
+#[derive(ComponentExt, ContentComponentExt)]
+#[component(type_id = "transcript_link")]
+pub struct TranscriptLink {
+    state: TranscriptLinkState,
+    widget: Paragraph<'static>,
+}
+
+impl TranscriptLink {
+    pub fn new(target: TranscriptLinkTarget, message_count: usize) -> Self {
+        let text = format!(
+            "{}: {} ({}) - {} messages",
+            match target.kind {
+                TranscriptLinkKind::Combo => "Combo",
+                TranscriptLinkKind::Subagent => "Subagent",
+            },
+            target.name,
+            target.id,
+            message_count
+        );
+        let widget = Paragraph::new_wrap(text.clone(), Wrap { trim: false });
+        Self {
+            state: TranscriptLinkState {
+                target,
+                message_count,
+            },
+            widget,
+        }
+    }
+
+    pub fn target(&self) -> TranscriptLinkTarget {
+        self.state.target.clone()
+    }
+}
+
+impl Persistable for TranscriptLink {
+    fn save(&self) -> Session {
+        session::save(&self.state)
+    }
+
+    fn load(session: Session) -> Result<Self> {
+        let state: TranscriptLinkState = session::load(session)?;
+        Ok(Self::new(state.target, state.message_count))
+    }
+}
+
+impl Component for TranscriptLink {
+    fn draw(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        frame.render_widget(&self.widget, area);
+        Ok(())
+    }
+}
+
+impl Content for TranscriptLink {
+    fn height(&self, width: u16) -> usize {
+        self.widget.line_count(width)
+    }
+
+    fn is_actionable(&self) -> bool {
+        true
+    }
+
+    fn shortcut_hints(&self) -> ShortcutHints {
+        let mut hints = ShortcutHints::default();
+        hints.push_visible(&[("Open", "Enter")]);
+        hints
+    }
+}
+
+impl ContentComponent for TranscriptLink {}
 
 #[derive(Serialize, Deserialize)]
 struct TranscriptTextState {
