@@ -107,27 +107,33 @@ impl TryFrom<Commands> for ClientCommand {
     type Error = Commands;
 
     fn try_from(value: Commands) -> std::result::Result<Self, Self::Error> {
-        match value {
-            Commands::Metadata { fields } => Ok(ClientCommand::Metadata { fields }),
-            Commands::Ask { prompt, schemas } => Ok(ClientCommand::Ask { prompt, schemas }),
-            Commands::Tell { prompt } => Ok(ClientCommand::Tell { prompt }),
-            Commands::Reply { fields } => Ok(ClientCommand::Reply { fields }),
+        let command = match value {
+            Commands::Metadata { fields } => ClientCommand::Metadata { fields },
+            Commands::Ask { prompt, schemas } => ClientCommand::Ask { prompt, schemas },
+            Commands::Tell { prompt } => ClientCommand::Tell { prompt },
+            Commands::Reply { fields } => ClientCommand::Reply { fields },
             Commands::Record {
                 wrap_result,
                 command,
-            } => Ok(ClientCommand::Record {
+            } => ClientCommand::Record {
                 wrap_result,
                 command,
-            }),
-            Commands::Mcp { args } => Ok(ClientCommand::Mcp { args }),
-            _ => Err(value),
-        }
+            },
+            Commands::Mcp { args } => ClientCommand::Mcp { args },
+            Commands::Combo(ComboCommands::Run { name, args }) => ClientCommand::ComboRun {
+                name,
+                args,
+                ignore_workspace_scripts: false,
+            },
+        };
+        Ok(command)
     }
 }
 
 #[snafu::report]
 #[tokio::main]
 async fn main() -> Result<()> {
+    ensure_tui_bin_env();
     let cmd = Args::command();
     let program = cmd.get_name().to_string();
     let matches = cmd.get_matches();
@@ -150,7 +156,14 @@ async fn main() -> Result<()> {
     };
     if let Some(command) = args.command.take() {
         match ClientCommand::try_from(command) {
-            Ok(command) => {
+            Ok(mut command) => {
+                if let ClientCommand::ComboRun {
+                    ignore_workspace_scripts,
+                    ..
+                } = &mut command
+                {
+                    *ignore_workspace_scripts = args.ignore_workspace_scripts;
+                }
                 init_client_logging(&program, &command);
                 return handle_client_command(&program, &command_name, command)
                     .await
@@ -233,4 +246,17 @@ async fn main() -> Result<()> {
     ratatui::restore();
 
     result
+}
+
+fn ensure_tui_bin_env() {
+    if std::env::var_os("COCO_TUI_BIN").is_some() {
+        return;
+    }
+    let Ok(path) = std::env::current_exe() else {
+        return;
+    };
+    // Safety: set once during startup before spawning any tasks.
+    unsafe {
+        std::env::set_var("COCO_TUI_BIN", path);
+    }
 }

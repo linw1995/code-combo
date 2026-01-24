@@ -1,8 +1,10 @@
+mod combo;
 mod mcp;
 mod metadata;
 mod prompt;
 mod record;
 
+pub use combo::handle_combo_run;
 pub use mcp::handle_mcp;
 pub use metadata::handle_metadata;
 pub use prompt::{handle_ask, handle_reply, handle_tell};
