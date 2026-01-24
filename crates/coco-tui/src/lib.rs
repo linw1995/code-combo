@@ -8,6 +8,7 @@ pub mod widgets;
 pub mod components;
 pub mod events;
 pub mod logging;
+mod notifications;
 pub mod theme;
 pub mod version;
 
