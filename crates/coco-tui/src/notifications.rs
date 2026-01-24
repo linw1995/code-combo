@@ -6,7 +6,7 @@ use std::{
 use code_combo::NotificationBackend;
 use serde::Serialize;
 use tokio::{io::AsyncWriteExt, process::Command};
-use tracing::debug;
+use tracing::{debug, warn};
 
 const OSC_PREFIX: &str = "\x1b]9;";
 const OSC_SUFFIX: &str = "\x07";
@@ -78,27 +78,47 @@ fn send_external_command(executable: &str, args: &[String], title: &str, body: &
     if title.is_empty() && body.is_empty() {
         return;
     }
+    let executable = normalize_executable_path(executable);
     let payload = NotificationPayload { title, body };
-    let Ok(payload_json) = serde_json::to_vec(&payload) else {
-        return;
+    let payload_json = match serde_json::to_vec(&payload) {
+        Ok(json) => json,
+        Err(err) => {
+            warn!(?err, "failed to serialize notification payload");
+            return;
+        }
     };
 
-    let executable = executable.to_string();
     let args = args.to_vec();
     tokio::spawn(async move {
-        let mut cmd = Command::new(executable);
-        cmd.args(args)
+        let mut cmd = Command::new(&executable);
+        cmd.args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let mut child = match cmd.spawn() {
             Ok(child) => child,
-            Err(_) => return,
+            Err(err) => {
+                warn!(?err, executable = %executable, args = ?args, "failed to spawn notification command");
+                return;
+            }
         };
         if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(&payload_json).await;
+            let _ = stdin.write_all(&payload_json).await.inspect_err(|err| {
+                warn!(?err, executable = %executable, "failed to write notification payload");
+            });
+        } else {
+            warn!(executable = %executable, "notification command stdin unavailable");
         }
-        let _ = child.wait().await;
+        match child.wait().await {
+            Ok(status) => {
+                if !status.success() {
+                    warn!(?status, executable = %executable, "notification command failed");
+                }
+            }
+            Err(err) => {
+                warn!(?err, executable = %executable, "failed to wait for notification command");
+            }
+        }
     });
 }
 
@@ -135,6 +155,20 @@ fn normalize_field(value: &str, max_len: usize, replace_semicolon: bool) -> Stri
     out.trim().to_string()
 }
 
+fn normalize_executable_path(executable: &str) -> String {
+    if let Some(rest) = executable.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return format!("{home}/{rest}");
+    }
+    if executable == "~"
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return home;
+    }
+    executable.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +197,21 @@ mod tests {
         };
         let json = serde_json::to_string(&payload).expect("serialize");
         assert_eq!(json, "{\"title\":\"coco\",\"body\":\"Reply ready\"}");
+    }
+
+    #[test]
+    fn normalize_executable_expands_home() {
+        let original = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", "/tmp/notify-home") };
+        assert_eq!(
+            normalize_executable_path("~/bin/notify"),
+            "/tmp/notify-home/bin/notify"
+        );
+        assert_eq!(normalize_executable_path("~"), "/tmp/notify-home");
+        if let Some(value) = original {
+            unsafe { std::env::set_var("HOME", value) };
+        } else {
+            unsafe { std::env::remove_var("HOME") };
+        }
     }
 }
