@@ -11,6 +11,7 @@ use snafu::prelude::*;
 use coco_tui::{
     actions::{Action, ComboAction},
     app,
+    combo_run_server::ComboRunSessionServer,
     components::Chat,
     error::Result,
     global, version,
@@ -187,13 +188,22 @@ async fn main() -> Result<()> {
     root_view.apply_runtime_overrides(overrides);
     root_view.setup().await;
     let mut app = app::App::new(Box::new(root_view))?;
+    let bridge = global::init_combo_run_bridge();
+    let combo_run_server = ComboRunSessionServer::start(bridge).await?;
     if let Some(prompt) = startup_prompt {
         app.send_action(Action::SubmitPrompt(prompt));
     }
     match args.command {
         Some(Commands::Combo(combo_cmd)) => match combo_cmd {
             ComboCommands::Run { name, args } => {
-                app.send_action(ComboAction::Execute { name, args }.into());
+                app.send_action(
+                    ComboAction::Execute {
+                        id: None,
+                        name,
+                        args,
+                    }
+                    .into(),
+                );
             }
         },
         Some(
@@ -215,6 +225,10 @@ async fn main() -> Result<()> {
     }
 
     let result = app.run().await;
+
+    if let Some(server) = combo_run_server {
+        server.shutdown().await;
+    }
 
     ratatui::restore();
 

@@ -1,12 +1,14 @@
 use coco_macro::ComponentExt;
 use code_combo::tools::{
-    ComboEvent as ComboToolEvent, ComboInfo, ComboStreamKind, Final, RUN_COMBO_TOOL_NAME,
-    RUN_TASK_TOOL_NAME, RunComboInput, RunTaskInput, SubagentEvent,
+    ComboEvent as ComboToolEvent, ComboInfo, ComboStreamKind as ComboToolStreamKind, Final,
+    RUN_COMBO_TOOL_NAME, RUN_TASK_TOOL_NAME, RunComboInput, RunComboOutput, RunTaskInput,
+    SubagentEvent,
 };
 use code_combo::{
-    Agent, Block as ChatBlock, ChatResponse, ChatStreamUpdate, Config, Content as ChatContent,
-    Message as ChatMessage, Output, RetryAttempt, RetryNotifier, RetryUpdate, RuntimeOverrides,
-    Starter, StopReason, TextEdit, ToolUse, UsageStats, discover_starters, load_runtime_overrides,
+    Agent, Block as ChatBlock, ChatResponse, ChatStreamUpdate, ComboRunEvent, ComboRunResult,
+    ComboStreamKind as ComboRunStreamKind, Config, Content as ChatContent, Message as ChatMessage,
+    Output, RetryAttempt, RetryNotifier, RetryUpdate, RuntimeOverrides, Starter, StopReason,
+    TextEdit, ToolUse, UsageStats, discover_starters, load_runtime_overrides,
     save_runtime_overrides,
 };
 
@@ -633,10 +635,36 @@ impl Chat<'static> {
     }
 
     fn dispatch_combo_event(&mut self, event: ComboEvent) {
+        self.forward_combo_event_to_session(&event);
         self.handle_combo_event_from_tool(&event);
         let combo_event_wrapped = Event::Combo(event);
         let combo_event_ref = &combo_event_wrapped;
         handle_component_event!(self, combo_event_ref);
+    }
+
+    fn forward_combo_event_to_session(&self, event: &ComboEvent) {
+        let Some(run_id) = Self::combo_event_run_id(event) else {
+            return;
+        };
+        let Some(bridge) = global::combo_run_bridge() else {
+            return;
+        };
+        if !bridge.contains(run_id) {
+            return;
+        }
+        let run_event = Self::combo_event_to_run_event(event);
+        bridge.send_event(run_id, run_event);
+    }
+
+    fn forward_combo_result_to_session(&self, run_id: &str, output: &Final, is_error: bool) {
+        let Some(bridge) = global::combo_run_bridge() else {
+            return;
+        };
+        if !bridge.contains(run_id) {
+            return;
+        }
+        let result = combo_run_result_from_final(run_id, output, is_error);
+        bridge.send_result(run_id, result);
     }
 
     fn register_combo_tool_message(&mut self, id: String) {
@@ -711,8 +739,8 @@ impl Chat<'static> {
                 name: name.clone(),
                 index: *index,
                 kind: match kind {
-                    ComboStreamKind::Plain => BotStreamKind::Plain,
-                    ComboStreamKind::Thinking => BotStreamKind::Thinking,
+                    ComboToolStreamKind::Plain => BotStreamKind::Plain,
+                    ComboToolStreamKind::Thinking => BotStreamKind::Thinking,
                 },
                 text: text.clone(),
             },
@@ -766,6 +794,163 @@ impl Chat<'static> {
                 name: name.clone(),
                 messages: messages.clone(),
             },
+        }
+    }
+
+    fn combo_event_to_run_event(event: &ComboEvent) -> ComboRunEvent {
+        match event {
+            ComboEvent::Discovering => ComboRunEvent::Discovering,
+            ComboEvent::Discovered { starters } => ComboRunEvent::Discovered {
+                starters: starters.clone(),
+            },
+            ComboEvent::Executing {
+                id,
+                name,
+                command_line,
+            } => ComboRunEvent::Executing {
+                id: id.clone(),
+                name: name.clone(),
+                command_line: command_line.clone(),
+            },
+            ComboEvent::RecordStart { id, name, tool_use } => ComboRunEvent::RecordStart {
+                id: id.clone(),
+                name: name.clone(),
+                tool_use: tool_use.clone(),
+            },
+            ComboEvent::Output { id, name, chunk } => ComboRunEvent::Output {
+                id: id.clone(),
+                name: name.clone(),
+                chunk: chunk.clone(),
+            },
+            ComboEvent::RecordOutput {
+                id,
+                name,
+                tool_use_id,
+                chunk,
+            } => ComboRunEvent::RecordOutput {
+                id: id.clone(),
+                name: name.clone(),
+                tool_use_id: tool_use_id.clone(),
+                chunk: chunk.clone(),
+            },
+            ComboEvent::RecordEnd {
+                id,
+                name,
+                tool_use_id,
+                is_error,
+                output,
+            } => ComboRunEvent::RecordEnd {
+                id: id.clone(),
+                name: name.clone(),
+                tool_use_id: tool_use_id.clone(),
+                is_error: *is_error,
+                output: output.clone(),
+            },
+            ComboEvent::Prompt {
+                id,
+                name,
+                prompt,
+                thinking,
+            } => ComboRunEvent::Prompt {
+                id: id.clone(),
+                name: name.clone(),
+                prompt: prompt.clone(),
+                thinking: thinking.clone(),
+            },
+            ComboEvent::PromptStream {
+                id,
+                name,
+                index,
+                kind,
+                text,
+            } => ComboRunEvent::PromptStream {
+                id: id.clone(),
+                name: name.clone(),
+                index: *index,
+                kind: match kind {
+                    BotStreamKind::Plain => ComboRunStreamKind::Plain,
+                    BotStreamKind::Thinking => ComboRunStreamKind::Thinking,
+                },
+                text: text.clone(),
+            },
+            ComboEvent::PromptStreamReset { id, name } => ComboRunEvent::PromptStreamReset {
+                id: id.clone(),
+                name: name.clone(),
+            },
+            ComboEvent::ReplyToolUse {
+                id,
+                name,
+                tool_use,
+                thinking,
+                offload,
+            } => ComboRunEvent::ReplyToolUse {
+                id: id.clone(),
+                name: name.clone(),
+                tool_use: tool_use.clone(),
+                thinking: thinking.clone(),
+                offload: *offload,
+            },
+            ComboEvent::ReplyToolResult {
+                id,
+                name,
+                tool_use_id,
+                is_error,
+                output,
+            } => ComboRunEvent::ReplyToolResult {
+                id: id.clone(),
+                name: name.clone(),
+                tool_use_id: tool_use_id.clone(),
+                is_error: *is_error,
+                output: output.clone(),
+            },
+            ComboEvent::Executed {
+                id,
+                name,
+                starter,
+                exit_code,
+            } => ComboRunEvent::Executed {
+                id: id.clone(),
+                name: name.clone(),
+                starter: starter.clone(),
+                exit_code: *exit_code,
+            },
+            ComboEvent::ReplyToolError { message } => ComboRunEvent::ReplyToolError {
+                message: message.clone(),
+            },
+            ComboEvent::NotFound { id, name } => ComboRunEvent::NotFound {
+                id: id.clone(),
+                name: name.clone(),
+            },
+            ComboEvent::Cancelled { id, name } => ComboRunEvent::Cancelled {
+                id: id.clone(),
+                name: name.clone(),
+            },
+            ComboEvent::Transcript { id, name, messages } => ComboRunEvent::Transcript {
+                id: id.clone(),
+                name: name.clone(),
+                messages: messages.clone(),
+            },
+        }
+    }
+
+    fn combo_event_run_id(event: &ComboEvent) -> Option<&str> {
+        match event {
+            ComboEvent::Discovering | ComboEvent::Discovered { .. } => None,
+            ComboEvent::ReplyToolError { .. } => None,
+            ComboEvent::Cancelled { id, .. } => id.as_deref(),
+            ComboEvent::Executing { id, .. }
+            | ComboEvent::RecordStart { id, .. }
+            | ComboEvent::Output { id, .. }
+            | ComboEvent::RecordOutput { id, .. }
+            | ComboEvent::RecordEnd { id, .. }
+            | ComboEvent::Prompt { id, .. }
+            | ComboEvent::PromptStream { id, .. }
+            | ComboEvent::PromptStreamReset { id, .. }
+            | ComboEvent::ReplyToolUse { id, .. }
+            | ComboEvent::ReplyToolResult { id, .. }
+            | ComboEvent::Executed { id, .. }
+            | ComboEvent::NotFound { id, .. }
+            | ComboEvent::Transcript { id, .. } => Some(id.as_str()),
         }
     }
 
@@ -1789,6 +1974,7 @@ impl Component for Chat<'static> {
                 is_error,
                 output,
             }) => {
+                self.forward_combo_result_to_session(id, output, *is_error);
                 if let Some(idx) = self.messages.on_tool_event(event)
                     && !is_error
                     && self.messages.selected_idx() == Some(idx)
@@ -2054,8 +2240,10 @@ impl Component for Chat<'static> {
                 ComboAction::Discover => {
                     self.spawn_combo_discover();
                 }
-                ComboAction::Execute { name, args } => {
-                    let id = format!("toolu_{}", Uuid::new_v4().as_simple());
+                ComboAction::Execute { id, name, args } => {
+                    let id = id
+                        .clone()
+                        .unwrap_or_else(|| format!("toolu_{}", Uuid::new_v4().as_simple()));
                     let combo = Combo::new(&id, name);
                     self.messages.push(Message::user(combo.into()));
                     self.spawn_combo_execute(id, name.clone(), args.clone());
@@ -2392,6 +2580,66 @@ fn sanitize_session_summary(raw: &str) -> Option<String> {
 
 const TOOL_RESULT_MAX_BYTES: usize = 80 * 1024;
 const TOOL_RESULT_TRUNCATION_SUFFIX: &str = "\n... (truncated)";
+
+fn combo_run_result_from_final(run_id: &str, output: &Final, is_error: bool) -> ComboRunResult {
+    match output {
+        Final::Json(value) => combo_run_result_from_json(run_id, value, is_error),
+        Final::Message(message) => ComboRunResult {
+            run_id: run_id.to_string(),
+            success: !is_error,
+            summary: message.clone(),
+            tool_calls: 0,
+            error: if is_error {
+                Some(message.clone())
+            } else {
+                None
+            },
+        },
+    }
+}
+
+fn combo_run_result_from_json(run_id: &str, value: &Value, is_error: bool) -> ComboRunResult {
+    if let Ok(parsed) = serde_json::from_value::<RunComboOutput>(value.clone()) {
+        let error = if is_error && parsed.error.is_none() {
+            Some(parsed.summary.clone())
+        } else {
+            parsed.error.clone()
+        };
+        return ComboRunResult {
+            run_id: run_id.to_string(),
+            success: parsed.success,
+            summary: parsed.summary,
+            tool_calls: parsed.tool_calls,
+            error,
+        };
+    }
+
+    let success = value
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(!is_error);
+    let summary = value
+        .get("summary")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let tool_calls = value.get("tool_calls").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let mut error = value
+        .get("error")
+        .and_then(Value::as_str)
+        .map(|value| value.to_string());
+    if is_error && error.is_none() {
+        error = Some(summary.clone());
+    }
+
+    ComboRunResult {
+        run_id: run_id.to_string(),
+        success,
+        summary,
+        tool_calls,
+        error,
+    }
+}
 
 fn final_to_tool_content(output: &Final) -> ChatContent {
     let text = match output {
