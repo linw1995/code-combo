@@ -1,4 +1,4 @@
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct UI {
     #[serde(default = "default_theme")]
     pub theme: String,
@@ -22,7 +22,7 @@ impl Default for UI {
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct UINotifications {
     #[serde(default = "default_notifications_enabled")]
     pub enabled: bool,
@@ -47,7 +47,7 @@ impl Default for UINotifications {
     }
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum MarkdownRenderEngine {
     #[default]

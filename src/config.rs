@@ -79,11 +79,7 @@ pub struct Config {
 }
 
 fn ui_is_default(ui: &UI) -> bool {
-    let default = UI::default();
-    ui.theme == default.theme
-        && matches!(ui.markdown_render_engine, MarkdownRenderEngine::Native)
-        && ui.notifications.enabled == default.notifications.enabled
-        && ui.notifications.only_when_unfocused == default.notifications.only_when_unfocused
+    ui == &UI::default()
 }
 
 impl Config {
