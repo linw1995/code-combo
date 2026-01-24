@@ -30,7 +30,7 @@ pub use provider::{
     ModelPreset, ModelRequestConfig, ProviderConfig, ProviderKind, RequestOptions,
     ThinkingBlocksMode,
 };
-pub use ui::{MarkdownRenderEngine, UI};
+pub use ui::{MarkdownRenderEngine, UI, UINotifications};
 
 type BoxError = Box<dyn StdError + Send + Sync>;
 
@@ -80,7 +80,10 @@ pub struct Config {
 
 fn ui_is_default(ui: &UI) -> bool {
     let default = UI::default();
-    ui.theme == default.theme && matches!(ui.markdown_render_engine, MarkdownRenderEngine::Native)
+    ui.theme == default.theme
+        && matches!(ui.markdown_render_engine, MarkdownRenderEngine::Native)
+        && ui.notifications.enabled == default.notifications.enabled
+        && ui.notifications.only_when_unfocused == default.notifications.only_when_unfocused
 }
 
 impl Config {
@@ -455,6 +458,18 @@ mod tests {
         let config_str = format!("deny_tools = []\n{}", base_config());
         let config: Config = toml::from_str(&config_str).expect("parse config");
         assert_eq!(config.deny_tools, Some(Vec::new()));
+    }
+
+    #[test]
+    fn parse_config_with_notifications() {
+        let config_str = [
+            "[ui]",
+            "notifications = { enabled = false, only_when_unfocused = false }",
+        ]
+        .join("\n");
+        let config: Config = toml::from_str(&config_str).expect("parse config");
+        assert!(!config.ui.notifications.enabled);
+        assert!(!config.ui.notifications.only_when_unfocused);
     }
 
     #[test]

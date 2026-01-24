@@ -188,6 +188,8 @@ impl App {
                     Some(Ok(event)) => match event {
                         CrosstermEvent::Key(key) => Event::Key(key),
                         CrosstermEvent::Mouse(mouse) => Event::Mouse(mouse),
+                        CrosstermEvent::FocusGained => Event::FocusGained,
+                        CrosstermEvent::FocusLost => Event::FocusLost,
                         _ => continue, // ignore other events
                     }
                     Some(Err(err)) => {

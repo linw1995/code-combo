@@ -72,6 +72,7 @@ pub struct Chat<'a> {
     last_usage: Option<UsageStats>,
     retry_status: Option<RetryAttempt>,
     transcript_scopes: Vec<TranscriptScope>,
+    terminal_focused: bool,
 
     token_schedule_session_save: Option<CancellationToken>,
     cancellation_guard: CancellationGuard,
@@ -272,6 +273,7 @@ impl Chat<'static> {
             last_usage: None,
             retry_status: None,
             transcript_scopes: Vec::new(),
+            terminal_focused: true,
             token_schedule_session_save: None,
             cancellation_guard: CancellationGuard::default(),
         }
@@ -787,6 +789,9 @@ impl Chat<'static> {
     }
 
     fn notify_reply_ready(&self, summary: Option<&str>) {
+        if !self.should_notify() {
+            return;
+        }
         let body = match summary {
             Some(text) if !text.trim().is_empty() => format!("Reply ready: {text}"),
             _ => "Reply ready".to_string(),
@@ -795,12 +800,26 @@ impl Chat<'static> {
     }
 
     fn notify_action_required(&self, reason: &str) {
+        if !self.should_notify() {
+            return;
+        }
         let body = if reason.trim().is_empty() {
             "Action required".to_string()
         } else {
             format!("Action required: {reason}")
         };
         notifications::send_osc9(NOTIFY_TITLE, &body);
+    }
+
+    fn should_notify(&self) -> bool {
+        let config = global::config_sync();
+        if !config.ui.notifications.enabled {
+            return false;
+        }
+        if config.ui.notifications.only_when_unfocused && self.terminal_focused {
+            return false;
+        }
+        true
     }
 
     fn reply_summary_from_messages(msgs: &[BotMessage]) -> Option<String> {
@@ -1597,6 +1616,12 @@ impl Component for Chat<'static> {
         match event {
             Event::Key(key) => {
                 self.handle_key_event(key);
+            }
+            Event::FocusGained => {
+                self.terminal_focused = true;
+            }
+            Event::FocusLost => {
+                self.terminal_focused = false;
             }
             Event::Combo(combo) => {
                 // Update agent's combo list when combos are discovered
