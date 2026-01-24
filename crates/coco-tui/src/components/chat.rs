@@ -788,6 +788,14 @@ impl Chat<'static> {
         }
     }
 
+    fn update_terminal_focused(&mut self, focused: bool) {
+        if self.terminal_focused == focused {
+            return;
+        }
+        self.terminal_focused = focused;
+        debug!(focused, "terminal focus changed");
+    }
+
     fn notify_reply_ready(&self, summary: Option<&str>) {
         let config = global::config_sync();
         if !self.should_notify(&config) {
@@ -818,6 +826,10 @@ impl Chat<'static> {
             return false;
         }
         if config.ui.notifications.only_when_unfocused && self.terminal_focused {
+            debug!(
+                focused = true,
+                "notification suppressed: only_when_unfocused enabled"
+            );
             return false;
         }
         true
@@ -1619,10 +1631,10 @@ impl Component for Chat<'static> {
                 self.handle_key_event(key);
             }
             Event::FocusGained => {
-                self.terminal_focused = true;
+                self.update_terminal_focused(true);
             }
             Event::FocusLost => {
-                self.terminal_focused = false;
+                self.update_terminal_focused(false);
             }
             Event::Combo(combo) => {
                 // Update agent's combo list when combos are discovered

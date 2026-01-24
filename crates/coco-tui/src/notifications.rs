@@ -6,6 +6,7 @@ use std::{
 use code_combo::NotificationBackend;
 use serde::Serialize;
 use tokio::{io::AsyncWriteExt, process::Command};
+use tracing::debug;
 
 const OSC_PREFIX: &str = "\x1b]9;";
 const OSC_SUFFIX: &str = "\x07";
@@ -23,8 +24,24 @@ pub fn send_notification(title: &str, body: &str, backend: &NotificationBackend)
         return;
     }
     match backend {
-        NotificationBackend::Osc9 => send_osc9(title, body),
+        NotificationBackend::Osc9 => {
+            debug!(
+                backend = "osc9",
+                title_len = title.len(),
+                body_len = body.len(),
+                "sending notification"
+            );
+            send_osc9(title, body);
+        }
         NotificationBackend::ExternalCommand { executable, args } => {
+            debug!(
+                backend = "external_command",
+                executable = %executable,
+                args = ?args,
+                title_len = title.len(),
+                body_len = body.len(),
+                "sending notification"
+            );
             send_external_command(executable, args, title, body);
         }
     }
