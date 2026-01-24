@@ -6,7 +6,9 @@ use std::{
 
 use crossterm::{
     cursor,
-    event::{Event as CrosstermEvent, EventStream, KeyEvent},
+    event::{
+        DisableFocusChange, EnableFocusChange, Event as CrosstermEvent, EventStream, KeyEvent,
+    },
     terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use futures::{FutureExt, StreamExt};
@@ -112,8 +114,13 @@ impl App {
 
     pub fn enter(&mut self) -> Result<()> {
         crossterm::terminal::enable_raw_mode().whatever_context("failed to enable raw mode")?;
-        crossterm::execute!(stdout(), EnterAlternateScreen, cursor::Hide)
-            .whatever_context("failed to enter alter screen")?;
+        crossterm::execute!(
+            stdout(),
+            EnterAlternateScreen,
+            cursor::Hide,
+            EnableFocusChange
+        )
+        .whatever_context("failed to enter alter screen")?;
         self.start();
         Ok(())
     }
@@ -143,8 +150,13 @@ impl App {
             self.terminal
                 .flush()
                 .whatever_context("failed to flush terminal")?;
-            crossterm::execute!(stdout(), LeaveAlternateScreen, cursor::Show)
-                .whatever_context("faile to leave alter screen")?;
+            crossterm::execute!(
+                stdout(),
+                LeaveAlternateScreen,
+                cursor::Show,
+                DisableFocusChange
+            )
+            .whatever_context("faile to leave alter screen")?;
             crossterm::terminal::disable_raw_mode()
                 .whatever_context("failed to disable raw mode")?;
         }
