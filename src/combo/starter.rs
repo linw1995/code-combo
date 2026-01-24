@@ -10,6 +10,7 @@ use std::{
 
 use futures_core::Stream;
 use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
 use time::OffsetDateTime;
 use tokio::{
@@ -28,7 +29,8 @@ use crate::{
 };
 use serde_json::json;
 
-#[derive(Debug, Clone, Snafu)]
+#[derive(Debug, Clone, Serialize, Deserialize, Snafu)]
+#[serde(rename_all = "snake_case")]
 pub enum StarterError {
     #[snafu(display("Combo file is not excutable"))]
     NotExcutable,
@@ -38,7 +40,7 @@ pub enum StarterError {
     Cancelled,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Starter {
     pub path: String,
     pub combo: Result<Combo, StarterError>,
@@ -1054,6 +1056,12 @@ async fn handle_session_connection(
                     .build()
                 })?;
                 first_message = false;
+            }
+            ClientMessage::ComboRun(_) => {
+                return Err(InvalidSnafu {
+                    reason: "combo run is not allowed in combo session".to_string(),
+                }
+                .build());
             }
             ClientMessage::Mcp(_) => {
                 return Err(InvalidSnafu {
