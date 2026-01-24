@@ -30,7 +30,7 @@ pub use provider::{
     ModelPreset, ModelRequestConfig, ProviderConfig, ProviderKind, RequestOptions,
     ThinkingBlocksMode,
 };
-pub use ui::{MarkdownRenderEngine, UI};
+pub use ui::{MarkdownRenderEngine, NotificationBackend, UI, UINotifications};
 
 type BoxError = Box<dyn StdError + Send + Sync>;
 
@@ -79,8 +79,7 @@ pub struct Config {
 }
 
 fn ui_is_default(ui: &UI) -> bool {
-    let default = UI::default();
-    ui.theme == default.theme && matches!(ui.markdown_render_engine, MarkdownRenderEngine::Native)
+    ui == &UI::default()
 }
 
 impl Config {
@@ -416,7 +415,7 @@ fn table_name_from_table(table: &toml::value::Table, path: &str) -> Result<Strin
 mod tests {
     use super::{
         Config, MarkdownRenderEngine, McpServerConnection, ModelPreset, ModelRequestConfig,
-        SafeCommandsMode, ThinkingBlocksMode, merge_config_values,
+        NotificationBackend, SafeCommandsMode, ThinkingBlocksMode, merge_config_values,
     };
 
     fn base_config() -> String {
@@ -455,6 +454,36 @@ mod tests {
         let config_str = format!("deny_tools = []\n{}", base_config());
         let config: Config = toml::from_str(&config_str).expect("parse config");
         assert_eq!(config.deny_tools, Some(Vec::new()));
+    }
+
+    #[test]
+    fn parse_config_with_notifications() {
+        let config_str = [
+            "[ui]",
+            "notifications = { enabled = false, only_when_unfocused = false }",
+        ]
+        .join("\n");
+        let config: Config = toml::from_str(&config_str).expect("parse config");
+        assert!(!config.ui.notifications.enabled);
+        assert!(!config.ui.notifications.only_when_unfocused);
+    }
+
+    #[test]
+    fn parse_config_with_notifications_external_command() {
+        let config_str = [
+            "[ui.notifications]",
+            "enabled = true",
+            "only_when_unfocused = true",
+            "backend = { type = \"external_command\", executable = \"notify-cmd\", args = [\"--json\"] }",
+        ]
+        .join("\n");
+        let config: Config = toml::from_str(&config_str).expect("parse config");
+        assert!(config.ui.notifications.enabled);
+        assert!(config.ui.notifications.only_when_unfocused);
+        assert!(matches!(
+            config.ui.notifications.backend,
+            NotificationBackend::ExternalCommand { .. }
+        ));
     }
 
     #[test]

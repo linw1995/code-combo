@@ -9,6 +9,8 @@ use crossterm::event::{KeyEvent, MouseEvent};
 pub enum Event {
     Key(KeyEvent),
     Mouse(MouseEvent),
+    FocusGained,
+    FocusLost,
 
     Ask(AskEvent),
     Answer(AnswerEvent),

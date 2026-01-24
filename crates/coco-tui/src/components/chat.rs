@@ -46,6 +46,7 @@ use crate::{
     components::{CommandPalette, Content, Persistable},
     error::*,
     global::{self, State},
+    notifications,
     session::{self, Session},
     widgets::{BRAILLE_EIGHT_DOUBLE, Throbber, ThrobberState},
 };
@@ -71,6 +72,7 @@ pub struct Chat<'a> {
     last_usage: Option<UsageStats>,
     retry_status: Option<RetryAttempt>,
     transcript_scopes: Vec<TranscriptScope>,
+    terminal_focused: bool,
 
     token_schedule_session_save: Option<CancellationToken>,
     cancellation_guard: CancellationGuard,
@@ -182,6 +184,7 @@ enum TranscriptScope {
 
 const CTRL_C_WINDOW: Duration = Duration::from_secs(2);
 const SESSION_SUMMARY_MAX_LEN: usize = 80;
+const NOTIFY_TITLE: &str = "coco";
 #[derive(Debug, Default)]
 struct CancellationGuard {
     last_hit: State<Option<Instant>>,
@@ -270,6 +273,7 @@ impl Chat<'static> {
             last_usage: None,
             retry_status: None,
             transcript_scopes: Vec::new(),
+            terminal_focused: true,
             token_schedule_session_save: None,
             cancellation_guard: CancellationGuard::default(),
         }
@@ -782,6 +786,75 @@ impl Chat<'static> {
             self.cancellation_guard.reset();
             self.state.write().state = ChatState::Ready;
         }
+    }
+
+    fn update_terminal_focused(&mut self, focused: bool) {
+        if self.terminal_focused == focused {
+            return;
+        }
+        self.terminal_focused = focused;
+        debug!(focused, "terminal focus changed");
+    }
+
+    fn notify_reply_ready(&self, summary: Option<&str>) {
+        let config = global::config_sync();
+        if !self.should_notify(&config) {
+            return;
+        }
+        let body = match summary {
+            Some(text) if !text.trim().is_empty() => format!("Reply ready: {text}"),
+            _ => "Reply ready".to_string(),
+        };
+        notifications::send_notification(NOTIFY_TITLE, &body, &config.ui.notifications.backend);
+    }
+
+    fn notify_action_required(&self, reason: &str) {
+        let config = global::config_sync();
+        if !self.should_notify(&config) {
+            return;
+        }
+        let body = if reason.trim().is_empty() {
+            "Action required".to_string()
+        } else {
+            format!("Action required: {reason}")
+        };
+        notifications::send_notification(NOTIFY_TITLE, &body, &config.ui.notifications.backend);
+    }
+
+    fn should_notify(&self, config: &Config) -> bool {
+        if !config.ui.notifications.enabled {
+            return false;
+        }
+        if config.ui.notifications.only_when_unfocused && self.terminal_focused {
+            debug!(
+                focused = true,
+                "notification suppressed: only_when_unfocused enabled"
+            );
+            return false;
+        }
+        true
+    }
+
+    fn reply_summary_from_messages(msgs: &[BotMessage]) -> Option<String> {
+        let mut summary = None;
+        for msg in msgs {
+            if let BotMessage::Plain(text) = msg
+                && let Some(line) = Self::first_non_empty_line(text)
+            {
+                summary = Some(line);
+            }
+        }
+        summary
+    }
+
+    fn first_non_empty_line(text: &str) -> Option<String> {
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+        None
     }
 
     fn is_ready_for_exit(&self) -> bool {
@@ -1557,6 +1630,12 @@ impl Component for Chat<'static> {
             Event::Key(key) => {
                 self.handle_key_event(key);
             }
+            Event::FocusGained => {
+                self.update_terminal_focused(true);
+            }
+            Event::FocusLost => {
+                self.update_terminal_focused(false);
+            }
             Event::Combo(combo) => {
                 // Update agent's combo list when combos are discovered
                 if let ComboEvent::Discovered { starters } = combo {
@@ -1586,9 +1665,11 @@ impl Component for Chat<'static> {
                 self.messages.reset_stream();
                 // Check if there are any tool uses that will be executed
                 let has_tool_use = msgs.iter().any(|m| matches!(m, BotMessage::ToolUse(_)));
+                let reply_summary = Self::reply_summary_from_messages(msgs);
                 if !has_tool_use {
                     // Only set ready if no tools to execute
                     self.set_ready();
+                    self.notify_reply_ready(reply_summary.as_deref());
                 }
                 let mut new_messages = Vec::with_capacity(msgs.len());
                 let mut combo_tool_ids = Vec::new();
@@ -1660,6 +1741,7 @@ impl Component for Chat<'static> {
                     self.update_focus(Focus::Messages);
                     self.messages.focus(idx);
                 }
+                self.notify_action_required("Tool permission requested");
                 // Trigger session save after ask event
                 global::trigger_schedule_session_save();
             }
@@ -1670,6 +1752,7 @@ impl Component for Chat<'static> {
                     // Move focus to tool use message when confirmation is required
                     self.update_focus(Focus::Messages);
                     self.messages.focus(idx);
+                    self.notify_action_required("Text edit confirmation required");
                 }
                 // Trigger session save after ask event
                 global::trigger_schedule_session_save();
