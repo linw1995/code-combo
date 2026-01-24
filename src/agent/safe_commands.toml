@@ -210,3 +210,47 @@ flags = [{ name = "--dry-run", arg = "none" }]
 [[commands]]
 command = ["cargo", "check"]
 allow_any = true
+
+[[commands]]
+name = "sleep"
+allow_positional = true
+flags = [
+  { name = "--help", arg = "none" },
+  { name = "--version", arg = "none" },
+]
+
+[[commands]]
+command = ["gh", "--help"]
+allow_any = true
+
+[[commands]]
+command = ["gh", "--version"]
+allow_any = true
+
+[[commands]]
+command = ["gh", "issue", "list"]
+allow_any = true
+
+[[commands]]
+command = ["gh", "issue", "view"]
+allow_any = true
+
+[[commands]]
+command = ["gh", "pr", "list"]
+allow_any = true
+
+[[commands]]
+command = ["gh", "pr", "view"]
+allow_any = true
+
+[[commands]]
+command = ["gh", "repo", "view"]
+allow_any = true
+
+[[commands]]
+command = ["gh", "release", "list"]
+allow_any = true
+
+[[commands]]
+command = ["gh", "release", "view"]
+allow_any = true
