@@ -1,11 +1,36 @@
-use std::io::{self, Write};
+use std::{
+    io::{self, Write},
+    process::Stdio,
+};
+
+use code_combo::NotificationBackend;
+use serde::Serialize;
+use tokio::{io::AsyncWriteExt, process::Command};
 
 const OSC_PREFIX: &str = "\x1b]9;";
 const OSC_SUFFIX: &str = "\x07";
 const MAX_TITLE_LEN: usize = 64;
 const MAX_BODY_LEN: usize = 160;
 
-pub fn send_osc9(title: &str, body: &str) {
+#[derive(Serialize)]
+struct NotificationPayload {
+    title: String,
+    body: String,
+}
+
+pub fn send_notification(title: &str, body: &str, backend: &NotificationBackend) {
+    if title.trim().is_empty() && body.trim().is_empty() {
+        return;
+    }
+    match backend {
+        NotificationBackend::Osc9 => send_osc9(title, body),
+        NotificationBackend::ExternalCommand { executable, args } => {
+            send_external_command(executable, args, title, body);
+        }
+    }
+}
+
+fn send_osc9(title: &str, body: &str) {
     let Some(seq) = build_osc9(title, body) else {
         return;
     };
@@ -15,8 +40,8 @@ pub fn send_osc9(title: &str, body: &str) {
 }
 
 fn build_osc9(title: &str, body: &str) -> Option<String> {
-    let title = sanitize_field(title, MAX_TITLE_LEN);
-    let body = sanitize_field(body, MAX_BODY_LEN);
+    let title = normalize_field(title, MAX_TITLE_LEN, true);
+    let body = normalize_field(body, MAX_BODY_LEN, true);
     if title.is_empty() && body.is_empty() {
         return None;
     }
@@ -30,7 +55,37 @@ fn build_osc9(title: &str, body: &str) -> Option<String> {
     Some(format!("{OSC_PREFIX}{payload}{OSC_SUFFIX}"))
 }
 
-fn sanitize_field(value: &str, max_len: usize) -> String {
+fn send_external_command(executable: &str, args: &[String], title: &str, body: &str) {
+    let title = normalize_field(title, MAX_TITLE_LEN, false);
+    let body = normalize_field(body, MAX_BODY_LEN, false);
+    if title.is_empty() && body.is_empty() {
+        return;
+    }
+    let payload = NotificationPayload { title, body };
+    let Ok(payload_json) = serde_json::to_vec(&payload) else {
+        return;
+    };
+
+    let executable = executable.to_string();
+    let args = args.to_vec();
+    tokio::spawn(async move {
+        let mut cmd = Command::new(executable);
+        cmd.args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(_) => return,
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(&payload_json).await;
+        }
+        let _ = child.wait().await;
+    });
+}
+
+fn normalize_field(value: &str, max_len: usize, replace_semicolon: bool) -> String {
     if max_len == 0 {
         return String::new();
     }
@@ -44,7 +99,7 @@ fn sanitize_field(value: &str, max_len: usize) -> String {
                 continue;
             }
         }
-        if ch == ';' {
+        if replace_semicolon && ch == ';' {
             ch = ':';
         }
         if ch == ' ' {
@@ -81,5 +136,15 @@ mod tests {
         let seq = build_osc9("co;co", "line1\nline2\x1b[31m").expect("sequence");
         let payload = &seq[OSC_PREFIX.len()..seq.len() - OSC_SUFFIX.len()];
         assert_eq!(payload, "co:co;line1 line2[31m");
+    }
+
+    #[test]
+    fn notification_payload_json_is_stable() {
+        let payload = NotificationPayload {
+            title: "coco".to_string(),
+            body: "Reply ready".to_string(),
+        };
+        let json = serde_json::to_string(&payload).expect("serialize");
+        assert_eq!(json, "{\"title\":\"coco\",\"body\":\"Reply ready\"}");
     }
 }

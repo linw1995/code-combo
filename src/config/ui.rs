@@ -28,6 +28,8 @@ pub struct UINotifications {
     pub enabled: bool,
     #[serde(default = "default_notifications_only_when_unfocused")]
     pub only_when_unfocused: bool,
+    #[serde(default)]
+    pub backend: NotificationBackend,
 }
 
 fn default_notifications_enabled() -> bool {
@@ -43,8 +45,21 @@ impl Default for UINotifications {
         Self {
             enabled: default_notifications_enabled(),
             only_when_unfocused: default_notifications_only_when_unfocused(),
+            backend: NotificationBackend::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum NotificationBackend {
+    #[default]
+    Osc9,
+    ExternalCommand {
+        executable: String,
+        #[serde(default)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]

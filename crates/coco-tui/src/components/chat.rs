@@ -789,18 +789,20 @@ impl Chat<'static> {
     }
 
     fn notify_reply_ready(&self, summary: Option<&str>) {
-        if !self.should_notify() {
+        let config = global::config_sync();
+        if !self.should_notify(&config) {
             return;
         }
         let body = match summary {
             Some(text) if !text.trim().is_empty() => format!("Reply ready: {text}"),
             _ => "Reply ready".to_string(),
         };
-        notifications::send_osc9(NOTIFY_TITLE, &body);
+        notifications::send_notification(NOTIFY_TITLE, &body, &config.ui.notifications.backend);
     }
 
     fn notify_action_required(&self, reason: &str) {
-        if !self.should_notify() {
+        let config = global::config_sync();
+        if !self.should_notify(&config) {
             return;
         }
         let body = if reason.trim().is_empty() {
@@ -808,11 +810,10 @@ impl Chat<'static> {
         } else {
             format!("Action required: {reason}")
         };
-        notifications::send_osc9(NOTIFY_TITLE, &body);
+        notifications::send_notification(NOTIFY_TITLE, &body, &config.ui.notifications.backend);
     }
 
-    fn should_notify(&self) -> bool {
-        let config = global::config_sync();
+    fn should_notify(&self, config: &Config) -> bool {
         if !config.ui.notifications.enabled {
             return false;
         }
