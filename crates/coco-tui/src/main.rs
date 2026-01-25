@@ -133,7 +133,6 @@ impl TryFrom<Commands> for ClientCommand {
 #[snafu::report]
 #[tokio::main]
 async fn main() -> Result<()> {
-    ensure_tui_bin_env();
     let cmd = Args::command();
     let program = cmd.get_name().to_string();
     let matches = cmd.get_matches();
@@ -155,23 +154,32 @@ async fn main() -> Result<()> {
         Some(prompt)
     };
     if let Some(command) = args.command.take() {
-        match ClientCommand::try_from(command) {
-            Ok(mut command) => {
-                if let ClientCommand::ComboRun {
-                    ignore_workspace_scripts,
-                    ..
-                } = &mut command
-                {
-                    *ignore_workspace_scripts = args.ignore_workspace_scripts;
+        let should_handle_client = match &command {
+            Commands::Combo(ComboCommands::Run { .. }) => should_forward_combo_run_to_client(),
+            _ => true,
+        };
+
+        if should_handle_client {
+            match ClientCommand::try_from(command) {
+                Ok(mut command) => {
+                    if let ClientCommand::ComboRun {
+                        ignore_workspace_scripts,
+                        ..
+                    } = &mut command
+                    {
+                        *ignore_workspace_scripts = args.ignore_workspace_scripts;
+                    }
+                    init_client_logging(&program, &command);
+                    return handle_client_command(&program, &command_name, command)
+                        .await
+                        .whatever_context("failed to handle client command");
                 }
-                init_client_logging(&program, &command);
-                return handle_client_command(&program, &command_name, command)
-                    .await
-                    .whatever_context("failed to handle client command");
+                Err(command) => {
+                    args.command.replace(command);
+                }
             }
-            Err(command) => {
-                args.command.replace(command);
-            }
+        } else {
+            args.command.replace(command);
         }
     }
 
@@ -248,15 +256,18 @@ async fn main() -> Result<()> {
     result
 }
 
-fn ensure_tui_bin_env() {
-    if std::env::var_os("COCO_TUI_BIN").is_some() {
-        return;
-    }
-    let Ok(path) = std::env::current_exe() else {
-        return;
+fn should_forward_combo_run_to_client() -> bool {
+    let Some(path) = std::env::var_os("COCO_SESSION_SOCK") else {
+        return false;
     };
-    // Safety: set once during startup before spawning any tasks.
-    unsafe {
-        std::env::set_var("COCO_TUI_BIN", path);
+    let path = PathBuf::from(path);
+    if path.exists() {
+        true
+    } else {
+        warn!(
+            socket_path = %path.display(),
+            "session socket missing; running combo inside TUI"
+        );
+        false
     }
 }
