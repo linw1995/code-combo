@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    io::IsTerminal,
+    path::{Path, PathBuf},
+};
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use code_combo::{
@@ -138,6 +141,7 @@ async fn main() -> Result<()> {
     let matches = cmd.get_matches();
     let command_name = matches.subcommand_name().unwrap_or("coco").to_string();
     let mut args = Args::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
+    ensure_tty_or_session()?;
     global::set_ignore_workspace_scripts(args.ignore_workspace_scripts);
     if !args.prompt.is_empty() {
         ensure_whatever!(
@@ -155,7 +159,7 @@ async fn main() -> Result<()> {
     };
     if let Some(command) = args.command.take() {
         let should_handle_client = match &command {
-            Commands::Combo(ComboCommands::Run { .. }) => should_forward_combo_run_to_client(),
+            Commands::Combo(ComboCommands::Run { .. }) => has_session_socket(),
             _ => true,
         };
 
@@ -256,7 +260,7 @@ async fn main() -> Result<()> {
     result
 }
 
-fn should_forward_combo_run_to_client() -> bool {
+fn has_session_socket() -> bool {
     let Some(path) = std::env::var_os("COCO_SESSION_SOCK") else {
         return false;
     };
@@ -266,8 +270,18 @@ fn should_forward_combo_run_to_client() -> bool {
     } else {
         warn!(
             socket_path = %path.display(),
-            "session socket missing; running combo inside TUI"
+            "session socket missing"
         );
         false
     }
+}
+
+fn ensure_tty_or_session() -> Result<()> {
+    let has_session = has_session_socket();
+    let has_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    ensure_whatever!(
+        has_session || has_tty,
+        "stdin/stdout is not a TTY and COCO_SESSION_SOCK is not available"
+    );
+    Ok(())
 }
