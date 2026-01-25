@@ -1011,12 +1011,15 @@ impl Chat<'static> {
     }
 
     fn format_combo_run_command(&self, name: &str, args: &[String]) -> String {
-        let mut command = format!("coco combo run {name}");
-        if !args.is_empty() {
-            command.push_str(" -- ");
-            command.push_str(&args.join(" "));
+        let mut parts = Vec::with_capacity(args.len() + 4);
+        parts.push("coco".to_string());
+        parts.push("combo".to_string());
+        parts.push("run".to_string());
+        parts.push(display_combo_arg(name));
+        for arg in args {
+            parts.push(display_combo_arg(arg));
         }
-        command
+        parts.join(" ")
     }
 
     fn spawn_tool_use(&mut self, tool_use: &ToolUse) {
@@ -1638,11 +1641,22 @@ impl Chat<'static> {
     }
 
     fn parse_combo_name_from_command(&self, command: &str) -> Option<String> {
-        let mut tokens = command.split_whitespace();
-        match (tokens.next(), tokens.next(), tokens.next(), tokens.next()) {
-            (Some("coco"), Some("combo"), Some("run"), Some(name)) => Some(name.to_string()),
-            _ => None,
+        let tokens: Vec<&str> = command.split_whitespace().collect();
+        for (idx, token) in tokens.iter().enumerate() {
+            if !is_combo_command_token(token)
+                || tokens.get(idx + 1) != Some(&"combo")
+                || tokens.get(idx + 2) != Some(&"run")
+            {
+                continue;
+            }
+            let mut name_idx = idx + 3;
+            if tokens.get(name_idx) == Some(&"--") {
+                name_idx += 1;
+            }
+            let name = tokens.get(name_idx)?;
+            return Some(trim_combo_token(name));
         }
+        None
     }
 
     fn ensure_transcript_focus(&mut self) {
@@ -2640,6 +2654,41 @@ fn add_usage(total: &mut UsageStats, delta: &UsageStats) {
     if let Some(delta_total) = delta.total_tokens {
         total.total_tokens = Some(total.total_tokens.unwrap_or(0) + delta_total);
     }
+}
+
+fn display_combo_arg(value: &str) -> String {
+    if value.is_empty() {
+        return "\"\"".to_string();
+    }
+    if value.bytes().all(|byte| {
+        matches!(byte, b'a'..=b'z'
+            | b'A'..=b'Z'
+            | b'0'..=b'9'
+            | b'_'
+            | b'-'
+            | b'.'
+            | b'/'
+            | b':')
+    }) {
+        return value.to_string();
+    }
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+fn is_combo_command_token(token: &str) -> bool {
+    if token == "coco" {
+        return true;
+    }
+    let trimmed = trim_combo_token(token);
+    std::path::Path::new(&trimmed)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "coco")
+}
+
+fn trim_combo_token(token: &str) -> String {
+    token.trim_matches('"').trim_matches('\'').to_string()
 }
 
 fn session_summary_prompt() -> String {

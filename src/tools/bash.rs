@@ -51,7 +51,7 @@ fn default_timeout_ms() -> u64 {
     600_000
 }
 
-fn extra_envs_for_bash_input(input: &Input<'_>) -> Vec<(String, String)> {
+pub(crate) fn extra_envs_for_bash_input(input: &Input<'_>) -> Vec<(String, String)> {
     let Input::Starter(input) = input else {
         return Vec::new();
     };
@@ -61,10 +61,7 @@ fn extra_envs_for_bash_input(input: &Input<'_>) -> Vec<(String, String)> {
     extra_envs_for_command(&parsed.command)
 }
 
-fn extra_envs_for_command(command: &str) -> Vec<(String, String)> {
-    if !is_coco_combo_run_command(command) {
-        return Vec::new();
-    }
+fn extra_envs_for_command(_command: &str) -> Vec<(String, String)> {
     let mut envs = Vec::new();
     if let Ok(value) = std::env::var("COCO_SESSION_SOCK")
         && !value.is_empty()
@@ -77,20 +74,6 @@ fn extra_envs_for_command(command: &str) -> Vec<(String, String)> {
         envs.push(("COCO_TUI_BIN".to_string(), value));
     }
     envs
-}
-
-fn is_coco_combo_run_command(command: &str) -> bool {
-    let mut tokens = command.split_whitespace();
-    let Some(first) = tokens.next() else {
-        return false;
-    };
-    let Some(second) = tokens.next() else {
-        return false;
-    };
-    let Some(third) = tokens.next() else {
-        return false;
-    };
-    first == "coco" && second == "combo" && third == "run"
 }
 
 pub const BASH_TOOL_NAME: &str = "bash";
@@ -166,10 +149,11 @@ where
             Vec::new()
         }
     };
+    let mut envs = envs;
+    envs.extend(extra_envs.iter().cloned());
     let mut proc = ExecCommand::from_argv(argv)
         .remove_env_prefix("COCO_")
         .envs(envs)
-        .envs(extra_envs.to_vec())
         .spawn_chunked(ChunkConfig {
             interval: Duration::ZERO,
         })

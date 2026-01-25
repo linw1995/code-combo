@@ -412,10 +412,11 @@ async fn execute_combo(
     let mut tool_calls = 0;
     let mut summary_parts: Vec<String> = Vec::new();
     let mut exit_code: Option<i32> = None;
-    let mut failed = false;
+    let mut tool_failed = false;
+    let mut starter_failed = false;
     let mut cancelled = false;
 
-    let command_line = format_command_line(&combo_path, &args);
+    let command_line = format_combo_run_command(&combo_name, &args);
     // Emit executing event
     emit_combo_event(
         &on_event_for_emit,
@@ -497,7 +498,7 @@ async fn execute_combo(
                             output: output.clone(),
                         });
                         if is_error {
-                            failed = true;
+                            tool_failed = true;
                         }
                     }
                     StarterEvent::Prompt { prompt } => {
@@ -660,7 +661,7 @@ async fn execute_combo(
                         cancelled = true;
                     }
                     StarterEvent::Failed { reason } => {
-                        failed = true;
+                        starter_failed = true;
                         summary_parts.push(format!("[Failed] {}", reason));
                     }
                 }
@@ -744,7 +745,7 @@ async fn execute_combo(
         });
     }
 
-    let success = !failed && exit_code.map(|c| c == 0).unwrap_or(true);
+    let success = !starter_failed && exit_code.map(|c| c == 0).unwrap_or(true);
     let fallback_summary = if summary_parts.is_empty() {
         format!(
             "Combo '{}' completed with {} tool call(s)",
@@ -758,8 +759,14 @@ async fn execute_combo(
     let summary = if cancel_token.is_cancelled() {
         fallback_summary
     } else {
-        match generate_combo_summary(&mut reply_agent, &combo_name, tool_calls, exit_code, failed)
-            .await
+        match generate_combo_summary(
+            &mut reply_agent,
+            &combo_name,
+            tool_calls,
+            exit_code,
+            tool_failed,
+        )
+        .await
         {
             Ok(summary) => summary,
             Err(err) => {
@@ -775,7 +782,7 @@ async fn execute_combo(
         success,
         summary,
         tool_calls,
-        error: if failed {
+        error: if tool_failed {
             Some("One or more tool calls failed".to_string())
         } else {
             None
@@ -998,7 +1005,7 @@ async fn generate_combo_summary(
     combo_name: &str,
     tool_calls: usize,
     exit_code: Option<i32>,
-    failed: bool,
+    tool_failed: bool,
 ) -> Result<String, String> {
     let mut summary_agent = agent.clone();
     summary_agent.apply_tool_policies(Some(&[]), None);
@@ -1013,7 +1020,7 @@ Context:\n\
 combo_name: {combo_name}\n\
 tool_calls: {tool_calls}\n\
 exit_code: {exit_code}\n\
-failed: {failed}\n\
+tool_failed: {tool_failed}\n\
 ",
         exit_code = exit_code
             .map(|code| code.to_string())
@@ -1450,29 +1457,21 @@ fn flush_buffer(
     }
 }
 
-fn format_command_line(command: &str, args: &[String]) -> String {
-    let command = resolve_command_display(command);
-    let mut parts = Vec::with_capacity(args.len() + 1);
-    parts.push(shell_escape(&command));
+fn format_combo_run_command(name: &str, args: &[String]) -> String {
+    let mut parts = Vec::with_capacity(args.len() + 4);
+    parts.push("coco".to_string());
+    parts.push("combo".to_string());
+    parts.push("run".to_string());
+    parts.push(display_combo_arg(name));
     for arg in args {
-        parts.push(shell_escape(arg));
+        parts.push(display_combo_arg(arg));
     }
     parts.join(" ")
 }
 
-fn resolve_command_display(command: &str) -> String {
-    let command_path = std::path::Path::new(command);
-    let workspace_combo_dir = crate::workspace_dir().join(".coco/combos");
-    if let Ok(relative) = command_path.strip_prefix(&workspace_combo_dir) {
-        let display_path = std::path::Path::new(".coco/combos").join(relative);
-        return display_path.to_string_lossy().to_string();
-    }
-    command.to_string()
-}
-
-fn shell_escape(value: &str) -> String {
+fn display_combo_arg(value: &str) -> String {
     if value.is_empty() {
-        return "''".to_string();
+        return "\"\"".to_string();
     }
     if value.bytes().all(|byte| {
         matches!(byte, b'a'..=b'z'
@@ -1482,25 +1481,12 @@ fn shell_escape(value: &str) -> String {
             | b'-'
             | b'.'
             | b'/'
-            | b':'
-            | b'@'
-            | b'+'
-            | b'='
-            | b','
-            | b'%')
+            | b':')
     }) {
         return value.to_string();
     }
-    let mut escaped = String::from("'");
-    for ch in value.chars() {
-        if ch == '\'' {
-            escaped.push_str("'\"'\"'");
-        } else {
-            escaped.push(ch);
-        }
-    }
-    escaped.push('\'');
-    escaped
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 #[cfg(test)]

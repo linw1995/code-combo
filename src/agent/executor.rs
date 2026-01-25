@@ -14,7 +14,7 @@ use crate::{
     tools::{
         self, BASH_TOOL_NAME, BashInput, BashTool, ComboEvent, Final, LIST_TOOL_NAME, ListTool,
         READ_TOOL_NAME, RUN_TASK_TOOL_NAME, ReadTool, RunTaskTool, STR_REPLACE_TOOL_NAME,
-        StrReplaceTool, SubagentEvent, Tool, run_bash_chunked, run_task,
+        StrReplaceTool, SubagentEvent, Tool, extra_envs_for_bash_input, run_bash_chunked, run_task,
     },
 };
 
@@ -299,7 +299,9 @@ impl Executor {
         }
 
         if name == BASH_TOOL_NAME {
-            let output = run_bash_chunked(input, &self.bash_envs, cancel_token.clone(), |chunk| {
+            let mut envs = self.bash_envs.clone();
+            envs.extend(extra_envs_for_bash_input(&input));
+            let output = run_bash_chunked(input, &envs, cancel_token.clone(), |chunk| {
                 on_output(Output::ToolOutput(chunk.clone()));
             })
             .await;

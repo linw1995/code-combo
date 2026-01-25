@@ -40,6 +40,10 @@ impl ComboRunSessionServer {
         let server = SessionSocketServer::bind(&socket_path)
             .await
             .whatever_context("failed to bind session socket")?;
+        // Safety: set once during startup before spawning any tasks.
+        unsafe {
+            std::env::set_var("COCO_SESSION_SOCK", &socket_path);
+        }
 
         let shutdown = CancellationToken::new();
         let shutdown_task = shutdown.clone();
@@ -85,7 +89,18 @@ impl ComboRunSessionServer {
 
 async fn resolve_socket_path() -> Result<(PathBuf, Option<SessionEnv>)> {
     if let Ok(path) = std::env::var("COCO_SESSION_SOCK") {
-        return Ok((PathBuf::from(path), None));
+        let socket_path = PathBuf::from(path);
+        let parent_exists = socket_path
+            .parent()
+            .map(|parent| parent.exists())
+            .unwrap_or(false);
+        if parent_exists {
+            return Ok((socket_path, None));
+        }
+        warn!(
+            socket_path = %socket_path.display(),
+            "COCO_SESSION_SOCK parent dir missing; creating new session env"
+        );
     }
     let env = SessionEnv::builder()
         .build()
