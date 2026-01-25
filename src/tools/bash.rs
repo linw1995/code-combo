@@ -51,6 +51,48 @@ fn default_timeout_ms() -> u64 {
     600_000
 }
 
+fn extra_envs_for_bash_input(input: &Input<'_>) -> Vec<(String, String)> {
+    let Input::Starter(input) = input else {
+        return Vec::new();
+    };
+    let Ok(parsed) = serde_json::from_value::<BashInput>(input.clone()) else {
+        return Vec::new();
+    };
+    extra_envs_for_command(&parsed.command)
+}
+
+fn extra_envs_for_command(command: &str) -> Vec<(String, String)> {
+    if !is_coco_combo_run_command(command) {
+        return Vec::new();
+    }
+    let mut envs = Vec::new();
+    if let Ok(value) = std::env::var("COCO_SESSION_SOCK")
+        && !value.is_empty()
+    {
+        envs.push(("COCO_SESSION_SOCK".to_string(), value));
+    }
+    if let Ok(value) = std::env::var("COCO_TUI_BIN")
+        && !value.is_empty()
+    {
+        envs.push(("COCO_TUI_BIN".to_string(), value));
+    }
+    envs
+}
+
+fn is_coco_combo_run_command(command: &str) -> bool {
+    let mut tokens = command.split_whitespace();
+    let Some(first) = tokens.next() else {
+        return false;
+    };
+    let Some(second) = tokens.next() else {
+        return false;
+    };
+    let Some(third) = tokens.next() else {
+        return false;
+    };
+    first == "coco" && second == "combo" && third == "run"
+}
+
 pub const BASH_TOOL_NAME: &str = "bash";
 
 pub async fn run_bash_chunked<'a, F>(
@@ -220,7 +262,8 @@ impl Tool for BashTool {
     }
 
     async fn execute<'a>(&self, input: Input<'a>) -> ExecuteResult {
-        run_bash_chunked(input, &[], CancellationToken::new(), |_| {}).await
+        let extra_envs = extra_envs_for_bash_input(&input);
+        run_bash_chunked(input, &extra_envs, CancellationToken::new(), |_| {}).await
     }
 }
 

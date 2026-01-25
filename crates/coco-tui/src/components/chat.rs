@@ -951,9 +951,16 @@ impl Chat<'static> {
                 id, command_line, ..
             } => {
                 if self.manual_combo_runs.contains(id) {
-                    self.manual_combo_commands
-                        .insert(id.clone(), command_line.clone());
-                    self.ensure_manual_combo_tool_use(id, command_line);
+                    if !self.manual_combo_commands.contains_key(id) {
+                        self.manual_combo_commands
+                            .insert(id.clone(), command_line.clone());
+                    }
+                    let command_line = self
+                        .manual_combo_commands
+                        .get(id)
+                        .cloned()
+                        .unwrap_or_else(|| command_line.clone());
+                    self.ensure_manual_combo_tool_use(id, &command_line);
                 }
                 self.handle_combo_event(event);
             }
@@ -1007,6 +1014,15 @@ impl Chat<'static> {
                 agent.append_message(message).await;
             });
         });
+    }
+
+    fn format_combo_run_command(&self, name: &str, args: &[String]) -> String {
+        let mut command = format!("coco combo run {name}");
+        if !args.is_empty() {
+            command.push_str(" -- ");
+            command.push_str(&args.join(" "));
+        }
+        command
     }
 
     fn spawn_tool_use(&mut self, tool_use: &ToolUse) {
@@ -2332,11 +2348,7 @@ impl Component for Chat<'static> {
                         .clone()
                         .unwrap_or_else(|| format!("toolu_{}", Uuid::new_v4().as_simple()));
                     self.manual_combo_runs.insert(id.clone());
-                    let mut command_line = name.clone();
-                    if !args.is_empty() {
-                        command_line.push(' ');
-                        command_line.push_str(&args.join(" "));
-                    }
+                    let command_line = self.format_combo_run_command(name, args);
                     self.manual_combo_commands.insert(id.clone(), command_line);
                     let combo = Combo::new(&id, name);
                     self.messages.push(Message::user(combo.into()));
