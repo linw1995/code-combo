@@ -1,8 +1,8 @@
 use coco_macro::ComponentExt;
 use code_combo::tools::{
-    ComboEvent as ComboToolEvent, ComboInfo, ComboStreamKind as ComboToolStreamKind, Final,
-    RUN_COMBO_TOOL_NAME, RUN_TASK_TOOL_NAME, RunComboInput, RunComboOutput, RunTaskInput,
-    SubagentEvent,
+    BASH_TOOL_NAME, BashOutput, ComboEvent as ComboToolEvent, ComboInfo,
+    ComboStreamKind as ComboToolStreamKind, Final, RUN_COMBO_TOOL_NAME, RUN_TASK_TOOL_NAME,
+    RunComboInput, RunComboOutput, RunTaskInput, SubagentEvent,
 };
 use code_combo::{
     Agent, Block as ChatBlock, ChatResponse, ChatStreamUpdate, ComboRunEvent, ComboRunResult,
@@ -78,6 +78,10 @@ pub struct Chat<'a> {
     prev_focus: Option<Focus>,
     combo_thinking_active: bool,
     combo_tool_messages: HashSet<String>,
+    manual_combo_runs: HashSet<String>,
+    manual_combo_tool_uses: HashSet<String>,
+    manual_combo_commands: HashMap<String, String>,
+    manual_combo_prompted: HashSet<String>,
     pending_combo_tool_events: HashMap<String, Vec<ComboEvent>>,
     last_usage: Option<UsageStats>,
     retry_status: Option<RetryAttempt>,
@@ -286,6 +290,10 @@ impl Chat<'static> {
             prev_focus: None,
             combo_thinking_active: false,
             combo_tool_messages: HashSet::new(),
+            manual_combo_runs: HashSet::new(),
+            manual_combo_tool_uses: HashSet::new(),
+            manual_combo_commands: HashMap::new(),
+            manual_combo_prompted: HashSet::new(),
             pending_combo_tool_events: HashMap::new(),
             last_usage: None,
             retry_status: None,
@@ -508,12 +516,14 @@ impl Chat<'static> {
             ComboEvent::ReplyToolUse { offload: true, .. } => {
                 self.set_processing();
             }
-            ComboEvent::Executed { starter, .. } => {
+            ComboEvent::Executed { id, starter, .. } => {
                 self.set_combo_thinking_active(false);
                 if let Err(err) = starter.combo.as_ref() {
                     warn!(?err, "Failed to execute starter");
                 }
-                self.spawn_chat_with_history();
+                if !self.manual_combo_runs.contains(id) {
+                    self.spawn_chat_with_history();
+                }
             }
             ComboEvent::Discovered { .. }
             | ComboEvent::NotFound { .. }
@@ -611,25 +621,6 @@ impl Chat<'static> {
 
         // Grant permission and execute
         self.agent.grant_once(&tool_use.id, &tool_use.name);
-        let agent = self.agent.clone();
-        let tool_use_message =
-            ChatMessage::assistant(ChatContent::Multiple(vec![ChatBlock::tool_use(
-                &tool_use.id,
-                &tool_use.name,
-                tool_use.input.clone(),
-            )]));
-        let mut prompt = format!("Run combo {}", name);
-        if !args.is_empty() {
-            prompt.push_str(" with args: ");
-            prompt.push_str(&args.join(" "));
-        }
-        let prompt_message = ChatMessage::user(ChatContent::Text(prompt));
-        tokio::spawn(async move {
-            if agent.dump_messages().await.is_empty() {
-                agent.append_message(prompt_message).await;
-            }
-            agent.append_message(tool_use_message).await;
-        });
         self.register_combo_tool_message(tool_use.id.clone());
         self.spawn_tool_use(&tool_use);
     }
@@ -956,14 +947,66 @@ impl Chat<'static> {
 
     fn handle_combo_event_from_tool(&mut self, event: &ComboEvent) {
         match event {
-            ComboEvent::Executed { starter, .. } => {
+            ComboEvent::Executing {
+                id, command_line, ..
+            } => {
+                if self.manual_combo_runs.contains(id) {
+                    self.manual_combo_commands
+                        .insert(id.clone(), command_line.clone());
+                    self.ensure_manual_combo_tool_use(id, command_line);
+                }
+                self.handle_combo_event(event);
+            }
+            ComboEvent::Executed { id, starter, .. } => {
                 self.set_combo_thinking_active(false);
                 if let Err(err) = starter.combo.as_ref() {
                     warn!(?err, "Failed to execute starter");
                 }
+                if !self.manual_combo_runs.contains(id) {
+                    self.spawn_chat_with_history();
+                }
             }
             _ => self.handle_combo_event(event),
         }
+    }
+
+    fn ensure_manual_combo_tool_use(&mut self, id: &str, command_line: &str) {
+        if !self.manual_combo_runs.contains(id) {
+            return;
+        }
+        self.ensure_manual_combo_prompt(id, command_line);
+        if !self.manual_combo_tool_uses.insert(id.to_string()) {
+            return;
+        }
+        let tool_use = ToolUse {
+            id: id.to_string(),
+            name: BASH_TOOL_NAME.to_string(),
+            input: serde_json::json!({ "command": command_line }),
+        };
+        let message =
+            ChatMessage::assistant(ChatContent::Multiple(vec![ChatBlock::ToolUse(tool_use)]));
+        self.append_agent_message_sync(message);
+    }
+
+    fn ensure_manual_combo_prompt(&mut self, id: &str, command_line: &str) {
+        if !self.manual_combo_runs.contains(id) {
+            return;
+        }
+        if !self.manual_combo_prompted.insert(id.to_string()) {
+            return;
+        }
+        let prompt = format!("User use combo {command_line}");
+        let message = ChatMessage::user(ChatContent::Text(prompt));
+        self.append_agent_message_sync(message);
+    }
+
+    fn append_agent_message_sync(&self, message: ChatMessage) {
+        let agent = self.agent.clone();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async move {
+                agent.append_message(message).await;
+            });
+        });
     }
 
     fn spawn_tool_use(&mut self, tool_use: &ToolUse) {
@@ -1974,6 +2017,7 @@ impl Component for Chat<'static> {
                 is_error,
                 output,
             }) => {
+                let is_manual_combo = self.manual_combo_runs.contains(id);
                 self.forward_combo_result_to_session(id, output, *is_error);
                 if let Some(idx) = self.messages.on_tool_event(event)
                     && !is_error
@@ -1982,6 +2026,49 @@ impl Component for Chat<'static> {
                     // Move focus back to Input if tool use success.
                     self.update_focus(Focus::Input);
                     self.messages.blur();
+                }
+
+                if is_manual_combo {
+                    let command_line = self
+                        .manual_combo_commands
+                        .remove(id)
+                        .unwrap_or_else(|| format!("combo {id}"));
+                    self.ensure_manual_combo_tool_use(id, &command_line);
+                    let result = combo_run_result_from_final(id, output, *is_error);
+                    let mut summary = result.summary.trim().to_string();
+                    if summary.is_empty() {
+                        summary = result
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| "Combo completed.".to_string());
+                    }
+                    let (stdout, stderr, exit_code) = if result.success {
+                        (summary.clone(), String::new(), 0)
+                    } else {
+                        let stderr = result.error.clone().unwrap_or_else(|| summary.clone());
+                        (summary.clone(), stderr, 1)
+                    };
+                    let bash_output = BashOutput {
+                        exit_code,
+                        stdout,
+                        stderr,
+                        timed_out: false,
+                    };
+                    let bash_value =
+                        serde_json::to_value(bash_output).unwrap_or(Value::String(summary));
+                    let content = final_to_tool_content(&Final::Json(bash_value));
+                    let content = ChatContent::Multiple(vec![ChatBlock::ToolResult {
+                        tool_use_id: id.clone(),
+                        is_error: Some(!result.success),
+                        content,
+                    }]);
+                    let content = self.build_user_content(content);
+                    self.spawn_chat_task(content);
+                    self.manual_combo_runs.remove(id);
+                    self.manual_combo_tool_uses.remove(id);
+                    self.manual_combo_prompted.remove(id);
+                    global::trigger_schedule_session_save();
+                    return;
                 }
 
                 // Build content for this tool result
@@ -2244,6 +2331,13 @@ impl Component for Chat<'static> {
                     let id = id
                         .clone()
                         .unwrap_or_else(|| format!("toolu_{}", Uuid::new_v4().as_simple()));
+                    self.manual_combo_runs.insert(id.clone());
+                    let mut command_line = name.clone();
+                    if !args.is_empty() {
+                        command_line.push(' ');
+                        command_line.push_str(&args.join(" "));
+                    }
+                    self.manual_combo_commands.insert(id.clone(), command_line);
                     let combo = Combo::new(&id, name);
                     self.messages.push(Message::user(combo.into()));
                     self.spawn_combo_execute(id, name.clone(), args.clone());
