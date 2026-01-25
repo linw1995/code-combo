@@ -40,7 +40,6 @@ pub async fn handle_combo_run(
         None => {
             let (result, mut child) = run_with_tui(payload, ignore_workspace_scripts).await?;
             wait_for_tui_exit(&mut child).await?;
-            emit_result(&result)?;
             if !result.success {
                 let error = result
                     .error
