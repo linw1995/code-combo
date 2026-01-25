@@ -1,6 +1,6 @@
 use coco_macro::ComponentExt;
 use code_combo::tools::{
-    BASH_TOOL_NAME, BashOutput, ComboEvent as ComboToolEvent, ComboInfo,
+    BASH_TOOL_NAME, BashInput, BashOutput, ComboEvent as ComboToolEvent, ComboInfo,
     ComboStreamKind as ComboToolStreamKind, Final, RUN_COMBO_TOOL_NAME, RUN_TASK_TOOL_NAME,
     RunComboInput, RunComboOutput, RunTaskInput, SubagentEvent,
 };
@@ -1592,6 +1592,18 @@ impl Chat<'static> {
                             );
                         }
                     }
+                    BASH_TOOL_NAME => {
+                        if let Some(name) = self.combo_name_from_bash_tool_use(tool_use) {
+                            map.insert(
+                                tool_use.id.clone(),
+                                TranscriptLinkTarget {
+                                    kind: TranscriptLinkKind::Combo,
+                                    id: tool_use.id.clone(),
+                                    name,
+                                },
+                            );
+                        }
+                    }
                     RUN_TASK_TOOL_NAME => {
                         if let Ok(input) =
                             serde_json::from_value::<RunTaskInput>(tool_use.input.clone())
@@ -1611,6 +1623,32 @@ impl Chat<'static> {
             }
         }
         map
+    }
+
+    fn combo_name_from_bash_tool_use(&self, tool_use: &ToolUse) -> Option<String> {
+        let input = serde_json::from_value::<BashInput>(tool_use.input.clone()).ok()?;
+        let name = self.parse_combo_name_from_command(&input.command)?;
+        Some(
+            self.combo_name_from_transcript(&tool_use.id)
+                .unwrap_or(name),
+        )
+    }
+
+    fn combo_name_from_transcript(&self, id: &str) -> Option<String> {
+        let state = self.state.read();
+        state
+            .combo_transcripts
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.name.clone())
+    }
+
+    fn parse_combo_name_from_command(&self, command: &str) -> Option<String> {
+        let mut tokens = command.split_whitespace();
+        match (tokens.next(), tokens.next(), tokens.next(), tokens.next()) {
+            (Some("coco"), Some("combo"), Some("run"), Some(name)) => Some(name.to_string()),
+            _ => None,
+        }
     }
 
     fn ensure_transcript_focus(&mut self) {
