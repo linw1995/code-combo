@@ -32,7 +32,7 @@ pub use read::{
 };
 pub use run_combo::{
     ComboEvent, ComboInfo, ComboStreamKind, RUN_COMBO_TOOL_NAME, RunComboContext, RunComboInput,
-    RunComboOutput, RunComboTool, run_combo,
+    RunComboOutput, run_combo,
 };
 pub use run_task::{
     RUN_TASK_TOOL_NAME, RunTaskContext, RunTaskInput, RunTaskOutput, RunTaskTool, SubagentEvent,

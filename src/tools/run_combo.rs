@@ -1,12 +1,11 @@
-//! Run Combo Tool - Executes combo scripts within agent context.
+//! Combo runner - executes combo scripts within agent context.
 //!
-//! This tool allows the agent to execute combo scripts that have been
-//! discovered during startup. Combos are executable scripts that can
-//! perform complex operations with recorded tool calls.
+//! This module provides combo execution helpers and shared types.
+//! Combos are executable scripts that can perform complex operations
+//! with recorded tool calls.
 
 use std::{path::PathBuf, sync::Arc};
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -14,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use super::{
-    BASH_TOOL_NAME, BashInput, ExecuteResult, Final, Input, Output, Tool, prepare_mcp_envs,
+    BASH_TOOL_NAME, BashInput, ExecuteResult, Final, Input, Output, prepare_mcp_envs,
     run_bash_chunked,
 };
 use crate::{
@@ -28,7 +27,7 @@ pub const RUN_COMBO_TOOL_NAME: &str = "run_combo";
 
 type ComboEventCallback = Arc<std::sync::Mutex<Box<dyn FnMut(&ComboEvent) + Send>>>;
 
-/// Input parameters for the run_combo tool.
+/// Input parameters for combo execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunComboInput {
     /// Name of the combo to execute.
@@ -38,7 +37,7 @@ pub struct RunComboInput {
     pub args: Vec<String>,
 }
 
-/// Output from the run_combo tool.
+/// Output from combo execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunComboOutput {
     /// Whether the combo completed successfully.
@@ -210,77 +209,7 @@ pub struct RunComboContext {
     pub ignore_workspace_scripts: bool,
 }
 
-/// Tool for executing combo scripts.
-pub struct RunComboTool {
-    context: Arc<Mutex<RunComboContext>>,
-}
-
-impl RunComboTool {
-    /// Create a new RunComboTool with the given context.
-    pub fn new(context: RunComboContext) -> Self {
-        Self {
-            context: Arc::new(Mutex::new(context)),
-        }
-    }
-
-    /// Create a new RunComboTool with a shared context.
-    /// This allows external code to update the combo list after tool creation.
-    pub fn new_with_shared_context(context: Arc<Mutex<RunComboContext>>) -> Self {
-        Self { context }
-    }
-
-    /// Get the shared context.
-    pub fn context(&self) -> Arc<Mutex<RunComboContext>> {
-        self.context.clone()
-    }
-}
-
-#[async_trait]
-impl Tool for RunComboTool {
-    fn name(&self) -> &'static str {
-        RUN_COMBO_TOOL_NAME
-    }
-
-    fn description(&self) -> &'static str {
-        "Execute a combo script to perform predefined operations."
-    }
-
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "combo_name": {
-                    "type": "string",
-                    "description": "Name of the combo to execute"
-                },
-                "args": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    },
-                    "description": "Arguments passed to the combo starter"
-                }
-            },
-            "required": ["combo_name"]
-        })
-    }
-
-    async fn execute<'a>(&self, input: Input<'a>) -> ExecuteResult {
-        run_combo(
-            self.context.clone(),
-            input,
-            CancellationToken::new(),
-            |_| {},
-        )
-        .await
-    }
-
-    fn as_any(&self) -> Option<&dyn std::any::Any> {
-        Some(self)
-    }
-}
-
-/// Execute the run_combo tool with event callback support.
+/// Execute combo logic with event callback support.
 pub async fn run_combo<F>(
     context: Arc<Mutex<RunComboContext>>,
     input: Input<'_>,

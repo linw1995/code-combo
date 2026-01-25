@@ -19,7 +19,7 @@ use tracing::warn;
 use crate::{
     Config, Error, PromptSchema, ProviderConfig, RequestOptions, Result, ResultDisplayExt,
     RetryAttempt as CoreRetryAttempt, RetryUpdate, StreamError, ThinkingBlocksMode, ThinkingConfig,
-    tools::{ComboInfo, RunComboContext, RunComboTool, RunTaskContext, RunTaskTool},
+    tools::{ComboEvent, ComboInfo, RunComboContext, RunTaskContext, RunTaskTool, run_combo},
 };
 use executor::PermissionControl;
 use prompt::{build_system_prompt_from_config, build_system_prompt_from_config_async};
@@ -61,7 +61,7 @@ pub struct Agent {
     /// Full agent configuration loaded at initialization
     agent_config: AgentConfig,
 
-    /// Shared context for run_combo tool.
+    /// Shared context for combo execution helpers.
     combo_context: Arc<Mutex<RunComboContext>>,
 
     /// Shared context for run_task tool (if subagents are configured).
@@ -392,8 +392,8 @@ impl Agent {
             None
         };
 
-        // Register run_combo tool with empty combo list initially
-        // Combos will be populated later via set_combos()
+        // Initialize combo context with empty combo list.
+        // Combos can be populated later via set_combos().
         let combo_context = Arc::new(Mutex::new(RunComboContext {
             combos: Vec::new(),
             envs: Vec::new(),
@@ -403,8 +403,6 @@ impl Agent {
             thinking_enabled: false,
             ignore_workspace_scripts: false,
         }));
-        let run_combo_tool = RunComboTool::new_with_shared_context(combo_context.clone());
-        executor.register_tool(std::sync::Arc::new(run_combo_tool));
 
         // Apply agent tools as base
         if let Some(tools) = agent_config.tools.as_deref() {
@@ -459,7 +457,7 @@ impl Agent {
         &self.executor
     }
 
-    /// Update the combo list for run_combo tool.
+    /// Update the combo list for combo execution.
     ///
     /// This should be called after combo discovery to populate the available combos.
     pub async fn set_combos(&self, combos: Vec<ComboInfo>) {
@@ -1205,6 +1203,29 @@ impl Agent {
         self.executor
             .execute_with_output(id, name, input, cancel_token, on_output)
             .await
+    }
+
+    pub async fn execute_combo_with_output<F>(
+        &self,
+        name: String,
+        args: Vec<String>,
+        cancel_token: CancellationToken,
+        on_event: F,
+    ) -> crate::tools::ExecuteResult
+    where
+        F: FnMut(&ComboEvent) + Send + 'static,
+    {
+        let input = json!({
+            "combo_name": name,
+            "args": args,
+        });
+        run_combo(
+            self.combo_context.clone(),
+            crate::tools::Input::Starter(input),
+            cancel_token,
+            on_event,
+        )
+        .await
     }
 
     fn thinking_payload(&self, request_options: &RequestOptions) -> Option<Thinking> {

@@ -79,7 +79,7 @@ pub enum AnswerEvent {
         id: String,
         event: SubagentEvent,
     },
-    /// Combo tool event (for run_combo tool).
+    /// Combo tool event (from combo execution).
     ComboToolEvent {
         id: String,
         event: ComboToolEvent,

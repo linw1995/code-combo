@@ -612,17 +612,11 @@ impl Chat<'static> {
     }
 
     fn spawn_combo_execute(&mut self, id: String, name: String, args: Vec<String>) {
-        // Create tool use for run_combo
-        let tool_use = ToolUse {
-            id,
-            name: RUN_COMBO_TOOL_NAME.to_string(),
-            input: serde_json::json!({ "combo_name": name, "args": args }),
-        };
-
-        // Grant permission and execute
-        self.agent.grant_once(&tool_use.id, &tool_use.name);
-        self.register_combo_tool_message(tool_use.id.clone());
-        self.spawn_tool_use(&tool_use);
+        self.set_processing();
+        self.register_combo_tool_message(id.clone());
+        let cancel_token = self.cancellation_guard.token();
+        let agent = self.agent.clone();
+        tokio::task::spawn(task_combo_execute(agent, id, name, args, cancel_token));
     }
 
     fn dispatch_combo_event(&mut self, event: ComboEvent) {
@@ -3302,6 +3296,65 @@ async fn task_tool_use(mut agent: Agent, tool_use: ToolUse, cancel_token: Cancel
             },
         )
         .await;
+}
+
+async fn task_combo_execute(
+    agent: Agent,
+    id: String,
+    name: String,
+    args: Vec<String>,
+    cancel_token: CancellationToken,
+) {
+    let tx = global::event_tx();
+    let auto_accept = agent.auto_accept_edits();
+    let id_for_event = id.clone();
+    let event_tx = tx.clone();
+    let output = agent
+        .execute_combo_with_output(name, args, cancel_token.clone(), move |event| {
+            let _ = event_tx.send(
+                AnswerEvent::ComboToolEvent {
+                    id: id_for_event.clone(),
+                    event: event.clone(),
+                }
+                .into(),
+            );
+        })
+        .await;
+    match Output::from(output) {
+        Output::Success(output) => {
+            let _ = tx.send(
+                AnswerEvent::ToolResult {
+                    id,
+                    is_error: false,
+                    is_user_cancelled: cancel_token.is_cancelled(),
+                    output,
+                }
+                .into(),
+            );
+        }
+        Output::Failure(output) => {
+            let _ = tx.send(
+                AnswerEvent::ToolResult {
+                    id,
+                    is_error: true,
+                    is_user_cancelled: cancel_token.is_cancelled(),
+                    output,
+                }
+                .into(),
+            );
+        }
+        Output::TextEdit(edit) => {
+            let _ = tx.send(
+                AskEvent::TextEdit {
+                    id,
+                    edit,
+                    auto_accept,
+                }
+                .into(),
+            );
+        }
+        _ => {}
+    }
 }
 
 async fn task_apply_text_edit(
