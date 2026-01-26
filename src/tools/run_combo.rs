@@ -49,6 +49,9 @@ pub struct RunComboOutput {
     /// Optional error message if failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Optional thinking blocks from the summary response.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub summary_thinking: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +133,31 @@ pub enum ComboEvent {
     PromptStreamReset {
         /// Combo name.
         name: String,
+    },
+    /// Reset summary stream for combo summary.
+    SummaryStreamReset {
+        /// Combo name.
+        name: String,
+    },
+    /// Summary stream update for combo summary.
+    SummaryStream {
+        /// Combo name.
+        name: String,
+        /// Stream index.
+        index: usize,
+        /// Stream kind.
+        kind: ComboStreamKind,
+        /// Streamed text.
+        text: String,
+    },
+    /// Summary completion for combo summary.
+    SummaryDone {
+        /// Combo name.
+        name: String,
+        /// Summary text.
+        summary: String,
+        /// Thinking blocks.
+        thinking: Vec<String>,
     },
     /// Reply tool use from prompt.
     ReplyToolUse {
@@ -722,6 +750,7 @@ async fn execute_combo(
             summary: "Combo execution was cancelled".to_string(),
             tool_calls,
             error: Some("Cancelled".to_string()),
+            summary_thinking: Vec::new(),
         });
     }
 
@@ -742,6 +771,7 @@ async fn execute_combo(
             summary: summary_parts.join("\n"),
             tool_calls,
             error: Some(format!("Combo error: {}", e)),
+            summary_thinking: Vec::new(),
         });
     }
 
@@ -756,8 +786,8 @@ async fn execute_combo(
         let start = summary_parts.len().saturating_sub(max_lines);
         summary_parts[start..].join("\n")
     };
-    let summary = if cancel_token.is_cancelled() {
-        fallback_summary
+    let (summary, summary_thinking) = if cancel_token.is_cancelled() {
+        (fallback_summary, Vec::new())
     } else {
         match generate_combo_summary(
             &mut reply_agent,
@@ -765,16 +795,27 @@ async fn execute_combo(
             tool_calls,
             exit_code,
             tool_failed,
+            cancel_token.clone(),
+            Some(on_event_for_emit.clone()),
         )
         .await
         {
-            Ok(summary) => summary,
+            Ok(summary) => (summary.summary, summary.thinking),
             Err(err) => {
                 warn!(?err, "Failed to generate combo summary");
-                fallback_summary
+                (fallback_summary, Vec::new())
             }
         }
     };
+
+    emit_combo_event(
+        &on_event_for_emit,
+        ComboEvent::SummaryDone {
+            name: combo_name.clone(),
+            summary: summary.clone(),
+            thinking: summary_thinking.clone(),
+        },
+    );
 
     emit_combo_transcript(&on_event_for_emit, &combo_name, &reply_agent).await;
 
@@ -787,6 +828,7 @@ async fn execute_combo(
         } else {
             None
         },
+        summary_thinking,
     })
 }
 
@@ -1000,13 +1042,20 @@ fn extract_text_response(message: &Message) -> String {
     }
 }
 
+struct SummaryResponse {
+    summary: String,
+    thinking: Vec<String>,
+}
+
 async fn generate_combo_summary(
     agent: &mut Agent,
     combo_name: &str,
     tool_calls: usize,
     exit_code: Option<i32>,
     tool_failed: bool,
-) -> Result<String, String> {
+    cancel_token: CancellationToken,
+    on_event: Option<ComboEventCallback>,
+) -> Result<SummaryResponse, String> {
     let mut summary_agent = agent.clone();
     summary_agent.apply_tool_policies(Some(&[]), None);
     let prompt = format!(
@@ -1026,16 +1075,85 @@ tool_failed: {tool_failed}\n\
             .map(|code| code.to_string())
             .unwrap_or_else(|| "none".to_string()),
     );
-    let response = summary_agent
-        .chat(Message::user(Content::Text(prompt)))
-        .await
-        .map_err(|err| err.to_string())?;
+    let disable_stream = summary_agent.disable_stream_for_current_model();
+    let response = if disable_stream || on_event.is_none() {
+        summary_agent
+            .chat(Message::user(Content::Text(prompt)))
+            .await
+            .map_err(|err| err.to_string())?
+    } else {
+        let stream_name = combo_name.to_string();
+        if let Some(on_event) = on_event.as_ref() {
+            emit_combo_event(
+                on_event,
+                ComboEvent::SummaryStreamReset {
+                    name: stream_name.clone(),
+                },
+            );
+        }
+        let on_event_stream = on_event.clone();
+        summary_agent
+            .chat_stream(
+                Message::user(Content::Text(prompt)),
+                cancel_token,
+                move |update| {
+                    let Some(on_event_stream) = on_event_stream.as_ref() else {
+                        return;
+                    };
+                    match update {
+                        ChatStreamUpdate::Reset => emit_combo_event(
+                            on_event_stream,
+                            ComboEvent::SummaryStreamReset {
+                                name: stream_name.clone(),
+                            },
+                        ),
+                        ChatStreamUpdate::Plain { index, text } => emit_combo_event(
+                            on_event_stream,
+                            ComboEvent::SummaryStream {
+                                name: stream_name.clone(),
+                                index,
+                                kind: ComboStreamKind::Plain,
+                                text,
+                            },
+                        ),
+                        ChatStreamUpdate::Thinking { index, text } => emit_combo_event(
+                            on_event_stream,
+                            ComboEvent::SummaryStream {
+                                name: stream_name.clone(),
+                                index,
+                                kind: ComboStreamKind::Thinking,
+                                text,
+                            },
+                        ),
+                    }
+                },
+            )
+            .await
+            .map_err(|err| err.to_string())?
+    };
     let summary = extract_text_response(&response.message);
     let summary = summary.trim();
     if summary.is_empty() {
         return Err("summary response is empty".to_string());
     }
-    Ok(summary.to_string())
+    let thinking = extract_thinking_blocks(&response.message);
+    Ok(SummaryResponse {
+        summary: summary.to_string(),
+        thinking,
+    })
+}
+
+fn extract_thinking_blocks(message: &Message) -> Vec<String> {
+    match &message.content {
+        Content::Multiple(blocks) => blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Thinking { thinking, .. } if !thinking.is_empty() => Some(thinking.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn build_offload_reply_directive(schemas: &[PromptSchema]) -> String {
@@ -1500,6 +1618,7 @@ mod tests {
             summary: "Combo completed".to_string(),
             tool_calls: 3,
             error: None,
+            summary_thinking: Vec::new(),
         };
 
         let json = serde_json::to_value(&output).unwrap();

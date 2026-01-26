@@ -200,6 +200,24 @@ pub enum ComboRunEvent {
         id: String,
         name: String,
     },
+    SummaryStreamReset {
+        id: String,
+        name: String,
+    },
+    SummaryStream {
+        id: String,
+        name: String,
+        index: usize,
+        kind: ComboStreamKind,
+        text: String,
+    },
+    SummaryDone {
+        id: String,
+        name: String,
+        summary: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        thinking: Vec<String>,
+    },
     ReplyToolUse {
         id: String,
         name: String,

@@ -12,9 +12,13 @@ use ratatui::{
     widgets::{Block, Borders},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use coco_highlight::Lang;
-use code_combo::{OutputChunk, StreamKind, ToolUse, tools::Final};
+use code_combo::{
+    OutputChunk, StreamKind, ToolUse,
+    tools::{Final, RunComboOutput},
+};
 
 use super::RoleMergeMode;
 use super::fold::FoldState;
@@ -70,6 +74,8 @@ struct Inner {
     view: ComboView,
     #[serde(default)]
     output_chunks: Vec<OutputChunk>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
 }
 
 impl Default for Inner {
@@ -83,6 +89,7 @@ impl Default for Inner {
             display_state: default_display_state(),
             view: ComboView::default(),
             output_chunks: Vec::new(),
+            summary: None,
         }
     }
 }
@@ -99,6 +106,8 @@ pub struct Combo {
     has_child_output: bool,
     is_recording: bool,
     combo_stream_suppressed: bool,
+    summary_streaming: bool,
+    summary_stream_has_output: bool,
 }
 
 const LIMIT: usize = 10;
@@ -134,10 +143,12 @@ impl Combo {
             has_child_output: false,
             is_recording: false,
             combo_stream_suppressed: false,
+            summary_streaming: false,
+            summary_stream_has_output: false,
         }
     }
 
-    fn matches_id(&self, id: &str) -> bool {
+    pub(crate) fn matches_id(&self, id: &str) -> bool {
         self.state.tool_use_id == id
     }
 
@@ -228,6 +239,36 @@ impl Combo {
         self.state.write().view = ComboView::Messages;
         self.messages
             .push(Message::bot(Thinking::new(thinking.to_string()).into()));
+    }
+
+    fn push_summary(&mut self, summary: &str) {
+        self.state.write().view = ComboView::Messages;
+        self.messages
+            .push(Message::bot(Plain::new(summary.to_string()).into()));
+    }
+
+    pub(crate) fn append_summary(&mut self, summary: &str, thinking: &[String]) -> bool {
+        if self.summary_streaming {
+            return false;
+        }
+        if self.state.summary.is_some() {
+            return false;
+        }
+        let trimmed = summary.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        for block in thinking {
+            let block = block.trim();
+            if block.is_empty() {
+                continue;
+            }
+            self.messages
+                .push(Message::bot(Thinking::new(block.to_string()).into()));
+        }
+        self.state.write().summary = Some(trimmed.to_string());
+        self.push_summary(trimmed);
+        true
     }
 
     fn push_offload_bash_tool_use(&mut self, tool_use: ToolUse) {
@@ -371,6 +412,54 @@ impl Combo {
                         .append_stream_text(*index, *kind, text.clone());
                 }
             }
+            ComboEvent::SummaryStreamReset { id, .. } => {
+                if self.matches_id(id) {
+                    self.state.write().view = ComboView::Messages;
+                    self.messages.finalize_stream();
+                    self.messages.reset_stream();
+                    self.summary_streaming = true;
+                    self.summary_stream_has_output = false;
+                }
+            }
+            ComboEvent::SummaryStream {
+                id,
+                index,
+                kind,
+                text,
+                ..
+            } => {
+                if self.matches_id(id) {
+                    self.state.write().view = ComboView::Messages;
+                    if !text.is_empty() {
+                        self.summary_stream_has_output = true;
+                    }
+                    self.summary_streaming = true;
+                    self.messages
+                        .append_stream_text(*index, *kind, text.clone());
+                }
+            }
+            ComboEvent::SummaryDone {
+                id,
+                summary,
+                thinking,
+                ..
+            } => {
+                if self.matches_id(id) {
+                    self.messages.finalize_stream();
+                    self.messages.reset_stream();
+                    let streamed = self.summary_streaming && self.summary_stream_has_output;
+                    self.summary_streaming = false;
+                    self.summary_stream_has_output = false;
+                    if streamed {
+                        let trimmed = summary.trim();
+                        if !trimmed.is_empty() && self.state.summary.is_none() {
+                            self.state.write().summary = Some(trimmed.to_string());
+                        }
+                    } else {
+                        self.append_summary(summary, thinking);
+                    }
+                }
+            }
             ComboEvent::ReplyToolUse {
                 id,
                 tool_use,
@@ -415,12 +504,15 @@ impl Combo {
                     state.is_error = false;
                     state.view = ComboView::Messages;
                     state.output_chunks.clear();
+                    state.summary = None;
                     state.display_state.expand();
                     drop(state);
                     self.update_command_line(command_line.clone());
                     self.preview_lines = StreamedLines::new(Some(LIMIT));
                     self.messages.reset_stream();
                     self.messages.clear();
+                    self.summary_streaming = false;
+                    self.summary_stream_has_output = false;
                 }
             }
             ComboEvent::Executed {
@@ -465,6 +557,8 @@ impl Combo {
                     self.clear_combo_stream();
                     self.messages.finalize_stream();
                     self.messages.reset_stream();
+                    self.summary_streaming = false;
+                    self.summary_stream_has_output = false;
                     {
                         let mut state = self.state.write();
                         state.starter_state = StarterState::Cancelled;
@@ -814,6 +908,16 @@ impl Combo {
         spans.push(Span::raw(" "));
         spans
     }
+
+    fn maybe_append_summary(&mut self, output: &Final, is_error: bool) {
+        if self.state.summary.is_some() {
+            return;
+        }
+        let Some(summary) = combo_summary_from_output(output, is_error) else {
+            return;
+        };
+        self.append_summary(&summary.summary, &summary.thinking);
+    }
 }
 
 impl Content for Combo {
@@ -918,6 +1022,8 @@ impl Persistable for Combo {
             has_child_output: false,
             is_recording: false,
             combo_stream_suppressed: false,
+            summary_streaming: false,
+            summary_stream_has_output: false,
         };
         Ok(combo)
     }
@@ -979,8 +1085,20 @@ impl Component for Combo {
             Event::Combo(event) => {
                 self.on_combo_event(event);
             }
-            Event::Answer(AnswerEvent::ToolResult { .. })
-            | Event::Answer(AnswerEvent::ToolOutput { .. }) => {
+            Event::Answer(AnswerEvent::ToolResult {
+                id,
+                is_error,
+                output,
+                ..
+            }) => {
+                if self.matches_id(id) {
+                    self.maybe_append_summary(output, *is_error);
+                } else {
+                    // Route tool events to the correct child component by id
+                    self.messages.on_tool_event(event);
+                }
+            }
+            Event::Answer(AnswerEvent::ToolOutput { .. }) => {
                 // Route tool events to the correct child component by id
                 self.messages.on_tool_event(event);
             }
@@ -1049,6 +1167,68 @@ impl Component for Combo {
             NavigationResult::Moved
         } else {
             NavigationResult::Boundary
+        }
+    }
+}
+
+struct ComboSummary {
+    summary: String,
+    thinking: Vec<String>,
+}
+
+fn combo_summary_from_output(output: &Final, _is_error: bool) -> Option<ComboSummary> {
+    match output {
+        Final::Json(value) => {
+            if let Ok(parsed) = serde_json::from_value::<RunComboOutput>(value.clone()) {
+                let summary = parsed.summary.trim();
+                if !summary.is_empty() {
+                    return Some(ComboSummary {
+                        summary: summary.to_string(),
+                        thinking: parsed.summary_thinking,
+                    });
+                }
+                if let Some(error) = parsed.error {
+                    let error = error.trim();
+                    if !error.is_empty() {
+                        return Some(ComboSummary {
+                            summary: error.to_string(),
+                            thinking: parsed.summary_thinking,
+                        });
+                    }
+                }
+                return None;
+            }
+            let summary = value
+                .get("summary")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if !summary.is_empty() {
+                return Some(ComboSummary {
+                    summary: summary.to_string(),
+                    thinking: Vec::new(),
+                });
+            }
+            value
+                .get("error")
+                .and_then(Value::as_str)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .map(|summary| ComboSummary {
+                    summary,
+                    thinking: Vec::new(),
+                })
+        }
+        Final::Message(message) => {
+            let trimmed = message.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(ComboSummary {
+                    summary: trimmed.to_string(),
+                    thinking: Vec::new(),
+                })
+            }
         }
     }
 }

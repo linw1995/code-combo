@@ -502,7 +502,10 @@ impl Chat<'static> {
             | ComboEvent::RecordOutput { .. }
             | ComboEvent::RecordEnd { .. }
             | ComboEvent::PromptStream { .. }
-            | ComboEvent::PromptStreamReset { .. } => {
+            | ComboEvent::PromptStreamReset { .. }
+            | ComboEvent::SummaryStream { .. }
+            | ComboEvent::SummaryStreamReset { .. }
+            | ComboEvent::SummaryDone { .. } => {
                 self.set_processing();
             }
             ComboEvent::Prompt { thinking, .. } => {
@@ -733,6 +736,35 @@ impl Chat<'static> {
                 id: id.to_string(),
                 name: name.clone(),
             },
+            ComboToolEvent::SummaryStreamReset { name } => ComboEvent::SummaryStreamReset {
+                id: id.to_string(),
+                name: name.clone(),
+            },
+            ComboToolEvent::SummaryStream {
+                name,
+                index,
+                kind,
+                text,
+            } => ComboEvent::SummaryStream {
+                id: id.to_string(),
+                name: name.clone(),
+                index: *index,
+                kind: match kind {
+                    ComboToolStreamKind::Plain => BotStreamKind::Plain,
+                    ComboToolStreamKind::Thinking => BotStreamKind::Thinking,
+                },
+                text: text.clone(),
+            },
+            ComboToolEvent::SummaryDone {
+                name,
+                summary,
+                thinking,
+            } => ComboEvent::SummaryDone {
+                id: id.to_string(),
+                name: name.clone(),
+                summary: summary.clone(),
+                thinking: thinking.clone(),
+            },
             ComboToolEvent::ReplyToolUse {
                 name,
                 tool_use,
@@ -862,6 +894,37 @@ impl Chat<'static> {
                 id: id.clone(),
                 name: name.clone(),
             },
+            ComboEvent::SummaryStreamReset { id, name } => ComboRunEvent::SummaryStreamReset {
+                id: id.clone(),
+                name: name.clone(),
+            },
+            ComboEvent::SummaryStream {
+                id,
+                name,
+                index,
+                kind,
+                text,
+            } => ComboRunEvent::SummaryStream {
+                id: id.clone(),
+                name: name.clone(),
+                index: *index,
+                kind: match kind {
+                    BotStreamKind::Plain => ComboRunStreamKind::Plain,
+                    BotStreamKind::Thinking => ComboRunStreamKind::Thinking,
+                },
+                text: text.clone(),
+            },
+            ComboEvent::SummaryDone {
+                id,
+                name,
+                summary,
+                thinking,
+            } => ComboRunEvent::SummaryDone {
+                id: id.clone(),
+                name: name.clone(),
+                summary: summary.clone(),
+                thinking: thinking.clone(),
+            },
             ComboEvent::ReplyToolUse {
                 id,
                 name,
@@ -931,6 +994,9 @@ impl Chat<'static> {
             | ComboEvent::Prompt { id, .. }
             | ComboEvent::PromptStream { id, .. }
             | ComboEvent::PromptStreamReset { id, .. }
+            | ComboEvent::SummaryStream { id, .. }
+            | ComboEvent::SummaryStreamReset { id, .. }
+            | ComboEvent::SummaryDone { id, .. }
             | ComboEvent::ReplyToolUse { id, .. }
             | ComboEvent::ReplyToolResult { id, .. }
             | ComboEvent::Executed { id, .. }
@@ -2104,6 +2170,9 @@ impl Component for Chat<'static> {
                             .clone()
                             .unwrap_or_else(|| "Combo completed.".to_string());
                     }
+                    let summary_thinking = summary_thinking_from_final(output);
+                    self.messages
+                        .append_combo_summary(id, &summary, &summary_thinking);
                     let (stdout, stderr, exit_code) = if result.success {
                         (summary.clone(), String::new(), 0)
                     } else {
@@ -2825,6 +2894,15 @@ fn combo_run_result_from_json(run_id: &str, value: &Value, is_error: bool) -> Co
         summary,
         tool_calls,
         error,
+    }
+}
+
+fn summary_thinking_from_final(output: &Final) -> Vec<String> {
+    match output {
+        Final::Json(value) => serde_json::from_value::<RunComboOutput>(value.clone())
+            .map(|parsed| parsed.summary_thinking)
+            .unwrap_or_default(),
+        Final::Message(_) => Vec::new(),
     }
 }
 

@@ -144,6 +144,23 @@ pub enum ComboEvent {
         id: String,
         name: String,
     },
+    SummaryStreamReset {
+        id: String,
+        name: String,
+    },
+    SummaryStream {
+        id: String,
+        name: String,
+        index: usize,
+        kind: BotStreamKind,
+        text: String,
+    },
+    SummaryDone {
+        id: String,
+        name: String,
+        summary: String,
+        thinking: Vec<String>,
+    },
     /// Reply tool use from prompt, with optional offload via bash
     ReplyToolUse {
         id: String,

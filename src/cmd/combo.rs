@@ -155,6 +155,7 @@ fn emit_result(result: &ComboRunResult) -> Result<()> {
         summary: result.summary.clone(),
         tool_calls: result.tool_calls,
         error: result.error.clone(),
+        summary_thinking: Vec::new(),
     };
     let json =
         serde_json::to_string(&output).whatever_context("failed to serialize combo run output")?;
