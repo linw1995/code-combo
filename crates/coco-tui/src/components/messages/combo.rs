@@ -17,7 +17,7 @@ use serde_json::Value;
 use coco_highlight::Lang;
 use code_combo::{
     OutputChunk, StreamKind, ToolUse,
-    tools::{Final, RunComboOutput},
+    tools::{BashInput, Final, RunComboOutput},
 };
 
 use super::RoleMergeMode;
@@ -158,15 +158,22 @@ impl Combo {
     /// The Combo starts in Discovering state and will transition to AwaitingPermission
     /// when it receives AskEvent::ToolUsePermission.
     pub fn new_with_bash_tool_use(tool_use: ToolUse, name: &str) -> Self {
+        // Extract command from Bash ToolUse input
+        let command_line = serde_json::from_value::<BashInput>(tool_use.input.clone())
+            .map(|input| input.command)
+            .unwrap_or_default();
+        let command = Self::build_command_highlight(&command_line);
+
         Self {
             state: State::new(Inner {
                 tool_use_id: tool_use.id.clone(),
                 name: name.to_string(),
+                command_line,
                 starter_state: StarterState::Discovering,
                 bash_tool_use: Some(tool_use),
                 ..Default::default()
             }),
-            command: None,
+            command,
             messages: Messages::default()
                 .with_role_merge_mode(RoleMergeMode::MergeSkipFirstUser)
                 .with_compact_role(true),
