@@ -81,6 +81,14 @@ pub struct Chat<'a> {
     /// Combo IDs triggered via session socket (LLM Bash Tool calling `coco combo run`).
     /// These combos should NOT trigger spawn_chat_task on completion - the Bash Tool will.
     session_combo_ids: HashSet<String>,
+    /// Maps combo run_id to Bash Tool id for UI event routing.
+    /// When LLM's Bash Tool executes `coco combo run`, the Combo UI is created with Bash Tool's
+    /// id, but combo events use run_id. This mapping routes events to the correct UI.
+    combo_run_id_to_bash_id: HashMap<String, String>,
+    /// Pending Bash Tool ids waiting for combo execution via session socket.
+    /// Maps combo name to Bash Tool id. When ComboAction::Execute arrives, we look up
+    /// the Bash Tool id by name and establish the run_id -> bash_id mapping.
+    pending_bash_combo_ids: HashMap<String, String>,
     manual_combo_runs: HashSet<String>,
     manual_combo_tool_uses: HashSet<String>,
     manual_combo_commands: HashMap<String, String>,
@@ -294,6 +302,8 @@ impl Chat<'static> {
             combo_thinking_active: false,
             combo_tool_messages: HashSet::new(),
             session_combo_ids: HashSet::new(),
+            combo_run_id_to_bash_id: HashMap::new(),
+            pending_bash_combo_ids: HashMap::new(),
             manual_combo_runs: HashSet::new(),
             manual_combo_tool_uses: HashSet::new(),
             manual_combo_commands: HashMap::new(),
@@ -2069,6 +2079,22 @@ impl Component for Chat<'static> {
                                 } else {
                                     Message::bot(Tool::new(tool_use.to_owned()).into())
                                 }
+                            } else if tool_use.name == BASH_TOOL_NAME {
+                                // For Bash Tool executing `coco combo run`, create Combo UI
+                                // with permission support (Method 2)
+                                if let Some(name) = self.combo_name_from_bash_tool_use(&tool_use) {
+                                    // Record pending mapping for later run_id -> bash_id linkage
+                                    self.pending_bash_combo_ids
+                                        .insert(name.clone(), tool_use.id.clone());
+                                    combo_tool_ids.push(tool_use.id.clone());
+                                    // Create Combo UI with bash_tool_use for permission handling
+                                    Message::bot(
+                                        Combo::new_with_bash_tool_use(tool_use.to_owned(), &name)
+                                            .into(),
+                                    )
+                                } else {
+                                    Message::bot(Tool::new(tool_use.to_owned()).into())
+                                }
                             } else {
                                 Message::bot(Tool::new(tool_use.to_owned()).into())
                             }
@@ -2215,6 +2241,8 @@ impl Component for Chat<'static> {
                 // For session combos (triggered by LLM's Bash Tool), don't spawn_chat_task.
                 // The Bash Tool will complete and its ToolResult will trigger spawn_chat_task.
                 if self.session_combo_ids.remove(id) {
+                    // Clean up the run_id -> bash_id mapping
+                    self.combo_run_id_to_bash_id.remove(id);
                     global::trigger_schedule_session_save();
                     return;
                 }
@@ -2270,10 +2298,17 @@ impl Component for Chat<'static> {
                 global::trigger_schedule_session_save();
             }
             Event::Answer(AnswerEvent::ComboToolEvent { id, event }) => {
-                let combo_event = self.combo_tool_event_to_combo_event(id, event);
-                if !self.combo_tool_messages.contains(id) {
+                // For Method 2, Combo UI uses bash_id but events use run_id.
+                // Look up the bash_id mapping for routing.
+                let ui_id = self
+                    .combo_run_id_to_bash_id
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| id.clone());
+                let combo_event = self.combo_tool_event_to_combo_event(&ui_id, event);
+                if !self.combo_tool_messages.contains(&ui_id) {
                     self.pending_combo_tool_events
-                        .entry(id.clone())
+                        .entry(ui_id)
                         .or_default()
                         .push(combo_event);
                     return;
@@ -2479,14 +2514,29 @@ impl Component for Chat<'static> {
                     // This is triggered by LLM's Bash Tool calling `coco combo run`.
                     // Track this combo so we don't trigger spawn_chat_task on completion -
                     // the Bash Tool will handle that when it completes.
-                    let id = id
+                    let run_id = id
                         .clone()
                         .unwrap_or_else(|| format!("toolu_{}", Uuid::new_v4().as_simple()));
-                    self.session_combo_ids.insert(id.clone());
-                    let combo = Combo::new(&id, name);
-                    self.messages.push(Message::bot(combo.into()));
-                    self.spawn_combo_execute(id, name.clone(), args.clone());
-                    debug!("Combo message pushed (via Bash Tool)");
+                    self.session_combo_ids.insert(run_id.clone());
+
+                    // Check if there's a pending Bash Tool for this combo (Method 2)
+                    if let Some(bash_id) = self.pending_bash_combo_ids.remove(name) {
+                        // Combo UI already exists with bash_id, establish mapping for event routing
+                        self.combo_run_id_to_bash_id
+                            .insert(run_id.clone(), bash_id.clone());
+                        debug!(
+                            "Combo execution started (run_id={}, bash_id={})",
+                            run_id, bash_id
+                        );
+                        // Combo UI is already registered via combo_tool_ids in bot message handling
+                        self.spawn_combo_execute(run_id, name.clone(), args.clone());
+                    } else {
+                        // No pending Bash Tool - create Combo UI (fallback for direct execution)
+                        let combo = Combo::new(&run_id, name);
+                        self.messages.push(Message::bot(combo.into()));
+                        self.register_combo_tool_message(run_id.clone());
+                        self.spawn_combo_execute(run_id, name.clone(), args.clone());
+                    }
                 }
                 ComboAction::ExecuteViaBash { name, args } => {
                     let tool_use_id = format!("toolu_{}", Uuid::new_v4().as_simple());

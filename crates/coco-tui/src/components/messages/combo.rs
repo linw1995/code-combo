@@ -30,7 +30,7 @@ use crate::{
         NavigationResult, Persistable, Plain, ShortcutHints, Thinking, Tool,
     },
     error::*,
-    events::{AnswerEvent, ComboEvent, Event},
+    events::{AnswerEvent, AskEvent, ComboEvent, Event},
     global::{self, State},
     session::{self, Session},
     theme::FinalizedTheme,
@@ -44,6 +44,8 @@ use prompt_reply::PromptReply;
 enum StarterState {
     #[default]
     Discovering,
+    /// Awaiting user permission for Bash Tool execution (Method 2)
+    AwaitingPermission,
     NotFound,
     Cancelled,
     Executing,
@@ -76,6 +78,9 @@ struct Inner {
     output_chunks: Vec<OutputChunk>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     summary: Option<String>,
+    /// Bash ToolUse for permission handling (Method 2: LLM calls `coco combo run` via Bash)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bash_tool_use: Option<ToolUse>,
 }
 
 impl Default for Inner {
@@ -90,6 +95,7 @@ impl Default for Inner {
             view: ComboView::default(),
             output_chunks: Vec::new(),
             summary: None,
+            bash_tool_use: None,
         }
     }
 }
@@ -148,8 +154,39 @@ impl Combo {
         }
     }
 
+    /// Create a Combo for Method 2: LLM calls `coco combo run` via Bash Tool.
+    /// The Combo starts in Discovering state and will transition to AwaitingPermission
+    /// when it receives AskEvent::ToolUsePermission.
+    pub fn new_with_bash_tool_use(tool_use: ToolUse, name: &str) -> Self {
+        Self {
+            state: State::new(Inner {
+                tool_use_id: tool_use.id.clone(),
+                name: name.to_string(),
+                starter_state: StarterState::Discovering,
+                bash_tool_use: Some(tool_use),
+                ..Default::default()
+            }),
+            command: None,
+            messages: Messages::default()
+                .with_role_merge_mode(RoleMergeMode::MergeSkipFirstUser)
+                .with_compact_role(true),
+            preview_lines: default_preview_lines(),
+            is_focused: false,
+            is_child_focused: false,
+            has_child_output: false,
+            is_recording: false,
+            combo_stream_suppressed: false,
+            summary_streaming: false,
+            summary_stream_has_output: false,
+        }
+    }
+
     pub(crate) fn matches_id(&self, id: &str) -> bool {
         self.state.tool_use_id == id
+    }
+
+    fn requiring_permission(&self) -> bool {
+        matches!(self.state.starter_state, StarterState::AwaitingPermission)
     }
 
     fn has_collapsible_body(&self) -> bool {
@@ -869,6 +906,10 @@ impl Combo {
                 " Discovering combo starters...",
                 theme.ui.combo_title_state_discovering,
             ),
+            StarterState::AwaitingPermission => (
+                " Awaiting confirmation",
+                theme.ui.tool_title_state_pending_confirmation,
+            ),
             StarterState::NotFound => (" Not found", theme.ui.combo_title_state_not_found),
             StarterState::Cancelled => (" Cancelled", theme.ui.combo_title_state_cancelled),
             StarterState::Executing => (" Executing...", theme.ui.combo_title_state_executing),
@@ -935,7 +976,10 @@ impl Content for Combo {
     }
 
     fn is_actionable(&self) -> bool {
-        self.has_collapsible_body() || self.can_toggle_view() || self.can_focus_messages()
+        self.requiring_permission()
+            || self.has_collapsible_body()
+            || self.can_toggle_view()
+            || self.can_focus_messages()
     }
 
     fn focus_range(&self, width: u16) -> Option<Range<u16>> {
@@ -958,6 +1002,14 @@ impl Content for Combo {
     }
 
     fn shortcut_hints(&self) -> ShortcutHints {
+        // Show permission hints when awaiting confirmation
+        if self.requiring_permission() {
+            let mut hints = ShortcutHints::default();
+            hints.push_visible(&[("Run", "CR"), ("Allow in Session", "A")]);
+            hints.push_visible(&[("Cancel", "Esc")]);
+            return hints;
+        }
+
         if !self.has_collapsible_body() && !self.can_toggle_view() && !self.can_focus_messages() {
             return ShortcutHints::default();
         }
@@ -1040,6 +1092,34 @@ impl Component for Combo {
     }
 
     fn handle_key_event(&mut self, key: &KeyEvent) {
+        // Handle permission actions when awaiting confirmation
+        if self.requiring_permission() {
+            if let Some(tool_use) = self.state.bash_tool_use.clone() {
+                match (key.modifiers, key.code) {
+                    (KeyModifiers::NONE, KeyCode::Enter) => {
+                        self.state.write().starter_state = StarterState::Discovering;
+                        global::action_tx()
+                            .send(ToolAction::Grant(tool_use).into())
+                            .unwrap();
+                    }
+                    (KeyModifiers::NONE, KeyCode::Char('a') | KeyCode::Char('A')) => {
+                        self.state.write().starter_state = StarterState::Discovering;
+                        global::action_tx()
+                            .send(ToolAction::GrantSession(tool_use).into())
+                            .unwrap();
+                    }
+                    (KeyModifiers::NONE, KeyCode::Esc) => {
+                        self.state.write().starter_state = StarterState::Cancelled;
+                        global::action_tx()
+                            .send(ToolAction::Cancel(tool_use).into())
+                            .unwrap();
+                    }
+                    _ => {}
+                }
+            }
+            return;
+        }
+
         if self.is_child_focused {
             match (key.modifiers, key.code) {
                 (KeyModifiers::NONE, KeyCode::Esc) => self.clear_child_focus(),
@@ -1084,6 +1164,12 @@ impl Component for Combo {
         match event {
             Event::Combo(event) => {
                 self.on_combo_event(event);
+            }
+            Event::Ask(AskEvent::ToolUsePermission(id)) => {
+                // Handle permission request for Bash Tool (Method 2)
+                if self.matches_id(id) && self.state.bash_tool_use.is_some() {
+                    self.state.write().starter_state = StarterState::AwaitingPermission;
+                }
             }
             Event::Answer(AnswerEvent::ToolResult {
                 id,
