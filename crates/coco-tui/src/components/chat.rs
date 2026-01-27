@@ -78,6 +78,9 @@ pub struct Chat<'a> {
     prev_focus: Option<Focus>,
     combo_thinking_active: bool,
     combo_tool_messages: HashSet<String>,
+    /// Combo IDs triggered via session socket (LLM Bash Tool calling `coco combo run`).
+    /// These combos should NOT trigger spawn_chat_task on completion - the Bash Tool will.
+    session_combo_ids: HashSet<String>,
     manual_combo_runs: HashSet<String>,
     manual_combo_tool_uses: HashSet<String>,
     manual_combo_commands: HashMap<String, String>,
@@ -290,6 +293,7 @@ impl Chat<'static> {
             prev_focus: None,
             combo_thinking_active: false,
             combo_tool_messages: HashSet::new(),
+            session_combo_ids: HashSet::new(),
             manual_combo_runs: HashSet::new(),
             manual_combo_tool_uses: HashSet::new(),
             manual_combo_commands: HashMap::new(),
@@ -519,14 +523,14 @@ impl Chat<'static> {
             ComboEvent::ReplyToolUse { offload: true, .. } => {
                 self.set_processing();
             }
-            ComboEvent::Executed { id, starter, .. } => {
+            ComboEvent::Executed { starter, .. } => {
                 self.set_combo_thinking_active(false);
                 if let Err(err) = starter.combo.as_ref() {
                     warn!(?err, "Failed to execute starter");
                 }
-                if !self.manual_combo_runs.contains(id) {
-                    self.spawn_chat_with_history();
-                }
+                // Don't call spawn_chat_with_history here.
+                // For ExecuteViaBash: manual_combo_runs handles LLM trigger via ToolResult.
+                // For LLM Bash Tool: Bash Tool completion triggers LLM automatically.
             }
             ComboEvent::Discovered { .. }
             | ComboEvent::NotFound { .. }
@@ -602,11 +606,6 @@ impl Chat<'static> {
     fn spawn_chat_task(&mut self, content: ChatContent) {
         let cancel_token = self.cancellation_guard.start_token();
         tokio::task::spawn(task_chat(self.agent.clone(), content, cancel_token));
-    }
-
-    fn spawn_chat_with_history(&mut self) {
-        let cancel_token = self.cancellation_guard.start_token();
-        tokio::task::spawn(task_chat_with_history(self.agent.clone(), cancel_token));
     }
 
     fn spawn_combo_discover(&mut self) {
@@ -1024,14 +1023,14 @@ impl Chat<'static> {
                 }
                 self.handle_combo_event(event);
             }
-            ComboEvent::Executed { id, starter, .. } => {
+            ComboEvent::Executed { starter, .. } => {
                 self.set_combo_thinking_active(false);
                 if let Err(err) = starter.combo.as_ref() {
                     warn!(?err, "Failed to execute starter");
                 }
-                if !self.manual_combo_runs.contains(id) {
-                    self.spawn_chat_with_history();
-                }
+                // Don't call spawn_chat_with_history here.
+                // For ExecuteViaBash: manual_combo_runs handles LLM trigger via ToolResult.
+                // For LLM Bash Tool: Bash Tool completion triggers LLM automatically.
             }
             _ => self.handle_combo_event(event),
         }
@@ -2202,6 +2201,13 @@ impl Component for Chat<'static> {
                     return;
                 }
 
+                // For session combos (triggered by LLM's Bash Tool), don't spawn_chat_task.
+                // The Bash Tool will complete and its ToolResult will trigger spawn_chat_task.
+                if self.session_combo_ids.remove(id) {
+                    global::trigger_schedule_session_save();
+                    return;
+                }
+
                 // Build content for this tool result
                 let mut content = final_to_tool_content(output);
                 if *is_user_cancelled {
@@ -2459,16 +2465,53 @@ impl Component for Chat<'static> {
                     self.spawn_combo_discover();
                 }
                 ComboAction::Execute { id, name, args } => {
+                    // This is triggered by LLM's Bash Tool calling `coco combo run`.
+                    // Track this combo so we don't trigger spawn_chat_task on completion -
+                    // the Bash Tool will handle that when it completes.
                     let id = id
                         .clone()
                         .unwrap_or_else(|| format!("toolu_{}", Uuid::new_v4().as_simple()));
-                    self.manual_combo_runs.insert(id.clone());
-                    let command_line = self.format_combo_run_command(name, args);
-                    self.manual_combo_commands.insert(id.clone(), command_line);
+                    self.session_combo_ids.insert(id.clone());
                     let combo = Combo::new(&id, name);
-                    self.messages.push(Message::user(combo.into()));
+                    self.messages.push(Message::bot(combo.into()));
                     self.spawn_combo_execute(id, name.clone(), args.clone());
-                    debug!("Combo message pushed");
+                    debug!("Combo message pushed (via Bash Tool)");
+                }
+                ComboAction::ExecuteViaBash { name, args } => {
+                    let tool_use_id = format!("toolu_{}", Uuid::new_v4().as_simple());
+                    let command_line = self.format_combo_run_command(name, args);
+
+                    // 1. Register as manual combo run
+                    self.manual_combo_runs.insert(tool_use_id.clone());
+                    self.manual_combo_commands
+                        .insert(tool_use_id.clone(), command_line.clone());
+
+                    // 2. Inject User Prompt (agent history + UI)
+                    let prompt = format!("User use combo {command_line}");
+                    self.append_agent_message_sync(ChatMessage::user(ChatContent::Text(
+                        prompt.clone(),
+                    )));
+                    self.messages.push(Message::user(Plain::new(prompt).into()));
+
+                    // 3. Inject Assistant Bash ToolUse (agent history only, not executed)
+                    let tool_use = ToolUse {
+                        id: tool_use_id.clone(),
+                        name: BASH_TOOL_NAME.to_string(),
+                        input: serde_json::json!({ "command": command_line }),
+                    };
+                    self.append_agent_message_sync(ChatMessage::assistant(ChatContent::Multiple(
+                        vec![ChatBlock::ToolUse(tool_use.clone())],
+                    )));
+                    self.manual_combo_tool_uses.insert(tool_use_id.clone());
+                    self.manual_combo_prompted.insert(tool_use_id.clone());
+
+                    // 4. Create Combo UI (not Tool UI) and execute combo directly
+                    // We don't spawn_tool_use because that would execute bash which would
+                    // connect to session socket and create a different run_id
+                    let combo = Combo::new(&tool_use_id, name);
+                    self.messages.push(Message::bot(combo.into()));
+                    self.spawn_combo_execute(tool_use_id, name.clone(), args.clone());
+                    debug!("ExecuteViaBash: Combo UI created and combo spawned directly");
                 }
             },
             Action::Tool(action) => match action {
@@ -3066,97 +3109,6 @@ async fn task_chat(mut agent: Agent, content: ChatContent, cancel_token: Cancell
         let thinking_seen_stream = thinking_seen.clone();
         let resp = agent
             .chat_stream(msg, cancel_token.clone(), move |update| {
-                match update {
-                    ChatStreamUpdate::Reset => {
-                        plain_seen_stream.store(false, Ordering::Relaxed);
-                        thinking_seen_stream.store(false, Ordering::Relaxed);
-                        stream_tx.send(AnswerEvent::BotStreamReset.into()).ok();
-                    }
-                    ChatStreamUpdate::Plain { index, text } => {
-                        plain_seen_stream.store(true, Ordering::Relaxed);
-                        stream_tx
-                            .send(
-                                AnswerEvent::BotStream {
-                                    index,
-                                    kind: BotStreamKind::Plain,
-                                    text,
-                                }
-                                .into(),
-                            )
-                            .ok();
-                    }
-                    ChatStreamUpdate::Thinking { index, text } => {
-                        thinking_seen_stream.store(true, Ordering::Relaxed);
-                        stream_tx
-                            .send(
-                                AnswerEvent::BotStream {
-                                    index,
-                                    kind: BotStreamKind::Thinking,
-                                    text,
-                                }
-                                .into(),
-                            )
-                            .ok();
-                    }
-                };
-            })
-            .await;
-        streamed_plain = plain_seen.load(Ordering::Relaxed);
-        streamed_thinking = thinking_seen.load(Ordering::Relaxed);
-        resp
-    };
-
-    let chat_resp = match chat_resp {
-        Ok(resp) => resp,
-        Err(err) => {
-            if cancel_token.is_cancelled() {
-                tx.send(AnswerEvent::Cancelled.into()).ok();
-                return;
-            }
-            warn!(?err, "chat request failed");
-            tx.send(
-                AnswerEvent::Bot(vec![BotMessage::System(format!(
-                    "Chat request failed: {err}"
-                ))])
-                .into(),
-            )
-            .ok();
-            return;
-        }
-    };
-
-    handle_chat_response(
-        agent,
-        cancel_token,
-        chat_resp,
-        streamed_plain,
-        streamed_thinking,
-    )
-    .await;
-}
-
-async fn task_chat_with_history(mut agent: Agent, cancel_token: CancellationToken) {
-    let tx = global::event_tx();
-
-    if cancel_token.is_cancelled() {
-        return;
-    }
-    tx.send(Event::Ask(AskEvent::Bot)).unwrap();
-    tx.send(AnswerEvent::BotStreamReset.into()).ok();
-
-    let disable_stream = agent.disable_stream_for_current_model();
-    let mut streamed_plain = false;
-    let mut streamed_thinking = false;
-    let chat_resp = if disable_stream {
-        agent.chat_with_history().await
-    } else {
-        let stream_tx = tx.clone();
-        let plain_seen = Arc::new(AtomicBool::new(false));
-        let thinking_seen = Arc::new(AtomicBool::new(false));
-        let plain_seen_stream = plain_seen.clone();
-        let thinking_seen_stream = thinking_seen.clone();
-        let resp = agent
-            .chat_stream_with_history(cancel_token.clone(), move |update| {
                 match update {
                     ChatStreamUpdate::Reset => {
                         plain_seen_stream.store(false, Ordering::Relaxed);

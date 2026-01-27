@@ -48,6 +48,13 @@ pub enum ComboAction {
         name: String,
         args: Vec<String>,
     },
+    /// Execute combo via Bash tool - used when TUI starts with `coco combo run`
+    /// This injects User Prompt + Assistant Bash ToolUse into agent history,
+    /// then spawns tool execution directly.
+    ExecuteViaBash {
+        name: String,
+        args: Vec<String>,
+    },
 }
 
 impl From<ComboAction> for Action {

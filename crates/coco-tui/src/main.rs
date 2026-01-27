@@ -221,14 +221,7 @@ async fn main() -> Result<()> {
     match args.command {
         Some(Commands::Combo(combo_cmd)) => match combo_cmd {
             ComboCommands::Run { name, args } => {
-                app.send_action(
-                    ComboAction::Execute {
-                        id: None,
-                        name,
-                        args,
-                    }
-                    .into(),
-                );
+                app.send_action(ComboAction::ExecuteViaBash { name, args }.into());
             }
         },
         Some(
