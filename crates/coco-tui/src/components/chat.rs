@@ -1656,11 +1656,22 @@ impl Chat<'static> {
                     }
                     BASH_TOOL_NAME => {
                         if let Some(name) = self.combo_name_from_bash_tool_use(tool_use) {
+                            // For Bash Tool executing `coco combo run`, find the combo's
+                            // actual run_id from combo_transcripts since it differs from
+                            // the Bash Tool's id.
+                            let combo_id = self
+                                .state
+                                .read()
+                                .combo_transcripts
+                                .iter()
+                                .find(|entry| entry.name == name)
+                                .map(|entry| entry.id.clone())
+                                .unwrap_or_else(|| tool_use.id.clone());
                             map.insert(
                                 tool_use.id.clone(),
                                 TranscriptLinkTarget {
                                     kind: TranscriptLinkKind::Combo,
-                                    id: tool_use.id.clone(),
+                                    id: combo_id,
                                     name,
                                 },
                             );
