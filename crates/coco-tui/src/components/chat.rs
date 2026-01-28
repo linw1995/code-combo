@@ -2448,7 +2448,7 @@ impl Component for Chat<'static> {
             }
 
             // Inputing
-            (Input, KM::NONE, Enter) => self.on_submit(),
+            (Input, KM::ALT, Enter) => self.on_submit(),
             (Input, _, _) => self.input.handle_key_event(key),
 
             // Navigation
@@ -2732,7 +2732,13 @@ impl Chat<'static> {
         let theme = global::theme();
         frame.render_widget(Block::new().style(theme.ui.chat_bg), area);
 
-        let vertical = Layout::vertical([Min(0), Length(3)]);
+        // Calculate input height dynamically based on content
+        // line_count + 2 for top/bottom borders, clamped between 3 and 1/3 of screen
+        let line_count = self.input.line_count() as u16;
+        let max_input_height = (area.height / 3).max(3);
+        let input_height = (line_count + 2).clamp(3, max_input_height);
+
+        let vertical = Layout::vertical([Min(0), Length(input_height)]);
         let [area_messages, area_input] = vertical.areas(area);
 
         self.messages.draw(frame, area_messages)?;
