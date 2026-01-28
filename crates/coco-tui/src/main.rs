@@ -141,7 +141,6 @@ async fn main() -> Result<()> {
     let matches = cmd.get_matches();
     let command_name = matches.subcommand_name().unwrap_or("coco").to_string();
     let mut args = Args::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
-    ensure_tty_or_session()?;
     global::set_ignore_workspace_scripts(args.ignore_workspace_scripts);
     if !args.prompt.is_empty() {
         ensure_whatever!(
@@ -186,6 +185,12 @@ async fn main() -> Result<()> {
             args.command.replace(command);
         }
     }
+
+    // TTY is required for TUI
+    ensure_whatever!(
+        std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
+        "stdin/stdout is not a TTY"
+    );
 
     coco_tui::logging::init()?;
 
@@ -267,14 +272,4 @@ fn has_session_socket() -> bool {
         );
         false
     }
-}
-
-fn ensure_tty_or_session() -> Result<()> {
-    let has_session = has_session_socket();
-    let has_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    ensure_whatever!(
-        has_session || has_tty,
-        "stdin/stdout is not a TTY and COCO_SESSION_SOCK is not available"
-    );
-    Ok(())
 }
