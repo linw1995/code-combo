@@ -1,28 +1,52 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{Attribute, DeriveInput, LitStr, parse_macro_input};
+use syn::{Attribute, DeriveInput, LitStr, parse_macro_input, spanned::Spanned};
 
 /// Extracts the `type_id` value from a `#[component(type_id = "...")]` attribute.
-fn parse_type_id(attrs: &[Attribute]) -> LitStr {
+///
+/// Returns a compile-time error with proper span information if:
+/// - The `#[component]` attribute is missing
+/// - The `type_id` key is missing or malformed
+/// - The `type_id` value is not a string literal
+fn parse_type_id(attrs: &[Attribute]) -> syn::Result<LitStr> {
     let attr = attrs
         .iter()
         .find(|a| a.path().is_ident("component"))
-        .expect("`component` attribute is required");
+        .ok_or_else(|| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "missing `#[component(type_id = \"...\")]` attribute",
+            )
+        })?;
 
     let mut type_id: Option<LitStr> = None;
-    attr.parse_nested_meta(|m| {
+    let mut parse_error: Option<syn::Error> = None;
+
+    let result = attr.parse_nested_meta(|m| {
         if m.path.is_ident("type_id") {
-            let value = m.value().expect("`type_id` assignment is required");
-            let value = value
-                .parse::<LitStr>()
-                .expect("`type_id` value must be a literal string");
-            type_id.replace(value);
+            let value = m.value().map_err(|_| {
+                syn::Error::new(
+                    m.path.span(),
+                    "`type_id` requires a value: type_id = \"...\"",
+                )
+            })?;
+            let lit = value.parse::<LitStr>().map_err(|_| {
+                syn::Error::new(value.span(), "`type_id` value must be a string literal")
+            })?;
+            type_id = Some(lit);
         }
         Ok(())
-    })
-    .ok();
+    });
 
-    type_id.expect("`type_id` assignment not found")
+    if let Err(e) = result {
+        parse_error = Some(e);
+    }
+
+    if let Some(err) = parse_error {
+        return Err(err);
+    }
+
+    type_id.ok_or_else(|| syn::Error::new(attr.span(), "`type_id` key not found in attribute"))
 }
 
 /// Derive macro for implementing the `Identity` trait and registering a component.
@@ -54,7 +78,10 @@ pub fn component(input: TokenStream) -> TokenStream {
         ..
     } = parse_macro_input!(input);
 
-    let type_id = parse_type_id(&attrs);
+    let type_id = match parse_type_id(&attrs) {
+        Ok(id) => id,
+        Err(err) => return err.into_compile_error().into(),
+    };
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let handler_mod = quote::format_ident!("__COMPONENT_REGISTER_{}", ident);
 
@@ -113,7 +140,10 @@ pub fn component(input: TokenStream) -> TokenStream {
 pub fn content_component(input: TokenStream) -> TokenStream {
     let DeriveInput { ident, attrs, .. } = parse_macro_input!(input);
 
-    let type_id = parse_type_id(&attrs);
+    let type_id = match parse_type_id(&attrs) {
+        Ok(id) => id,
+        Err(err) => return err.into_compile_error().into(),
+    };
     let handler_mod = quote::format_ident!("__CONTENT_COMPONENT_REGISTER_{}", ident);
 
     let expanded = quote! {

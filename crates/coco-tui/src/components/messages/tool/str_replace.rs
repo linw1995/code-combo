@@ -24,7 +24,7 @@ use crate::{
     events::{AnswerEvent, AskEvent, Event},
     global::{self, State},
     session::{self, Session},
-    widgets::{Paragraph, tab_panel_width},
+    widgets::{Paragraph, render_tabs_panel, tab_panel_width},
 };
 
 const DEFAULT_CONTEXT_RADIUS: usize = 3;
@@ -167,27 +167,6 @@ fn build_diff_widget(diff_text: String) -> StrReplaceWidget<'static> {
         Ok(highlight) => StrReplaceWidget::CodeHighlight(highlight),
         Err(_) => StrReplaceWidget::Paragraph(Paragraph::new(diff_text)),
     }
-}
-
-fn render_tabs_panel(view: ResultView) -> Paragraph<'static> {
-    let theme = global::theme();
-    let highlight = Style::default().reversed();
-    let items = [
-        (ResultView::Applied, " 1 ", theme.ui.result_success),
-        (ResultView::Unapplied, " 2 ", theme.ui.result_error),
-    ];
-    let lines = items
-        .into_iter()
-        .map(|(v, digit, base_style)| {
-            let style = if v == view {
-                highlight
-            } else {
-                Style::default()
-            };
-            Line::from(Span::styled(digit, base_style.patch(style)))
-        })
-        .collect::<Vec<_>>();
-    Paragraph::new(lines)
 }
 
 fn has_result_tabs(state: &Inner) -> bool {
@@ -750,7 +729,15 @@ impl Component for StrReplace<'static> {
                 StrReplaceWidget::Empty => {}
             }
             if let Some(tabs_area) = area_tabs {
-                let tabs_panel = render_tabs_panel(state.result_view);
+                let theme = global::theme();
+                let tabs_panel = render_tabs_panel(
+                    state.result_view as usize,
+                    &[
+                        (" 1 ", theme.ui.result_success),
+                        (" 2 ", theme.ui.result_error),
+                    ],
+                    Style::default().reversed(),
+                );
                 frame.render_widget(tabs_panel, tabs_area);
             }
             return Ok(());
