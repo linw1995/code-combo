@@ -1,6 +1,29 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{DeriveInput, LitStr, parse_macro_input};
+use syn::{Attribute, DeriveInput, LitStr, parse_macro_input};
+
+/// Extracts the `type_id` value from a `#[component(type_id = "...")]` attribute.
+fn parse_type_id(attrs: &[Attribute]) -> LitStr {
+    let attr = attrs
+        .iter()
+        .find(|a| a.path().is_ident("component"))
+        .expect("`component` attribute is required");
+
+    let mut type_id: Option<LitStr> = None;
+    attr.parse_nested_meta(|m| {
+        if m.path.is_ident("type_id") {
+            let value = m.value().expect("`type_id` assignment is required");
+            let value = value
+                .parse::<LitStr>()
+                .expect("`type_id` value must be a literal string");
+            type_id.replace(value);
+        }
+        Ok(())
+    })
+    .ok();
+
+    type_id.expect("`type_id` assignment not found")
+}
 
 /// Derive macro for implementing the `Identity` trait and registering a component.
 ///
@@ -24,33 +47,17 @@ use syn::{DeriveInput, LitStr, parse_macro_input};
 /// - A hidden module that registers the component during static initialization
 #[proc_macro_derive(ComponentExt, attributes(component))]
 pub fn component(input: TokenStream) -> TokenStream {
-    let mut type_id: Option<LitStr> = None;
-
     let DeriveInput {
         ident,
         attrs,
         generics,
         ..
     } = parse_macro_input!(input);
-    let attr = attrs
-        .iter()
-        .find(|a| a.path().is_ident("component"))
-        .expect("`component` attribute is required");
-    attr.parse_nested_meta(|m| {
-        if m.path.is_ident("type_id") {
-            let value = m.value().expect("`type_id` assignment is required");
-            let value = value
-                .parse::<LitStr>()
-                .expect("`type_id` value must be a literal string");
-            type_id.replace(value);
-        }
-        Ok(())
-    })
-    .ok();
 
-    let type_id = type_id.expect("`type_id` assignment not found");
+    let type_id = parse_type_id(&attrs);
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let handler_mod = quote::format_ident!("__COMPONENT_REGISTER_{}", ident);
+
     let expanded = quote! {
         impl #impl_generics crate::components::Identity for #ident #ty_generics #where_clause {
             fn id(&self) -> &'static str {
@@ -104,27 +111,11 @@ pub fn component(input: TokenStream) -> TokenStream {
 /// during static initialization using the `ctor` crate.
 #[proc_macro_derive(ContentComponentExt)]
 pub fn content_component(input: TokenStream) -> TokenStream {
-    let mut type_id: Option<LitStr> = None;
-
     let DeriveInput { ident, attrs, .. } = parse_macro_input!(input);
-    let attr = attrs
-        .iter()
-        .find(|a| a.path().is_ident("component"))
-        .expect("`component` attribute is required");
-    attr.parse_nested_meta(|m| {
-        if m.path.is_ident("type_id") {
-            let value = m.value().expect("`type_id` assignment is required");
-            let value = value
-                .parse::<LitStr>()
-                .expect("`type_id` value must be a literal string");
-            type_id.replace(value);
-        }
-        Ok(())
-    })
-    .ok();
 
-    let type_id = type_id.expect("`type_id` assignment not found");
+    let type_id = parse_type_id(&attrs);
     let handler_mod = quote::format_ident!("__CONTENT_COMPONENT_REGISTER_{}", ident);
+
     let expanded = quote! {
         #[allow(non_snake_case)]
         mod #handler_mod {
