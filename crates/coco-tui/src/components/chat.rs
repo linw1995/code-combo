@@ -9,6 +9,14 @@ use code_combo::{
     Starter, StopReason, TextEdit, ToolUse, UsageStats, discover_starters, load_runtime_overrides,
     save_runtime_overrides,
 };
+
+/// Holds information about a collected tool result from concurrent execution.
+#[derive(Debug, Clone)]
+struct CollectedToolResult {
+    id: String,
+    is_error: bool,
+    content: code_combo::Content,
+}
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
@@ -73,6 +81,13 @@ pub struct Chat<'a> {
     retry_status: Option<RetryAttempt>,
     transcript_scopes: Vec<TranscriptScope>,
     terminal_focused: bool,
+
+    /// Tool IDs we're expecting results from in concurrent execution.
+    /// When empty, tool results are processed immediately.
+    /// When non-empty, tool results are collected until all are received.
+    pending_tool_ids: HashSet<String>,
+    /// Collected tool results waiting to be sent together.
+    collected_tool_results: Vec<CollectedToolResult>,
 
     token_schedule_session_save: Option<CancellationToken>,
     cancellation_guard: CancellationGuard,
@@ -274,6 +289,8 @@ impl Chat<'static> {
             retry_status: None,
             transcript_scopes: Vec::new(),
             terminal_focused: true,
+            pending_tool_ids: HashSet::new(),
+            collected_tool_results: Vec::new(),
             token_schedule_session_save: None,
             cancellation_guard: CancellationGuard::default(),
         }
@@ -1757,6 +1774,15 @@ impl Component for Chat<'static> {
                 // Trigger session save after ask event
                 global::trigger_schedule_session_save();
             }
+            Event::Answer(AnswerEvent::PendingToolExecutions { ids }) => {
+                // Track expected tool IDs for concurrent execution batching
+                debug!(
+                    ids_cnt = ids.len(),
+                    "received pending tool executions notification"
+                );
+                self.pending_tool_ids = ids.iter().cloned().collect();
+                self.collected_tool_results.clear();
+            }
             Event::Answer(AnswerEvent::ToolResult {
                 id,
                 is_user_cancelled,
@@ -1771,19 +1797,54 @@ impl Component for Chat<'static> {
                     self.update_focus(Focus::Input);
                     self.messages.blur();
                 }
-                // Add ToolResult message to send execution result to LLM API Server
+
+                // Build content for this tool result
                 let mut content = final_to_tool_content(output);
                 if *is_user_cancelled {
                     content = content.user_cancel();
                 }
-                // TODO: Allow user to retry if tool use fails.
-                let content = ChatContent::Multiple(vec![code_combo::Block::ToolResult {
-                    tool_use_id: id.clone(),
-                    is_error: Some(*is_error),
-                    content,
-                }]);
-                let content = self.build_user_content(content);
-                self.spawn_chat_task(content);
+
+                // Check if we're collecting results for concurrent execution
+                if self.pending_tool_ids.contains(id) {
+                    // Collect this result
+                    self.collected_tool_results.push(CollectedToolResult {
+                        id: id.clone(),
+                        is_error: *is_error,
+                        content,
+                    });
+                    self.pending_tool_ids.remove(id);
+
+                    debug!(
+                        collected = self.collected_tool_results.len(),
+                        remaining = self.pending_tool_ids.len(),
+                        "collected tool result for concurrent batch"
+                    );
+
+                    // If all results collected, send them all together
+                    if self.pending_tool_ids.is_empty() {
+                        let blocks: Vec<ChatBlock> = self
+                            .collected_tool_results
+                            .drain(..)
+                            .map(|r| code_combo::Block::ToolResult {
+                                tool_use_id: r.id,
+                                is_error: Some(r.is_error),
+                                content: r.content,
+                            })
+                            .collect();
+                        let content = ChatContent::Multiple(blocks);
+                        let content = self.build_user_content(content);
+                        self.spawn_chat_task(content);
+                    }
+                } else {
+                    // Single tool execution or not tracked - process immediately
+                    let content = ChatContent::Multiple(vec![code_combo::Block::ToolResult {
+                        tool_use_id: id.clone(),
+                        is_error: Some(*is_error),
+                        content,
+                    }]);
+                    let content = self.build_user_content(content);
+                    self.spawn_chat_task(content);
+                }
                 // Trigger session save after tool result
                 global::trigger_schedule_session_save();
             }
@@ -2741,6 +2802,14 @@ async fn handle_chat_response(
         if cancel_token.is_cancelled() {
             return;
         }
+
+        // Notify about pending tool executions so results can be batched
+        if to_execute.len() > 1 {
+            let ids: Vec<String> = to_execute.iter().map(|t| t.id.clone()).collect();
+            tx.send(AnswerEvent::PendingToolExecutions { ids }.into())
+                .unwrap();
+        }
+
         // Parallel execution
         let handles = to_execute
             .into_iter()
