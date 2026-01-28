@@ -30,7 +30,7 @@ use crate::{
     events::{AnswerEvent, AskEvent, Event},
     global::{self, State},
     session::{self, Session},
-    widgets::Paragraph,
+    widgets::{Paragraph, tab_panel_width},
 };
 
 #[derive(Serialize, Deserialize)]
@@ -101,14 +101,6 @@ impl Default for ExecState {
 
 const OUTPUT_PREVIEW_LINES: usize = 6;
 const TAB_PANEL_HEIGHT: usize = 3;
-
-fn tab_panel_width(total_width: u16) -> u16 {
-    let min_total_width = 24u16;
-    if total_width < min_total_width {
-        return 0;
-    }
-    3
-}
 
 fn output_marker_width(view: BashOutputView) -> u16 {
     match view {

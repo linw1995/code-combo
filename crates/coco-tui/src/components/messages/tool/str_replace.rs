@@ -24,7 +24,7 @@ use crate::{
     events::{AnswerEvent, AskEvent, Event},
     global::{self, State},
     session::{self, Session},
-    widgets::Paragraph,
+    widgets::{Paragraph, tab_panel_width},
 };
 
 const DEFAULT_CONTEXT_RADIUS: usize = 3;
@@ -167,14 +167,6 @@ fn build_diff_widget(diff_text: String) -> StrReplaceWidget<'static> {
         Ok(highlight) => StrReplaceWidget::CodeHighlight(highlight),
         Err(_) => StrReplaceWidget::Paragraph(Paragraph::new(diff_text)),
     }
-}
-
-fn tab_panel_width(total_width: u16) -> u16 {
-    let min_total_width = 24u16;
-    if total_width < min_total_width {
-        return 0;
-    }
-    3
 }
 
 fn render_tabs_panel(view: ResultView) -> Paragraph<'static> {
