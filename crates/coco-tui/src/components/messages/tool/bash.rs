@@ -10,7 +10,6 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout},
     prelude::Rect,
-    style::Style,
     text::{Line, Span},
     widgets::Wrap,
 };
@@ -30,7 +29,7 @@ use crate::{
     events::{AnswerEvent, AskEvent, Event},
     global::{self, State},
     session::{self, Session},
-    widgets::Paragraph,
+    widgets::{Paragraph, render_tabs_panel, tab_panel_width},
 };
 
 #[derive(Serialize, Deserialize)]
@@ -102,41 +101,11 @@ impl Default for ExecState {
 const OUTPUT_PREVIEW_LINES: usize = 6;
 const TAB_PANEL_HEIGHT: usize = 3;
 
-fn tab_panel_width(total_width: u16) -> u16 {
-    let min_total_width = 24u16;
-    if total_width < min_total_width {
-        return 0;
-    }
-    3
-}
-
 fn output_marker_width(view: BashOutputView) -> u16 {
     match view {
         BashOutputView::Mixed => 1,
         _ => 0,
     }
-}
-
-fn render_tabs_panel(view: BashOutputView) -> Paragraph<'static> {
-    let theme = global::theme();
-    let highlight = theme.ui.bash_tab_active;
-    let items = [
-        (BashOutputView::Stdout, " 1 ", theme.ui.bash_tab_stdout),
-        (BashOutputView::Stderr, " 2 ", theme.ui.bash_tab_stderr),
-        (BashOutputView::Mixed, " 3 ", theme.ui.bash_tab_mixed),
-    ];
-    let lines = items
-        .into_iter()
-        .map(|(v, digit, base_style)| {
-            let style = if v.index() == view.index() {
-                highlight
-            } else {
-                Style::default()
-            };
-            Line::from(Span::styled(digit, base_style.patch(style)))
-        })
-        .collect::<Vec<_>>();
-    Paragraph::new(lines)
 }
 
 const OUTPUT_MARKER: &str = "▐";
@@ -753,7 +722,16 @@ impl Component for Bash<'static> {
         }
 
         if let Some(area_tabs) = area_output_tabs {
-            let tabs_panel = render_tabs_panel(self.exec_view());
+            let theme = global::theme();
+            let tabs_panel = render_tabs_panel(
+                self.exec_view().index(),
+                &[
+                    (" 1 ", theme.ui.bash_tab_stdout),
+                    (" 2 ", theme.ui.bash_tab_stderr),
+                    (" 3 ", theme.ui.bash_tab_mixed),
+                ],
+                theme.ui.bash_tab_active,
+            );
             frame.render_widget(tabs_panel, area_tabs);
         }
         Ok(())

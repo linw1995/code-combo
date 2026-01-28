@@ -364,11 +364,11 @@ impl SessionSocketClient {
         &self,
         payload: MetadataPayload,
     ) -> ClientResult<MetadataResponse> {
-        self.send_message(&ClientMessage::Metadata(payload)).await?;
-        match self.read_server_message().await? {
+        self.send_and_expect(ClientMessage::Metadata(payload), |msg| match msg {
             ServerMessage::Metadata(response) => Ok(response),
-            other => Err(SessionClientError::UnexpectedServerMessage { message: other }),
-        }
+            other => Err(other),
+        })
+        .await
     }
 
     pub async fn send_prompt(&self, payload: PromptPayload) -> ClientResult<()> {
@@ -376,30 +376,30 @@ impl SessionSocketClient {
     }
 
     pub async fn send_mcp_request(&self, payload: McpRequest) -> ClientResult<McpResponse> {
-        self.send_message(&ClientMessage::Mcp(payload)).await?;
-        match self.read_server_message().await? {
+        self.send_and_expect(ClientMessage::Mcp(payload), |msg| match msg {
             ServerMessage::Mcp(response) => Ok(response),
-            other => Err(SessionClientError::UnexpectedServerMessage { message: other }),
-        }
+            other => Err(other),
+        })
+        .await
     }
 
     pub async fn send_prompt_wait_response(&self, payload: PromptPayload) -> ClientResult<String> {
-        self.send_message(&ClientMessage::Prompt(payload)).await?;
-        match self.read_server_message().await? {
+        self.send_and_expect(ClientMessage::Prompt(payload), |msg| match msg {
             ServerMessage::PromptResponse(response) => Ok(response),
-            other => Err(SessionClientError::UnexpectedServerMessage { message: other }),
-        }
+            other => Err(other),
+        })
+        .await
     }
 
     pub async fn send_reply_wait_validation(
         &self,
         payload: ReplyPayload,
     ) -> ClientResult<ReplyValidation> {
-        self.send_message(&ClientMessage::Reply(payload)).await?;
-        match self.read_server_message().await? {
+        self.send_and_expect(ClientMessage::Reply(payload), |msg| match msg {
             ServerMessage::ReplyValidation(validation) => Ok(validation),
-            other => Err(SessionClientError::UnexpectedServerMessage { message: other }),
-        }
+            other => Err(other),
+        })
+        .await
     }
 
     pub async fn begin_combo_run(&self, payload: ComboRunPayload) -> ClientResult<ComboRunSession> {
@@ -472,6 +472,20 @@ impl SessionSocketClient {
                 socket_path: self.socket_path.clone(),
             })?;
         serde_json::from_slice(&buf).context(session_client_error::DeserializeSnafu)
+    }
+
+    /// Send a message and expect a specific response type.
+    ///
+    /// The `extract` function should return `Ok(T)` if the response matches,
+    /// or `Err(ServerMessage)` to indicate an unexpected message type.
+    async fn send_and_expect<T, F>(&self, message: ClientMessage, extract: F) -> ClientResult<T>
+    where
+        F: FnOnce(ServerMessage) -> Result<T, ServerMessage>,
+    {
+        self.send_message(&message).await?;
+        let response = self.read_server_message().await?;
+        extract(response)
+            .map_err(|msg| SessionClientError::UnexpectedServerMessage { message: msg })
     }
 }
 

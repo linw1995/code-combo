@@ -70,56 +70,38 @@ impl std::fmt::Display for Lang {
 pub fn new_config(lang: &Lang, names: &[&str]) -> Result<HighlightConfiguration> {
     use Lang::*;
     match lang {
-        Bash => bash_config(names),
-        Diff => diff_config(names),
-        Json => json_config(names),
+        Bash => simple_config(
+            tree_sitter_bash::LANGUAGE.into(),
+            "bash",
+            tree_sitter_bash::HIGHLIGHT_QUERY,
+            names,
+        ),
+        Diff => simple_config(
+            tree_sitter_diff::LANGUAGE.into(),
+            "diff",
+            tree_sitter_diff::HIGHLIGHTS_QUERY,
+            names,
+        ),
+        Json => simple_config(
+            tree_sitter_json::LANGUAGE.into(),
+            "json",
+            tree_sitter_json::HIGHLIGHTS_QUERY,
+            names,
+        ),
         Markdown => markdown_config(names),
         MarkdownInline => markdown_inline_config(names),
     }
 }
 
-fn bash_config(names: &[&str]) -> Result<HighlightConfiguration> {
-    let mut config = HighlightConfiguration::new(
-        tree_sitter_bash::LANGUAGE.into(),
-        "bash",
-        tree_sitter_bash::HIGHLIGHT_QUERY,
-        "",
-        "",
-    )
-    .whatever_context("failed to create bash highlight configuration")?;
-
+fn simple_config(
+    language: tree_sitter::Language,
+    name: &str,
+    highlights_query: &str,
+    names: &[&str],
+) -> Result<HighlightConfiguration> {
+    let mut config = HighlightConfiguration::new(language, name, highlights_query, "", "")
+        .whatever_context(format!("failed to create {name} highlight configuration"))?;
     config.configure(names);
-
-    Ok(config)
-}
-
-fn diff_config(names: &[&str]) -> Result<HighlightConfiguration> {
-    let mut config = HighlightConfiguration::new(
-        tree_sitter_diff::LANGUAGE.into(),
-        "diff",
-        tree_sitter_diff::HIGHLIGHTS_QUERY,
-        "",
-        "",
-    )
-    .whatever_context("failed to create diff highlight configuration")?;
-
-    config.configure(names);
-
-    Ok(config)
-}
-
-fn json_config(names: &[&str]) -> Result<HighlightConfiguration> {
-    let mut config = HighlightConfiguration::new(
-        tree_sitter_json::LANGUAGE.into(),
-        "json",
-        tree_sitter_json::HIGHLIGHTS_QUERY,
-        "",
-        "",
-    )
-    .whatever_context("failed to create json highlight configuration")?;
-
-    config.configure(names);
-
     Ok(config)
 }
 

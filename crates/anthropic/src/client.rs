@@ -81,16 +81,17 @@ impl Client {
         max_tokens: Option<usize>,
         retry_config: RetryConfig,
     ) -> Result<messages::MessagesResponse, Whatever> {
-        let req = build_request(
-            &self.model,
-            system_prompt,
-            conversations,
-            tools,
-            Some(tool_choice),
-            thinking,
+        let req = messages::MessagesRequest {
+            model: self.model.clone(),
+            messages: conversations,
+            max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+            system: system_prompt.unwrap_or_default().to_string(),
             temperature,
-            max_tokens,
-        );
+            tool_choice: Some(tool_choice),
+            thinking,
+            stream: None,
+            tools,
+        };
         messages::messages(&self.cli, &self.base_url, req, retry_config).await
     }
 
@@ -106,16 +107,17 @@ impl Client {
         max_tokens: Option<usize>,
         retry_config: RetryConfig,
     ) -> Result<messages::MessagesStream, Whatever> {
-        let req = build_request(
-            &self.model,
-            system_prompt,
-            conversations,
-            tools,
-            Some(tool_choice),
-            thinking,
+        let req = messages::MessagesRequest {
+            model: self.model.clone(),
+            messages: conversations,
+            max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+            system: system_prompt.unwrap_or_default().to_string(),
             temperature,
-            max_tokens,
-        );
+            tool_choice: Some(tool_choice),
+            thinking,
+            stream: None,
+            tools,
+        };
         messages::messages_stream(&self.cli, &self.base_url, req, retry_config).await
     }
 }
@@ -166,167 +168,102 @@ impl ClientBuilder {
     }
 }
 
-pub struct MessagesBuilder<'a> {
-    client: &'a Client,
-    system_prompt: Option<String>,
-    conversations: Vec<Message>,
-    tools: Vec<Tool>,
-    thinking: Option<Thinking>,
-    temperature: Option<f64>,
-    max_tokens: Option<usize>,
-    retry_config: RetryConfig,
-}
-
-impl<'a> MessagesBuilder<'a> {
-    fn new(client: &'a Client) -> Self {
-        Self {
-            client,
-            system_prompt: None,
-            conversations: Vec::new(),
-            tools: Vec::new(),
-            thinking: None,
-            temperature: None,
-            max_tokens: None,
-            retry_config: RetryConfig::default(),
+macro_rules! messages_builder {
+    ($name:ident, $call_fn:path, $output:ty) => {
+        pub struct $name<'a> {
+            client: &'a Client,
+            system_prompt: Option<String>,
+            conversations: Vec<Message>,
+            tools: Vec<Tool>,
+            thinking: Option<Thinking>,
+            temperature: Option<f64>,
+            max_tokens: Option<usize>,
+            retry_config: RetryConfig,
         }
-    }
 
-    pub fn maybe_system_prompt(mut self, system_prompt: Option<&str>) -> Self {
-        self.system_prompt = system_prompt.map(str::to_string);
-        self
-    }
+        impl<'a> $name<'a> {
+            fn new(client: &'a Client) -> Self {
+                Self {
+                    client,
+                    system_prompt: None,
+                    conversations: Vec::new(),
+                    tools: Vec::new(),
+                    thinking: None,
+                    temperature: None,
+                    max_tokens: None,
+                    retry_config: RetryConfig::default(),
+                }
+            }
 
-    pub fn conversations(mut self, conversations: Vec<Message>) -> Self {
-        self.conversations = conversations;
-        self
-    }
+            pub fn maybe_system_prompt(mut self, system_prompt: Option<&str>) -> Self {
+                self.system_prompt = system_prompt.map(str::to_string);
+                self
+            }
 
-    pub fn tools(mut self, tools: Vec<Tool>) -> Self {
-        self.tools = tools;
-        self
-    }
+            pub fn conversations(mut self, conversations: Vec<Message>) -> Self {
+                self.conversations = conversations;
+                self
+            }
 
-    pub fn maybe_thinking(mut self, thinking: Option<Thinking>) -> Self {
-        self.thinking = thinking;
-        self
-    }
+            pub fn tools(mut self, tools: Vec<Tool>) -> Self {
+                self.tools = tools;
+                self
+            }
 
-    pub fn maybe_temperature(mut self, temperature: Option<f64>) -> Self {
-        self.temperature = temperature;
-        self
-    }
+            pub fn maybe_thinking(mut self, thinking: Option<Thinking>) -> Self {
+                self.thinking = thinking;
+                self
+            }
 
-    pub fn maybe_max_tokens(mut self, max_tokens: Option<usize>) -> Self {
-        self.max_tokens = max_tokens;
-        self
-    }
+            pub fn maybe_temperature(mut self, temperature: Option<f64>) -> Self {
+                self.temperature = temperature;
+                self
+            }
 
-    pub fn retry_config(mut self, retry_config: RetryConfig) -> Self {
-        self.retry_config = retry_config;
-        self
-    }
+            pub fn maybe_max_tokens(mut self, max_tokens: Option<usize>) -> Self {
+                self.max_tokens = max_tokens;
+                self
+            }
 
-    pub async fn call(self) -> Result<messages::MessagesResponse, Whatever> {
-        let req = build_request(
-            &self.client.model,
-            self.system_prompt.as_deref(),
-            self.conversations,
-            self.tools,
-            None,
-            self.thinking,
-            self.temperature,
-            self.max_tokens,
-        );
-        messages::messages(
-            &self.client.cli,
-            &self.client.base_url,
-            req,
-            self.retry_config,
-        )
-        .await
-    }
-}
+            pub fn retry_config(mut self, retry_config: RetryConfig) -> Self {
+                self.retry_config = retry_config;
+                self
+            }
 
-pub struct MessagesStreamBuilder<'a> {
-    client: &'a Client,
-    system_prompt: Option<String>,
-    conversations: Vec<Message>,
-    tools: Vec<Tool>,
-    thinking: Option<Thinking>,
-    temperature: Option<f64>,
-    max_tokens: Option<usize>,
-    retry_config: RetryConfig,
-}
-
-impl<'a> MessagesStreamBuilder<'a> {
-    fn new(client: &'a Client) -> Self {
-        Self {
-            client,
-            system_prompt: None,
-            conversations: Vec::new(),
-            tools: Vec::new(),
-            thinking: None,
-            temperature: None,
-            max_tokens: None,
-            retry_config: RetryConfig::default(),
+            pub async fn call(self) -> Result<$output, Whatever> {
+                let req = messages::MessagesRequest {
+                    model: self.client.model.clone(),
+                    messages: self.conversations,
+                    max_tokens: self.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+                    system: self.system_prompt.unwrap_or_default(),
+                    temperature: self.temperature,
+                    tool_choice: None,
+                    thinking: self.thinking,
+                    stream: None,
+                    tools: self.tools,
+                };
+                $call_fn(
+                    &self.client.cli,
+                    &self.client.base_url,
+                    req,
+                    self.retry_config,
+                )
+                .await
+            }
         }
-    }
-
-    pub fn maybe_system_prompt(mut self, system_prompt: Option<&str>) -> Self {
-        self.system_prompt = system_prompt.map(str::to_string);
-        self
-    }
-
-    pub fn conversations(mut self, conversations: Vec<Message>) -> Self {
-        self.conversations = conversations;
-        self
-    }
-
-    pub fn tools(mut self, tools: Vec<Tool>) -> Self {
-        self.tools = tools;
-        self
-    }
-
-    pub fn maybe_thinking(mut self, thinking: Option<Thinking>) -> Self {
-        self.thinking = thinking;
-        self
-    }
-
-    pub fn maybe_temperature(mut self, temperature: Option<f64>) -> Self {
-        self.temperature = temperature;
-        self
-    }
-
-    pub fn maybe_max_tokens(mut self, max_tokens: Option<usize>) -> Self {
-        self.max_tokens = max_tokens;
-        self
-    }
-
-    pub fn retry_config(mut self, retry_config: RetryConfig) -> Self {
-        self.retry_config = retry_config;
-        self
-    }
-
-    pub async fn call(self) -> Result<messages::MessagesStream, Whatever> {
-        let req = build_request(
-            &self.client.model,
-            self.system_prompt.as_deref(),
-            self.conversations,
-            self.tools,
-            None,
-            self.thinking,
-            self.temperature,
-            self.max_tokens,
-        );
-        messages::messages_stream(
-            &self.client.cli,
-            &self.client.base_url,
-            req,
-            self.retry_config,
-        )
-        .await
-    }
+    };
 }
+
+messages_builder!(
+    MessagesBuilder,
+    messages::messages,
+    messages::MessagesResponse
+);
+messages_builder!(
+    MessagesStreamBuilder,
+    messages::messages_stream,
+    messages::MessagesStream
+);
 
 fn build_headers(token: &str) -> Result<HeaderMap, Whatever> {
     let mut headers = HeaderMap::new();
@@ -345,30 +282,6 @@ fn build_headers(token: &str) -> Result<HeaderMap, Whatever> {
 
 fn missing_field(field: &str) -> Whatever {
     <Whatever as snafu::FromString>::without_source(format!("missing anthropic {field}"))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_request(
-    model: &str,
-    system_prompt: Option<&str>,
-    conversations: Vec<Message>,
-    tools: Vec<Tool>,
-    tool_choice: Option<messages::ToolChoice>,
-    thinking: Option<messages::Thinking>,
-    temperature: Option<f64>,
-    max_tokens: Option<usize>,
-) -> messages::MessagesRequest {
-    messages::MessagesRequest {
-        model: model.to_string(),
-        messages: conversations,
-        max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-        system: system_prompt.unwrap_or_default().to_string(),
-        temperature,
-        tool_choice,
-        thinking,
-        stream: None,
-        tools,
-    }
 }
 
 #[cfg(test)]
