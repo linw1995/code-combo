@@ -18,6 +18,11 @@ pub enum ClientCommand {
         /// Reply fields as --field=value format
         fields: Vec<String>,
     },
+    ComboRun {
+        name: String,
+        args: Vec<String>,
+        ignore_workspace_scripts: bool,
+    },
     Record {
         wrap_result: bool,
         command: Vec<String>,
@@ -33,6 +38,7 @@ pub fn init_client_logging(program: &str, command: &ClientCommand) {
         ClientCommand::Ask { .. } => "ask",
         ClientCommand::Tell { .. } => "tell",
         ClientCommand::Reply { .. } => "reply",
+        ClientCommand::ComboRun { .. } => "combo-run",
         ClientCommand::Record { .. } => "record",
         ClientCommand::Mcp { .. } => "mcp",
     };
@@ -58,6 +64,13 @@ pub async fn handle_client_command(
         ClientCommand::Reply { fields } => crate::cmd::handle_reply(fields)
             .await
             .whatever_context("failed to handle reply"),
+        ClientCommand::ComboRun {
+            name,
+            args,
+            ignore_workspace_scripts,
+        } => crate::cmd::handle_combo_run(name, args, ignore_workspace_scripts)
+            .await
+            .whatever_context("failed to handle combo run"),
         ClientCommand::Record {
             wrap_result,
             command,

@@ -79,7 +79,7 @@ pub enum AnswerEvent {
         id: String,
         event: SubagentEvent,
     },
-    /// Combo tool event (for run_combo tool).
+    /// Combo tool event (from combo execution).
     ComboToolEvent {
         id: String,
         event: ComboToolEvent,
@@ -143,6 +143,23 @@ pub enum ComboEvent {
     PromptStreamReset {
         id: String,
         name: String,
+    },
+    SummaryStreamReset {
+        id: String,
+        name: String,
+    },
+    SummaryStream {
+        id: String,
+        name: String,
+        index: usize,
+        kind: BotStreamKind,
+        text: String,
+    },
+    SummaryDone {
+        id: String,
+        name: String,
+        summary: String,
+        thinking: Vec<String>,
     },
     /// Reply tool use from prompt, with optional offload via bash
     ReplyToolUse {

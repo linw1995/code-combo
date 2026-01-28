@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::Thinking;
 use super::{Component, NavigationKey, NavigationResult, ShortcutHints};
 use crate::{
-    components::{Persistable, Tool},
+    components::{Combo, Persistable, Tool},
     error::*,
     global::{self},
     session::{self, Session},
@@ -139,11 +139,15 @@ impl Message {
     }
 
     pub fn is_same_tool_id(&self, id: &str) -> bool {
-        self.content
-            .as_any()
-            .downcast_ref::<Tool>()
-            .map(|tool| tool.tool_use_id() == id)
-            .unwrap_or_default()
+        // Check if this is a Tool with matching id
+        if let Some(tool) = self.content.as_any().downcast_ref::<Tool>() {
+            return tool.tool_use_id() == id;
+        }
+        // Check if this is a Combo with matching id (for Method 2 permission handling)
+        if let Some(combo) = self.content.as_any().downcast_ref::<Combo>() {
+            return combo.matches_id(id);
+        }
+        false
     }
 
     pub fn thinking_mut(&mut self) -> Option<&mut Thinking> {

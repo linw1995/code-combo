@@ -585,6 +585,19 @@ impl Messages {
         None
     }
 
+    pub fn append_combo_summary(&mut self, id: &str, summary: &str, thinking: &[String]) -> bool {
+        let mut messages = self.messages.write();
+        for message in messages.iter_mut() {
+            let Some(combo) = message.content_as_mut_any().downcast_mut::<Combo>() else {
+                continue;
+            };
+            if combo.matches_id(id) {
+                return combo.append_summary(summary, thinking);
+            }
+        }
+        false
+    }
+
     fn ensure_focus_visible(
         &mut self,
         idx: usize,

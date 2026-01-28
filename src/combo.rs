@@ -20,10 +20,12 @@ mod starter;
 
 pub use discovery::*;
 pub use session::{
-    ClientMessage, ControlAction, MetadataPayload, MetadataResponse, PromptPayload, PromptSchema,
-    RecordChunkPayload, RecordControl, RecordEndPayload, RecordSession, RecordStartPayload,
-    ReplyPayload, ReplyValidation, ServerConnection, ServerMessage, SessionClientError,
-    SessionServerError, SessionSocketClient, SessionSocketServer, ThinkingConfig,
+    ClientMessage, ComboRunEvent, ComboRunMessage, ComboRunPayload, ComboRunResult,
+    ComboRunSession, ComboStreamKind, ControlAction, MetadataPayload, MetadataResponse,
+    PromptPayload, PromptSchema, RecordChunkPayload, RecordControl, RecordEndPayload,
+    RecordSession, RecordStartPayload, ReplyPayload, ReplyValidation, ServerConnection,
+    ServerMessage, SessionClientError, SessionServerError, SessionSocketClient,
+    SessionSocketServer, ThinkingConfig,
 };
 pub use session_env::{SessionEnv, SessionEnvBuilder, SessionEnvError};
 pub use starter::PromptResponseSender;

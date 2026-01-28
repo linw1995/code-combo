@@ -51,6 +51,31 @@ fn default_timeout_ms() -> u64 {
     600_000
 }
 
+pub(crate) fn extra_envs_for_bash_input(input: &Input<'_>) -> Vec<(String, String)> {
+    let Input::Starter(input) = input else {
+        return Vec::new();
+    };
+    let Ok(parsed) = serde_json::from_value::<BashInput>(input.clone()) else {
+        return Vec::new();
+    };
+    extra_envs_for_command(&parsed.command)
+}
+
+fn extra_envs_for_command(_command: &str) -> Vec<(String, String)> {
+    let mut envs = Vec::new();
+    if let Ok(value) = std::env::var("COCO_SESSION_SOCK")
+        && !value.is_empty()
+    {
+        envs.push(("COCO_SESSION_SOCK".to_string(), value));
+    }
+    if let Ok(value) = std::env::var("COCO_TUI_BIN")
+        && !value.is_empty()
+    {
+        envs.push(("COCO_TUI_BIN".to_string(), value));
+    }
+    envs
+}
+
 pub const BASH_TOOL_NAME: &str = "bash";
 
 pub async fn run_bash_chunked<'a, F>(
@@ -124,10 +149,11 @@ where
             Vec::new()
         }
     };
+    let mut envs = envs;
+    envs.extend(extra_envs.iter().cloned());
     let mut proc = ExecCommand::from_argv(argv)
         .remove_env_prefix("COCO_")
         .envs(envs)
-        .envs(extra_envs.to_vec())
         .spawn_chunked(ChunkConfig {
             interval: Duration::ZERO,
         })
@@ -220,7 +246,8 @@ impl Tool for BashTool {
     }
 
     async fn execute<'a>(&self, input: Input<'a>) -> ExecuteResult {
-        run_bash_chunked(input, &[], CancellationToken::new(), |_| {}).await
+        let extra_envs = extra_envs_for_bash_input(&input);
+        run_bash_chunked(input, &extra_envs, CancellationToken::new(), |_| {}).await
     }
 }
 

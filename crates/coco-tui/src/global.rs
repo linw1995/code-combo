@@ -12,6 +12,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     actions::Action,
+    combo_run_bridge::ComboRunBridge,
     events::Event,
     theme::{FinalizedTheme, use_builtin_theme},
 };
@@ -20,6 +21,7 @@ static EVENT_TX: OnceLock<UnboundedSender<Event>> = OnceLock::new();
 static ACTION_TX: OnceLock<UnboundedSender<Action>> = OnceLock::new();
 static WORKSPACE_DIR: OnceLock<PathBuf> = OnceLock::new();
 static IGNORE_WORKSPACE_SCRIPTS: AtomicBool = AtomicBool::new(false);
+static COMBO_RUN_BRIDGE: OnceLock<ComboRunBridge> = OnceLock::new();
 /// Initialize the global event and action senders.
 ///
 /// This function can only be called once during the application's lifetime.
@@ -91,6 +93,14 @@ pub fn set_ignore_workspace_scripts(ignore: bool) {
 
 pub fn ignore_workspace_scripts() -> bool {
     IGNORE_WORKSPACE_SCRIPTS.load(Ordering::Relaxed)
+}
+
+pub fn init_combo_run_bridge() -> &'static ComboRunBridge {
+    COMBO_RUN_BRIDGE.get_or_init(ComboRunBridge::default)
+}
+
+pub fn combo_run_bridge() -> Option<&'static ComboRunBridge> {
+    COMBO_RUN_BRIDGE.get()
 }
 
 #[inline]

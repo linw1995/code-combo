@@ -24,6 +24,7 @@ mod run_task;
 mod str_replace;
 
 use crate::{AppliedTextEdit, TextEdit};
+pub(crate) use bash::extra_envs_for_bash_input;
 pub(crate) use bash::run_bash_chunked;
 pub use bash::{BASH_TOOL_NAME, BashInput, BashOutput, BashTool, prepare_mcp_envs};
 pub use list::{DEFAULT_ENTRY_LIMIT, LIST_TOOL_NAME, ListInput, ListTool, MAX_ENTRY_LIMIT};
@@ -32,7 +33,7 @@ pub use read::{
 };
 pub use run_combo::{
     ComboEvent, ComboInfo, ComboStreamKind, RUN_COMBO_TOOL_NAME, RunComboContext, RunComboInput,
-    RunComboOutput, RunComboTool, run_combo,
+    RunComboOutput, run_combo,
 };
 pub use run_task::{
     RUN_TASK_TOOL_NAME, RunTaskContext, RunTaskInput, RunTaskOutput, RunTaskTool, SubagentEvent,

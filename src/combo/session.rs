@@ -9,7 +9,10 @@ use tokio::{
 };
 use tracing::{debug, warn};
 
-use crate::{MCP_SOCKET_ENV, McpRequest, McpResponse, exec::StreamKind};
+use crate::{
+    MCP_SOCKET_ENV, McpRequest, McpResponse, Message, OutputChunk, Starter, ToolUse,
+    exec::StreamKind, tools::Final,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
@@ -20,6 +23,7 @@ pub enum ClientMessage {
     RecordEnd(RecordEndPayload),
     Prompt(PromptPayload),
     Reply(ReplyPayload),
+    ComboRun(ComboRunPayload),
     Mcp(McpRequest),
 }
 
@@ -30,6 +34,8 @@ pub enum ServerMessage {
     PromptResponse(String),
     ReplyValidation(ReplyValidation),
     Metadata(MetadataResponse),
+    ComboRunEvent(ComboRunEvent),
+    ComboRunResult(ComboRunResult),
     Mcp(McpResponse),
 }
 
@@ -127,6 +133,151 @@ pub struct ReplyValidation {
     pub response: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ComboRunPayload {
+    pub run_id: String,
+    pub combo_name: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ComboStreamKind {
+    Plain,
+    Thinking,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ComboRunEvent {
+    Discovering,
+    Discovered {
+        starters: Vec<Starter>,
+    },
+    Executing {
+        id: String,
+        name: String,
+        command_line: String,
+    },
+    RecordStart {
+        id: String,
+        name: String,
+        tool_use: ToolUse,
+    },
+    Output {
+        id: String,
+        name: String,
+        chunk: OutputChunk,
+    },
+    RecordOutput {
+        id: String,
+        name: String,
+        tool_use_id: String,
+        chunk: OutputChunk,
+    },
+    RecordEnd {
+        id: String,
+        name: String,
+        tool_use_id: String,
+        is_error: bool,
+        output: Final,
+    },
+    Prompt {
+        id: String,
+        name: String,
+        prompt: String,
+        thinking: Option<ThinkingConfig>,
+    },
+    PromptStream {
+        id: String,
+        name: String,
+        index: usize,
+        kind: ComboStreamKind,
+        text: String,
+    },
+    PromptStreamReset {
+        id: String,
+        name: String,
+    },
+    SummaryStreamReset {
+        id: String,
+        name: String,
+    },
+    SummaryStream {
+        id: String,
+        name: String,
+        index: usize,
+        kind: ComboStreamKind,
+        text: String,
+    },
+    SummaryDone {
+        id: String,
+        name: String,
+        summary: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        thinking: Vec<String>,
+    },
+    ReplyToolUse {
+        id: String,
+        name: String,
+        tool_use: ToolUse,
+        thinking: Vec<String>,
+        offload: bool,
+    },
+    ReplyToolResult {
+        id: String,
+        name: String,
+        tool_use_id: String,
+        is_error: bool,
+        output: Final,
+    },
+    Executed {
+        id: String,
+        name: String,
+        starter: Starter,
+        exit_code: Option<i32>,
+    },
+    ReplyToolError {
+        message: String,
+    },
+    NotFound {
+        id: String,
+        name: String,
+    },
+    Cancelled {
+        id: Option<String>,
+        name: Option<String>,
+    },
+    Transcript {
+        id: String,
+        name: String,
+        messages: Vec<Message>,
+    },
+}
+
+impl PartialEq for ComboRunEvent {
+    fn eq(&self, other: &Self) -> bool {
+        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ComboRunResult {
+    pub run_id: String,
+    pub success: bool,
+    pub summary: String,
+    pub tool_calls: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ComboRunMessage {
+    Event(ComboRunEvent),
+    Result(ComboRunResult),
+}
+
 #[derive(Debug, Snafu)]
 #[snafu(module)]
 pub enum SessionClientError {
@@ -159,6 +310,9 @@ pub enum SessionClientError {
 
     #[snafu(display("record execution was interrupted by server"))]
     Interrupted,
+
+    #[snafu(display("combo run finished without a result"))]
+    ComboRunFinished,
 }
 
 pub type ClientResult<T, E = SessionClientError> = std::result::Result<T, E>;
@@ -246,6 +400,14 @@ impl SessionSocketClient {
             ServerMessage::ReplyValidation(validation) => Ok(validation),
             other => Err(SessionClientError::UnexpectedServerMessage { message: other }),
         }
+    }
+
+    pub async fn begin_combo_run(&self, payload: ComboRunPayload) -> ClientResult<ComboRunSession> {
+        self.send_message(&ClientMessage::ComboRun(payload)).await?;
+        Ok(ComboRunSession {
+            client: self.clone(),
+            finished: false,
+        })
     }
 
     pub async fn begin_record(&self, payload: RecordStartPayload) -> ClientResult<RecordSession> {
@@ -368,6 +530,38 @@ impl RecordSession {
                 return Err(SessionClientError::Interrupted);
             }
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ComboRunSession {
+    client: SessionSocketClient,
+    finished: bool,
+}
+
+impl ComboRunSession {
+    pub async fn next_message(&mut self) -> ClientResult<Option<ComboRunMessage>> {
+        if self.finished {
+            return Ok(None);
+        }
+        let message = self.client.read_server_message().await?;
+        match message {
+            ServerMessage::ComboRunEvent(event) => Ok(Some(ComboRunMessage::Event(event))),
+            ServerMessage::ComboRunResult(result) => {
+                self.finished = true;
+                Ok(Some(ComboRunMessage::Result(result)))
+            }
+            other => Err(SessionClientError::UnexpectedServerMessage { message: other }),
+        }
+    }
+
+    pub async fn wait_for_result(&mut self) -> ClientResult<ComboRunResult> {
+        while let Some(message) = self.next_message().await? {
+            if let ComboRunMessage::Result(result) = message {
+                return Ok(result);
+            }
+        }
+        Err(SessionClientError::ComboRunFinished)
     }
 }
 
@@ -625,6 +819,93 @@ mod tests {
 
         let received = send_task.await.whatever_context("failed to join")?;
         assert_eq!(received, response);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[snafu::report]
+    async fn combo_run_stream_over_socket() -> Result<()> {
+        let (_dir, socket_path) = unique_socket_path()?;
+        let server = SessionSocketServer::bind(&socket_path)
+            .await
+            .whatever_context("failed to bind socket")?;
+
+        let payload = ComboRunPayload {
+            run_id: "run_1".to_string(),
+            combo_name: "demo".to_string(),
+            args: vec!["a".to_string()],
+        };
+        let client = SessionSocketClient::connect(&socket_path)
+            .await
+            .whatever_context("failed to connect socket path")?;
+
+        let send_payload = payload.clone();
+        let send_task = tokio::spawn(async move {
+            let mut session = client
+                .begin_combo_run(send_payload)
+                .await
+                .expect("begin combo run");
+            let event = session
+                .next_message()
+                .await
+                .expect("read event")
+                .expect("event message");
+            match event {
+                ComboRunMessage::Event(ComboRunEvent::Executing {
+                    id,
+                    name,
+                    command_line,
+                }) => {
+                    assert_eq!(id, "run_1");
+                    assert_eq!(name, "demo");
+                    assert_eq!(command_line, "coco combo run demo a");
+                }
+                other => panic!("unexpected combo event: {other:?}"),
+            }
+            let result = session
+                .next_message()
+                .await
+                .expect("read result")
+                .expect("result message");
+            match result {
+                ComboRunMessage::Result(result) => {
+                    assert!(result.success);
+                    assert_eq!(result.run_id, "run_1");
+                    assert_eq!(result.summary, "ok");
+                    assert_eq!(result.tool_calls, 0);
+                    assert!(result.error.is_none());
+                }
+                other => panic!("unexpected combo result: {other:?}"),
+            }
+        });
+
+        let mut conn = server.accept().await.whatever_context("failed to accept")?;
+        let event = conn
+            .read_client_message()
+            .await
+            .whatever_context("failed to read client message")?;
+        assert_eq!(event, ClientMessage::ComboRun(payload));
+
+        conn.send_server_message(&ServerMessage::ComboRunEvent(ComboRunEvent::Executing {
+            id: "run_1".to_string(),
+            name: "demo".to_string(),
+            command_line: "coco combo run demo a".to_string(),
+        }))
+        .await
+        .whatever_context("failed to send combo event")?;
+
+        conn.send_server_message(&ServerMessage::ComboRunResult(ComboRunResult {
+            run_id: "run_1".to_string(),
+            success: true,
+            summary: "ok".to_string(),
+            tool_calls: 0,
+            error: None,
+        }))
+        .await
+        .whatever_context("failed to send combo result")?;
+
+        send_task.await.whatever_context("failed to join")?;
 
         Ok(())
     }

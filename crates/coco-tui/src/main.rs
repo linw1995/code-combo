@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    io::IsTerminal,
+    path::{Path, PathBuf},
+};
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use code_combo::{
@@ -11,6 +14,7 @@ use snafu::prelude::*;
 use coco_tui::{
     actions::{Action, ComboAction},
     app,
+    combo_run_server::ComboRunSessionServer,
     components::Chat,
     error::Result,
     global, version,
@@ -106,21 +110,26 @@ impl TryFrom<Commands> for ClientCommand {
     type Error = Commands;
 
     fn try_from(value: Commands) -> std::result::Result<Self, Self::Error> {
-        match value {
-            Commands::Metadata { fields } => Ok(ClientCommand::Metadata { fields }),
-            Commands::Ask { prompt, schemas } => Ok(ClientCommand::Ask { prompt, schemas }),
-            Commands::Tell { prompt } => Ok(ClientCommand::Tell { prompt }),
-            Commands::Reply { fields } => Ok(ClientCommand::Reply { fields }),
+        let command = match value {
+            Commands::Metadata { fields } => ClientCommand::Metadata { fields },
+            Commands::Ask { prompt, schemas } => ClientCommand::Ask { prompt, schemas },
+            Commands::Tell { prompt } => ClientCommand::Tell { prompt },
+            Commands::Reply { fields } => ClientCommand::Reply { fields },
             Commands::Record {
                 wrap_result,
                 command,
-            } => Ok(ClientCommand::Record {
+            } => ClientCommand::Record {
                 wrap_result,
                 command,
-            }),
-            Commands::Mcp { args } => Ok(ClientCommand::Mcp { args }),
-            _ => Err(value),
-        }
+            },
+            Commands::Mcp { args } => ClientCommand::Mcp { args },
+            Commands::Combo(ComboCommands::Run { name, args }) => ClientCommand::ComboRun {
+                name,
+                args,
+                ignore_workspace_scripts: false,
+            },
+        };
+        Ok(command)
     }
 }
 
@@ -148,18 +157,40 @@ async fn main() -> Result<()> {
         Some(prompt)
     };
     if let Some(command) = args.command.take() {
-        match ClientCommand::try_from(command) {
-            Ok(command) => {
-                init_client_logging(&program, &command);
-                return handle_client_command(&program, &command_name, command)
-                    .await
-                    .whatever_context("failed to handle client command");
+        let should_handle_client = match &command {
+            Commands::Combo(ComboCommands::Run { .. }) => has_session_socket(),
+            _ => true,
+        };
+
+        if should_handle_client {
+            match ClientCommand::try_from(command) {
+                Ok(mut command) => {
+                    if let ClientCommand::ComboRun {
+                        ignore_workspace_scripts,
+                        ..
+                    } = &mut command
+                    {
+                        *ignore_workspace_scripts = args.ignore_workspace_scripts;
+                    }
+                    init_client_logging(&program, &command);
+                    return handle_client_command(&program, &command_name, command)
+                        .await
+                        .whatever_context("failed to handle client command");
+                }
+                Err(command) => {
+                    args.command.replace(command);
+                }
             }
-            Err(command) => {
-                args.command.replace(command);
-            }
+        } else {
+            args.command.replace(command);
         }
     }
+
+    // TTY is required for TUI
+    ensure_whatever!(
+        std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
+        "stdin/stdout is not a TTY"
+    );
 
     coco_tui::logging::init()?;
 
@@ -187,13 +218,15 @@ async fn main() -> Result<()> {
     root_view.apply_runtime_overrides(overrides);
     root_view.setup().await;
     let mut app = app::App::new(Box::new(root_view))?;
+    let bridge = global::init_combo_run_bridge();
+    let combo_run_server = ComboRunSessionServer::start(bridge).await?;
     if let Some(prompt) = startup_prompt {
         app.send_action(Action::SubmitPrompt(prompt));
     }
     match args.command {
         Some(Commands::Combo(combo_cmd)) => match combo_cmd {
             ComboCommands::Run { name, args } => {
-                app.send_action(ComboAction::Execute { name, args }.into());
+                app.send_action(ComboAction::ExecuteViaBash { name, args }.into());
             }
         },
         Some(
@@ -216,7 +249,27 @@ async fn main() -> Result<()> {
 
     let result = app.run().await;
 
+    if let Some(server) = combo_run_server {
+        server.shutdown().await;
+    }
+
     ratatui::restore();
 
     result
+}
+
+fn has_session_socket() -> bool {
+    let Some(path) = std::env::var_os("COCO_SESSION_SOCK") else {
+        return false;
+    };
+    let path = PathBuf::from(path);
+    if path.exists() {
+        true
+    } else {
+        warn!(
+            socket_path = %path.display(),
+            "session socket missing"
+        );
+        false
+    }
 }

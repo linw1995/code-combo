@@ -1,12 +1,11 @@
-//! Run Combo Tool - Executes combo scripts within agent context.
+//! Combo runner - executes combo scripts within agent context.
 //!
-//! This tool allows the agent to execute combo scripts that have been
-//! discovered during startup. Combos are executable scripts that can
-//! perform complex operations with recorded tool calls.
+//! This module provides combo execution helpers and shared types.
+//! Combos are executable scripts that can perform complex operations
+//! with recorded tool calls.
 
 use std::{path::PathBuf, sync::Arc};
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -14,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use super::{
-    BASH_TOOL_NAME, BashInput, ExecuteResult, Final, Input, Output, Tool, prepare_mcp_envs,
+    BASH_TOOL_NAME, BashInput, ExecuteResult, Final, Input, Output, prepare_mcp_envs,
     run_bash_chunked,
 };
 use crate::{
@@ -28,7 +27,7 @@ pub const RUN_COMBO_TOOL_NAME: &str = "run_combo";
 
 type ComboEventCallback = Arc<std::sync::Mutex<Box<dyn FnMut(&ComboEvent) + Send>>>;
 
-/// Input parameters for the run_combo tool.
+/// Input parameters for combo execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunComboInput {
     /// Name of the combo to execute.
@@ -38,7 +37,7 @@ pub struct RunComboInput {
     pub args: Vec<String>,
 }
 
-/// Output from the run_combo tool.
+/// Output from combo execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunComboOutput {
     /// Whether the combo completed successfully.
@@ -50,6 +49,9 @@ pub struct RunComboOutput {
     /// Optional error message if failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Optional thinking blocks from the summary response.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub summary_thinking: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +134,31 @@ pub enum ComboEvent {
         /// Combo name.
         name: String,
     },
+    /// Reset summary stream for combo summary.
+    SummaryStreamReset {
+        /// Combo name.
+        name: String,
+    },
+    /// Summary stream update for combo summary.
+    SummaryStream {
+        /// Combo name.
+        name: String,
+        /// Stream index.
+        index: usize,
+        /// Stream kind.
+        kind: ComboStreamKind,
+        /// Streamed text.
+        text: String,
+    },
+    /// Summary completion for combo summary.
+    SummaryDone {
+        /// Combo name.
+        name: String,
+        /// Summary text.
+        summary: String,
+        /// Thinking blocks.
+        thinking: Vec<String>,
+    },
     /// Reply tool use from prompt.
     ReplyToolUse {
         /// Combo name.
@@ -210,77 +237,7 @@ pub struct RunComboContext {
     pub ignore_workspace_scripts: bool,
 }
 
-/// Tool for executing combo scripts.
-pub struct RunComboTool {
-    context: Arc<Mutex<RunComboContext>>,
-}
-
-impl RunComboTool {
-    /// Create a new RunComboTool with the given context.
-    pub fn new(context: RunComboContext) -> Self {
-        Self {
-            context: Arc::new(Mutex::new(context)),
-        }
-    }
-
-    /// Create a new RunComboTool with a shared context.
-    /// This allows external code to update the combo list after tool creation.
-    pub fn new_with_shared_context(context: Arc<Mutex<RunComboContext>>) -> Self {
-        Self { context }
-    }
-
-    /// Get the shared context.
-    pub fn context(&self) -> Arc<Mutex<RunComboContext>> {
-        self.context.clone()
-    }
-}
-
-#[async_trait]
-impl Tool for RunComboTool {
-    fn name(&self) -> &'static str {
-        RUN_COMBO_TOOL_NAME
-    }
-
-    fn description(&self) -> &'static str {
-        "Execute a combo script to perform predefined operations."
-    }
-
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "combo_name": {
-                    "type": "string",
-                    "description": "Name of the combo to execute"
-                },
-                "args": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    },
-                    "description": "Arguments passed to the combo starter"
-                }
-            },
-            "required": ["combo_name"]
-        })
-    }
-
-    async fn execute<'a>(&self, input: Input<'a>) -> ExecuteResult {
-        run_combo(
-            self.context.clone(),
-            input,
-            CancellationToken::new(),
-            |_| {},
-        )
-        .await
-    }
-
-    fn as_any(&self) -> Option<&dyn std::any::Any> {
-        Some(self)
-    }
-}
-
-/// Execute the run_combo tool with event callback support.
+/// Execute combo logic with event callback support.
 pub async fn run_combo<F>(
     context: Arc<Mutex<RunComboContext>>,
     input: Input<'_>,
@@ -483,10 +440,11 @@ async fn execute_combo(
     let mut tool_calls = 0;
     let mut summary_parts: Vec<String> = Vec::new();
     let mut exit_code: Option<i32> = None;
-    let mut failed = false;
+    let mut tool_failed = false;
+    let mut starter_failed = false;
     let mut cancelled = false;
 
-    let command_line = format_command_line(&combo_path, &args);
+    let command_line = format_combo_run_command(&combo_name, &args);
     // Emit executing event
     emit_combo_event(
         &on_event_for_emit,
@@ -568,7 +526,7 @@ async fn execute_combo(
                             output: output.clone(),
                         });
                         if is_error {
-                            failed = true;
+                            tool_failed = true;
                         }
                     }
                     StarterEvent::Prompt { prompt } => {
@@ -731,7 +689,7 @@ async fn execute_combo(
                         cancelled = true;
                     }
                     StarterEvent::Failed { reason } => {
-                        failed = true;
+                        starter_failed = true;
                         summary_parts.push(format!("[Failed] {}", reason));
                     }
                 }
@@ -792,6 +750,7 @@ async fn execute_combo(
             summary: "Combo execution was cancelled".to_string(),
             tool_calls,
             error: Some("Cancelled".to_string()),
+            summary_thinking: Vec::new(),
         });
     }
 
@@ -812,10 +771,11 @@ async fn execute_combo(
             summary: summary_parts.join("\n"),
             tool_calls,
             error: Some(format!("Combo error: {}", e)),
+            summary_thinking: Vec::new(),
         });
     }
 
-    let success = !failed && exit_code.map(|c| c == 0).unwrap_or(true);
+    let success = !starter_failed && exit_code.map(|c| c == 0).unwrap_or(true);
     let fallback_summary = if summary_parts.is_empty() {
         format!(
             "Combo '{}' completed with {} tool call(s)",
@@ -826,19 +786,36 @@ async fn execute_combo(
         let start = summary_parts.len().saturating_sub(max_lines);
         summary_parts[start..].join("\n")
     };
-    let summary = if cancel_token.is_cancelled() {
-        fallback_summary
+    let (summary, summary_thinking) = if cancel_token.is_cancelled() {
+        (fallback_summary, Vec::new())
     } else {
-        match generate_combo_summary(&mut reply_agent, &combo_name, tool_calls, exit_code, failed)
-            .await
+        match generate_combo_summary(
+            &mut reply_agent,
+            &combo_name,
+            tool_calls,
+            exit_code,
+            tool_failed,
+            cancel_token.clone(),
+            Some(on_event_for_emit.clone()),
+        )
+        .await
         {
-            Ok(summary) => summary,
+            Ok(summary) => (summary.summary, summary.thinking),
             Err(err) => {
                 warn!(?err, "Failed to generate combo summary");
-                fallback_summary
+                (fallback_summary, Vec::new())
             }
         }
     };
+
+    emit_combo_event(
+        &on_event_for_emit,
+        ComboEvent::SummaryDone {
+            name: combo_name.clone(),
+            summary: summary.clone(),
+            thinking: summary_thinking.clone(),
+        },
+    );
 
     emit_combo_transcript(&on_event_for_emit, &combo_name, &reply_agent).await;
 
@@ -846,11 +823,12 @@ async fn execute_combo(
         success,
         summary,
         tool_calls,
-        error: if failed {
+        error: if tool_failed {
             Some("One or more tool calls failed".to_string())
         } else {
             None
         },
+        summary_thinking,
     })
 }
 
@@ -1064,13 +1042,20 @@ fn extract_text_response(message: &Message) -> String {
     }
 }
 
+struct SummaryResponse {
+    summary: String,
+    thinking: Vec<String>,
+}
+
 async fn generate_combo_summary(
     agent: &mut Agent,
     combo_name: &str,
     tool_calls: usize,
     exit_code: Option<i32>,
-    failed: bool,
-) -> Result<String, String> {
+    tool_failed: bool,
+    cancel_token: CancellationToken,
+    on_event: Option<ComboEventCallback>,
+) -> Result<SummaryResponse, String> {
     let mut summary_agent = agent.clone();
     summary_agent.apply_tool_policies(Some(&[]), None);
     let prompt = format!(
@@ -1084,22 +1069,91 @@ Context:\n\
 combo_name: {combo_name}\n\
 tool_calls: {tool_calls}\n\
 exit_code: {exit_code}\n\
-failed: {failed}\n\
+tool_failed: {tool_failed}\n\
 ",
         exit_code = exit_code
             .map(|code| code.to_string())
             .unwrap_or_else(|| "none".to_string()),
     );
-    let response = summary_agent
-        .chat(Message::user(Content::Text(prompt)))
-        .await
-        .map_err(|err| err.to_string())?;
+    let disable_stream = summary_agent.disable_stream_for_current_model();
+    let response = if disable_stream || on_event.is_none() {
+        summary_agent
+            .chat(Message::user(Content::Text(prompt)))
+            .await
+            .map_err(|err| err.to_string())?
+    } else {
+        let stream_name = combo_name.to_string();
+        if let Some(on_event) = on_event.as_ref() {
+            emit_combo_event(
+                on_event,
+                ComboEvent::SummaryStreamReset {
+                    name: stream_name.clone(),
+                },
+            );
+        }
+        let on_event_stream = on_event.clone();
+        summary_agent
+            .chat_stream(
+                Message::user(Content::Text(prompt)),
+                cancel_token,
+                move |update| {
+                    let Some(on_event_stream) = on_event_stream.as_ref() else {
+                        return;
+                    };
+                    match update {
+                        ChatStreamUpdate::Reset => emit_combo_event(
+                            on_event_stream,
+                            ComboEvent::SummaryStreamReset {
+                                name: stream_name.clone(),
+                            },
+                        ),
+                        ChatStreamUpdate::Plain { index, text } => emit_combo_event(
+                            on_event_stream,
+                            ComboEvent::SummaryStream {
+                                name: stream_name.clone(),
+                                index,
+                                kind: ComboStreamKind::Plain,
+                                text,
+                            },
+                        ),
+                        ChatStreamUpdate::Thinking { index, text } => emit_combo_event(
+                            on_event_stream,
+                            ComboEvent::SummaryStream {
+                                name: stream_name.clone(),
+                                index,
+                                kind: ComboStreamKind::Thinking,
+                                text,
+                            },
+                        ),
+                    }
+                },
+            )
+            .await
+            .map_err(|err| err.to_string())?
+    };
     let summary = extract_text_response(&response.message);
     let summary = summary.trim();
     if summary.is_empty() {
         return Err("summary response is empty".to_string());
     }
-    Ok(summary.to_string())
+    let thinking = extract_thinking_blocks(&response.message);
+    Ok(SummaryResponse {
+        summary: summary.to_string(),
+        thinking,
+    })
+}
+
+fn extract_thinking_blocks(message: &Message) -> Vec<String> {
+    match &message.content {
+        Content::Multiple(blocks) => blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Thinking { thinking, .. } if !thinking.is_empty() => Some(thinking.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn build_offload_reply_directive(schemas: &[PromptSchema]) -> String {
@@ -1521,29 +1575,21 @@ fn flush_buffer(
     }
 }
 
-fn format_command_line(command: &str, args: &[String]) -> String {
-    let command = resolve_command_display(command);
-    let mut parts = Vec::with_capacity(args.len() + 1);
-    parts.push(shell_escape(&command));
+fn format_combo_run_command(name: &str, args: &[String]) -> String {
+    let mut parts = Vec::with_capacity(args.len() + 4);
+    parts.push("coco".to_string());
+    parts.push("combo".to_string());
+    parts.push("run".to_string());
+    parts.push(display_combo_arg(name));
     for arg in args {
-        parts.push(shell_escape(arg));
+        parts.push(display_combo_arg(arg));
     }
     parts.join(" ")
 }
 
-fn resolve_command_display(command: &str) -> String {
-    let command_path = std::path::Path::new(command);
-    let workspace_combo_dir = crate::workspace_dir().join(".coco/combos");
-    if let Ok(relative) = command_path.strip_prefix(&workspace_combo_dir) {
-        let display_path = std::path::Path::new(".coco/combos").join(relative);
-        return display_path.to_string_lossy().to_string();
-    }
-    command.to_string()
-}
-
-fn shell_escape(value: &str) -> String {
+fn display_combo_arg(value: &str) -> String {
     if value.is_empty() {
-        return "''".to_string();
+        return "\"\"".to_string();
     }
     if value.bytes().all(|byte| {
         matches!(byte, b'a'..=b'z'
@@ -1553,25 +1599,12 @@ fn shell_escape(value: &str) -> String {
             | b'-'
             | b'.'
             | b'/'
-            | b':'
-            | b'@'
-            | b'+'
-            | b'='
-            | b','
-            | b'%')
+            | b':')
     }) {
         return value.to_string();
     }
-    let mut escaped = String::from("'");
-    for ch in value.chars() {
-        if ch == '\'' {
-            escaped.push_str("'\"'\"'");
-        } else {
-            escaped.push(ch);
-        }
-    }
-    escaped.push('\'');
-    escaped
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 #[cfg(test)]
@@ -1585,6 +1618,7 @@ mod tests {
             summary: "Combo completed".to_string(),
             tool_calls: 3,
             error: None,
+            summary_thinking: Vec::new(),
         };
 
         let json = serde_json::to_value(&output).unwrap();
