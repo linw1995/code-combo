@@ -68,6 +68,12 @@ pub enum AnswerEvent {
         is_user_cancelled: bool,
         output: Final,
     },
+    /// Indicates that concurrent tool executions are starting.
+    /// The handler should wait for all tool results before sending to LLM.
+    PendingToolExecutions {
+        /// Tool IDs that will be executed concurrently.
+        ids: Vec<String>,
+    },
     /// Subagent event (for run_task tool).
     SubagentEvent {
         id: String,
