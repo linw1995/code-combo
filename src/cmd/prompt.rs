@@ -13,12 +13,7 @@ pub async fn handle_ask(prompt: String, schemas: Vec<String>) -> Result<()> {
         schemas.push(default_prompt_schema());
     }
 
-    let Some(client) = SessionSocketClient::from_env()
-        .await
-        .whatever_context("failed to new from env COCO_SESSION_SOCK")?
-    else {
-        whatever!("env COCO_SESSION_SOCK is not set");
-    };
+    let client = SessionSocketClient::require_from_env().await?;
 
     let payload = PromptPayload {
         prompt,
@@ -43,12 +38,7 @@ pub async fn handle_ask(prompt: String, schemas: Vec<String>) -> Result<()> {
 
 pub async fn handle_tell(prompt: String) -> Result<()> {
     let prompt = resolve_prompt(prompt).await?;
-    let Some(client) = SessionSocketClient::from_env()
-        .await
-        .whatever_context("failed to new from env COCO_SESSION_SOCK")?
-    else {
-        whatever!("env COCO_SESSION_SOCK is not set");
-    };
+    let client = SessionSocketClient::require_from_env().await?;
     let payload = PromptPayload {
         prompt,
         thinking: None,
@@ -66,12 +56,7 @@ pub async fn handle_tell(prompt: String) -> Result<()> {
 /// Fields are provided as --field=value format.
 /// Validation is done by the parent process (TUI) which knows the required schemas.
 pub async fn handle_reply(fields: Vec<String>) -> Result<()> {
-    let Some(client) = SessionSocketClient::from_env()
-        .await
-        .whatever_context("failed to new from env COCO_SESSION_SOCK")?
-    else {
-        whatever!("env COCO_SESSION_SOCK is not set");
-    };
+    let client = SessionSocketClient::require_from_env().await?;
 
     let validation = client
         .send_reply_wait_validation(ReplyPayload { fields })
