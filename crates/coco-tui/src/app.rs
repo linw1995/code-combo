@@ -48,7 +48,6 @@ pub struct App {
     // Config
     frame_rate: f64,
     tick_rate: f64,
-    full_refresh_rate: f64,
 }
 
 impl App {
@@ -74,7 +73,6 @@ impl App {
             root,
             frame_rate: 60.0,
             tick_rate: 4.0,
-            full_refresh_rate: 1.0 / 30.0, // every 30 seconds
         })
     }
 
@@ -104,7 +102,6 @@ impl App {
             self.cancellation_token.clone(),
             self.frame_rate,
             self.tick_rate,
-            self.full_refresh_rate,
         );
         self.send_event(Event::Init);
         self.task = tokio::spawn(async {
@@ -181,12 +178,10 @@ impl App {
         cancellation_token: CancellationToken,
         frame_rate: f64,
         tick_rate: f64,
-        full_refresh_rate: f64,
     ) {
         let mut event_stream = EventStream::new();
         let mut tick_interval = interval(Duration::from_secs_f64(1.0 / tick_rate));
         let mut render_interval = interval(Duration::from_secs_f64(1.0 / frame_rate));
-        let mut full_refresh_interval = interval(Duration::from_secs_f64(1.0 / full_refresh_rate));
 
         loop {
             let event = tokio::select! {
@@ -195,7 +190,6 @@ impl App {
                 },
                 _ = tick_interval.tick() => Event::Tick,
                 _ = render_interval.tick() => Event::Render,
-                _ = full_refresh_interval.tick() => Event::FullRefresh,
                 crossterm_event = event_stream.next().fuse() => match crossterm_event {
                     Some(Ok(event)) => match event {
                         CrosstermEvent::Key(key) => Event::Key(key),
@@ -281,16 +275,19 @@ impl App {
     }
 
     fn render(&mut self) -> Result<()> {
+        // If a full refresh is requested, first do a blank draw to reset
+        // ratatui's internal buffer state, then do the actual render.
+        // This ensures the diff algorithm starts from a clean slate.
+        if self.force_full_refresh {
+            self.terminal
+                .draw(|frame| {
+                    frame.render_widget(ratatui::widgets::Clear, frame.area());
+                })
+                .whatever_context("failed to clear terminal for full refresh")?;
+        }
+
         self.terminal
             .draw(|frame| {
-                // If a full refresh is requested, first render a blank block
-                // to clear any ratatui diff artifacts. Then render the actual content.
-                // This clears any leftover characters from the diff algorithm.
-                if self.force_full_refresh {
-                    let blank = ratatui::widgets::Clear;
-                    frame.render_widget(blank, frame.area());
-                }
-
                 if let Err(err) = self.root.draw(frame, frame.area()) {
                     error!(?err, "terminal draw error");
                 }
