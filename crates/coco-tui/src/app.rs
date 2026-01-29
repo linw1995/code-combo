@@ -259,6 +259,9 @@ impl App {
             }
             match action {
                 Action::Quit => self.should_quit = true,
+                Action::CommandPalette(CommandPaletteAction::ForceQuit) => {
+                    self.should_quit = true;
+                }
                 Action::Render => self.render()?,
                 Action::CommandPalette(CommandPaletteAction::Shell) => {
                     self.root.handle_action(&action);

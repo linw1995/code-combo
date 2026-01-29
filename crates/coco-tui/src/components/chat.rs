@@ -2711,6 +2711,9 @@ impl Component for Chat<'static> {
                 CommandPaletteAction::Shell => {
                     self.update_focus(Focus::InputBlur);
                 }
+                CommandPaletteAction::ForceQuit => {
+                    // Force quit is handled at app level
+                }
             },
             Action::SubmitPrompt(prompt) => {
                 if self.state.state == ChatState::Ready {

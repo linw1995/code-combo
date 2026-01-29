@@ -31,6 +31,7 @@ const COMMAND_REGENERATE_SUMMARY: &str = "Regenerate Session Summary";
 const COMMAND_SWITCH_THEME: &str = "Switch Theme";
 const COMMAND_SWITCH_MODEL: &str = "Switch Model";
 const COMMAND_SHELL: &str = "Shell";
+const COMMAND_FORCE_QUIT: &str = "Force Quit";
 
 const BREADCRUMB_ROOT: &str = "Command Palette";
 const BREADCRUMB_SESSIONS: &str = "Sessions";
@@ -322,6 +323,10 @@ impl CommandPalette {
                 name: COMMAND_SHELL.to_string(),
                 shortcut: Some("<C-x>".to_string()),
             },
+            Command {
+                name: COMMAND_FORCE_QUIT.to_string(),
+                shortcut: Some("<C-q>".to_string()),
+            },
         ]
     }
 
@@ -583,6 +588,7 @@ impl CommandPalette {
                     Some(COMMAND_NEW_SESSION) => Some(CommandPaletteAction::NewSession),
                     Some(COMMAND_TRANSCRIPT) => Some(CommandPaletteAction::Transcript),
                     Some(COMMAND_SHELL) => Some(CommandPaletteAction::Shell),
+                    Some(COMMAND_FORCE_QUIT) => Some(CommandPaletteAction::ForceQuit),
                     Some(unknown) => {
                         warn!(?unknown, "unknown command");
                         None
@@ -681,6 +687,7 @@ impl Component for CommandPalette {
                 None
             }
             (Main, KM::CONTROL, Char('x' | 'X')) => Some(CommandPaletteAction::Shell),
+            (Main, KM::CONTROL, Char('q' | 'Q')) => Some(CommandPaletteAction::ForceQuit),
             (_, KM::NONE, Char('k')) => {
                 self.command_list.select_prev();
                 None
