@@ -388,6 +388,23 @@ fn build_combo_from_session(
     Ok(parse_combo(command))
 }
 
+/// Helper macro to send a failed event and return early with the error.
+/// Used within the execute_command async block where `event_tx` and `command` are in scope.
+macro_rules! fail_early {
+    ($event_tx:expr, $command:expr, $error:expr) => {{
+        $event_tx
+            .send(StarterEvent::Failed {
+                reason: $error.to_string(),
+            })
+            .await
+            .ok();
+        return Starter {
+            path: $command,
+            combo: Err($error),
+        };
+    }};
+}
+
 fn execute_command(
     command: String,
     args: Vec<String>,
@@ -416,34 +433,14 @@ fn execute_command(
         let mut session_server = match _session_env_guard.as_ref() {
             Some(env) => match spawn_session_server(env, discovery, event_tx.clone()).await {
                 Ok(task) => Some(task),
-                Err(error) => {
-                    event_tx
-                        .send(StarterEvent::Failed {
-                            reason: error.to_string(),
-                        })
-                        .await
-                        .ok();
-                    return Starter {
-                        path: command,
-                        combo: Err(error),
-                    };
-                }
+                Err(error) => fail_early!(event_tx, command, error),
             },
             None => {
                 let error = InvalidSnafu {
                     reason: "session env is required for starter execution".to_string(),
                 }
                 .build();
-                event_tx
-                    .send(StarterEvent::Failed {
-                        reason: error.to_string(),
-                    })
-                    .await
-                    .ok();
-                return Starter {
-                    path: command,
-                    combo: Err(error),
-                };
+                fail_early!(event_tx, command, error);
             }
         };
         let event_tx = event_tx;
@@ -467,16 +464,7 @@ fn execute_command(
                     }
                     .build(),
                 };
-                event_tx
-                    .send(StarterEvent::Failed {
-                        reason: error.to_string(),
-                    })
-                    .await
-                    .ok();
-                return Starter {
-                    path: command,
-                    combo: Err(error),
-                };
+                fail_early!(event_tx, command, error);
             }
         };
 
@@ -564,33 +552,13 @@ fn execute_command(
                         task.shutdown();
                         match task.handle.await {
                             Ok(Ok(state)) => Some(state),
-                            Ok(Err(err)) => {
-                                event_tx
-                                    .send(StarterEvent::Failed {
-                                        reason: err.to_string(),
-                                    })
-                                    .await
-                                    .ok();
-                                return Starter {
-                                    path: command,
-                                    combo: Err(err),
-                                };
-                            }
+                            Ok(Err(err)) => fail_early!(event_tx, command, err),
                             Err(err) => {
                                 let error = InvalidSnafu {
                                     reason: format!("session server join error: {err}"),
                                 }
                                 .build();
-                                event_tx
-                                    .send(StarterEvent::Failed {
-                                        reason: error.to_string(),
-                                    })
-                                    .await
-                                    .ok();
-                                return Starter {
-                                    path: command,
-                                    combo: Err(error),
-                                };
+                                fail_early!(event_tx, command, error);
                             }
                         }
                     } else {
