@@ -93,6 +93,7 @@ pub enum CommandPaletteAction {
     SwitchTheme(String),
     SwitchModel(Option<String>),
     Shell,
+    ForceQuit,
 }
 
 impl From<CommandPaletteAction> for Action {
