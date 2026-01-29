@@ -85,6 +85,8 @@ impl Messages {
     }
 
     pub fn extend(&mut self, iter: impl Iterator<Item = Message>) {
+        // Auto-scroll to bottom when new messages are added
+        self.scroll_to_bottom();
         let mut messages = self.messages.write();
         for message in iter {
             if let Some(last) = messages.last_mut() {
@@ -95,6 +97,8 @@ impl Messages {
     }
 
     pub fn push(&mut self, message: Message) {
+        // Auto-scroll to bottom when new message is added
+        self.scroll_to_bottom();
         let mut messages = self.messages.write();
         if let Some(last) = messages.last_mut() {
             last.handle_action(&Action::Blur);
@@ -174,6 +178,8 @@ impl Messages {
             self.stream_map.insert(index, idx);
         }
         self.stream_dirty = true;
+        // Auto-scroll to bottom when streaming text is added
+        self.scroll_to_bottom();
     }
 
     pub fn collapse_thinking(&mut self) {
@@ -324,6 +330,10 @@ impl Messages {
     pub fn scroll_down(&mut self, offset: u16) {
         let mut value = self.offset.write();
         *value = value.saturating_sub(offset);
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        *self.offset.write() = 0;
     }
 
     pub fn selected_idx(&self) -> Option<usize> {
@@ -1601,6 +1611,114 @@ mod tests {
         expected.set_style(Rect::new(1, 1, 6, 1), role_style);
         let text_style = theme().ui.text;
         expected.set_style(Rect::new(9, 1, 5, 1), text_style);
+
+        assert_eq!(terminal.backend().buffer(), &expected);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auto_scroll_to_bottom_after_push() {
+        // Test that Messages automatically scrolls to bottom when a new message is pushed
+        let mut app = Messages::default();
+
+        // Add several messages to cause overflow
+        app.extend(
+            [
+                Message::user(Plain::new("Msg 1".to_string()).into()),
+                Message::user(Plain::new("Msg 2".to_string()).into()),
+                Message::user(Plain::new("Msg 3".to_string()).into()),
+                Message::user(Plain::new("Msg 4".to_string()).into()),
+            ]
+            .into_iter(),
+        );
+
+        // Render to trigger offset calculation
+        let mut terminal = Terminal::new(TestBackend::new(17, 6)).unwrap();
+        terminal
+            .draw(|frame| app.draw(frame, frame.area()).unwrap())
+            .unwrap();
+
+        // Verify offset is at bottom (0 means at bottom)
+        assert_eq!(
+            app.offset.get(),
+            0,
+            "Should auto-scroll to bottom after push"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scroll_to_bottom_method() {
+        // Test scroll_to_bottom() method explicitly
+        let mut app = Messages::default();
+
+        // Add messages and scroll up
+        app.extend(
+            [
+                Message::user(Plain::new("First".to_string()).into()),
+                Message::user(Plain::new("Second".to_string()).into()),
+                Message::user(Plain::new("Third".to_string()).into()),
+            ]
+            .into_iter(),
+        );
+
+        // After extend, should be at bottom (offset = 0)
+        let mut terminal = Terminal::new(TestBackend::new(17, 5)).unwrap();
+        terminal
+            .draw(|frame| app.draw(frame, frame.area()).unwrap())
+            .unwrap();
+        assert_eq!(app.offset.get(), 0, "Should start at bottom");
+
+        // Scroll up
+        app.scroll_up(1);
+
+        terminal
+            .draw(|frame| app.draw(frame, frame.area()).unwrap())
+            .unwrap();
+        assert!(app.offset.get() > 0, "Should have scrolled up");
+
+        // Now scroll to bottom
+        app.scroll_to_bottom();
+
+        terminal
+            .draw(|frame| app.draw(frame, frame.area()).unwrap())
+            .unwrap();
+
+        // Should be back at bottom
+        assert_eq!(
+            app.offset.get(),
+            0,
+            "scroll_to_bottom should reset offset to 0"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auto_scroll_after_stream_text() {
+        // Test that streaming text also triggers auto-scroll
+        let mut app = Messages::default();
+
+        // Add a message and simulate streaming
+        app.append_stream_text(0, BotStreamKind::Plain, "Hello".to_string());
+        app.append_stream_text(0, BotStreamKind::Plain, " world".to_string());
+        app.append_stream_text(0, BotStreamKind::Plain, "!".to_string());
+
+        let mut terminal = Terminal::new(TestBackend::new(17, 4)).unwrap();
+        terminal
+            .draw(|frame| app.draw(frame, frame.area()).unwrap())
+            .unwrap();
+
+        // Should show the streamed text at bottom
+        let mut expected = Buffer::with_lines(vec![
+            "                 ",
+            "│ Bot:   Hello   ",
+            "│        world!  ",
+            "│                ",
+        ]);
+        let border_style = theme().ui.message_border_inactive;
+        expected.set_style(Rect::new(0, 1, 1, 3), border_style);
+        let role_style = theme().ui.bot_role;
+        expected.set_style(Rect::new(1, 1, 6, 1), role_style);
+        let text_style = theme().ui.text;
+        expected.set_style(Rect::new(9, 1, 5, 1), text_style);
+        expected.set_style(Rect::new(9, 2, 6, 1), text_style);
 
         assert_eq!(terminal.backend().buffer(), &expected);
     }
