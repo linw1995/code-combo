@@ -55,7 +55,9 @@ impl ShortcutHintsPanel {
             horizontal: 3,
             vertical: 1,
         };
-        let width = 120 + (margin_background.horizontal + margin_content.horizontal) * 2;
+        // Adaptive width: prefer 132 but shrink to fit screen with minimal margins
+        let preferred_width = 120 + (margin_background.horizontal + margin_content.horizontal) * 2;
+        let width = preferred_width.min(area.width.saturating_sub(4));
         let height = (self.hints.hidden.len() as u16)
             .saturating_add(4 + margin_background.vertical * 2 + margin_content.vertical * 2)
             .min(area.height.saturating_sub(2))
