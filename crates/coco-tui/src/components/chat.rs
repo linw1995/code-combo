@@ -1282,7 +1282,8 @@ impl Chat<'static> {
 
     fn input_blur_shortcut_hints(&self) -> ShortcutHints {
         let mut hints = ShortcutHints::default();
-        hints.push_visible(&[("Focus", "CR")]);
+        hints.push_visible(&[("Submit", "CR")]);
+        hints.push_visible(&[("Edit", "i")]);
         hints.push_visible(&[("Commands", "C-p")]);
         hints.push_visible(&[("Up", "k"), ("Down", "j")]);
         hints.push_hidden(&[("Thinking", "C-r")]);
@@ -2415,7 +2416,8 @@ impl Component for Chat<'static> {
         match (focus, key.modifiers, key.code) {
             // Focus switching
             (Input, KM::NONE, Esc) => self.update_focus(InputBlur),
-            (InputBlur, KM::NONE, Enter) => self.update_focus(Input),
+            (InputBlur, KM::NONE, Enter) => self.on_submit(),
+            (InputBlur, KM::NONE, Char('i')) => self.update_focus(Input),
             (InputBlur, KM::CONTROL, Char('p')) => {
                 let config_dir = global::config_sync().config_dir;
                 let last_model_override = match load_runtime_overrides(&config_dir) {
