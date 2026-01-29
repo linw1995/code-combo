@@ -32,8 +32,13 @@ impl ShortcutHintsPanel {
         self.hints = hints;
     }
 
-    pub fn decorate_block_top<'a>(&self, block: Block<'a>, hints: &ShortcutHints) -> Block<'a> {
-        self.apply_shortcut_hints_top(block, hints)
+    pub fn decorate_block_top<'a>(
+        &self,
+        block: Block<'a>,
+        hints: &ShortcutHints,
+        is_input_focused: bool,
+    ) -> Block<'a> {
+        self.apply_shortcut_hints_top(block, hints, is_input_focused)
     }
 
     pub fn decorate_block_bottom<'a>(&self, block: Block<'a>, hints: &ShortcutHints) -> Block<'a> {
@@ -113,12 +118,15 @@ impl ShortcutHintsPanel {
         &self,
         mut block: Block<'a>,
         hints: &ShortcutHints,
+        is_input_focused: bool,
     ) -> Block<'a> {
         for group in &hints.visible {
             block = block.title_top(shortcuts_desc(group));
         }
         if hints.has_hidden() {
-            block = block.title_top(shortcuts_desc(&[("Help", "?")]));
+            // Input focus requires Esc to blur first before pressing ?
+            let help_key = if is_input_focused { "Esc+?" } else { "?" };
+            block = block.title_top(shortcuts_desc(&[("Help", help_key)]));
         }
         block
     }

@@ -51,7 +51,6 @@ impl Input<'_> {
         let mut hints = ShortcutHints::default();
         hints.push_visible(&[("Blur", "Esc")]);
         hints.push_visible(&[("Submit", "A-CR")]);
-        hints.push_visible(&[("Help", "Esc+?")]);
         hints.push_hidden(&[("Thinking", "C-r")]);
         hints.push_hidden(&[("Auto Accept Edits", "S-Tab")]);
         hints.push_hidden(&[("Refresh", "C-l")]);

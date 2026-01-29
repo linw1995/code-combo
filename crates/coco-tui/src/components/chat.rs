@@ -1374,7 +1374,9 @@ impl Chat<'static> {
         };
         block = match focus {
             Focus::CommandPalette | Focus::ShortcutHints => block,
-            _ => self.shortcut_hints.decorate_block_top(block, &hints),
+            _ => self
+                .shortcut_hints
+                .decorate_block_top(block, &hints, focus == Focus::Input),
         };
 
         // In compact mode, move context usage and model to top for balanced display
