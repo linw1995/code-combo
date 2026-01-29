@@ -117,6 +117,16 @@ pub fn signal_dirty() {
     event_tx().send(Event::Dirty).ok();
 }
 
+/// Signal full refresh to clear screen artifacts.
+///
+/// This function sends a `FullRefresh` event to trigger a complete redraw of the UI,
+/// clearing any residual character artifacts left by the ratatui diff algorithm.
+/// Users can trigger this manually via Ctrl-L when visual artifacts appear.
+#[inline]
+pub fn signal_full_refresh() {
+    event_tx().send(Event::FullRefresh).ok();
+}
+
 /// `State` is modify-aware to signal the Dirty event for re-rendering.
 ///
 /// This struct wraps any type `T` and provides a mechanism to automatically

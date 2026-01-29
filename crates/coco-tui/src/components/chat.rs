@@ -1288,6 +1288,7 @@ impl Chat<'static> {
         hints.push_visible(&[("Up", "k"), ("Down", "j")]);
         hints.push_hidden(&[("Thinking", "C-r")]);
         hints.push_hidden(&[("Auto Accept Edits", "S-Tab")]);
+        hints.push_hidden(&[("Refresh", "C-l")]);
         hints
     }
 
@@ -1304,6 +1305,7 @@ impl Chat<'static> {
         hints.push_hidden(&[("Scroll+ Up", "C-u"), ("Down", "C-d")]);
         hints.push_hidden(&[("Thinking", "C-r")]);
         hints.push_hidden(&[("Auto Accept Edits", "S-Tab")]);
+        hints.push_hidden(&[("Refresh", "C-l")]);
         hints
     }
 
@@ -1318,6 +1320,7 @@ impl Chat<'static> {
         hints.push_visible(&[("Up", "k"), ("Down", "j")]);
         hints.push_hidden(&[("Scroll Up", "C-y"), ("Down", "C-e")]);
         hints.push_hidden(&[("Scroll+ Up", "C-u"), ("Down", "C-d")]);
+        hints.push_hidden(&[("Refresh", "C-l")]);
         hints
     }
 
@@ -2399,6 +2402,18 @@ impl Component for Chat<'static> {
             )
         {
             self.toggle_thinking();
+            return;
+        }
+        // Ctrl-L: Force full screen refresh to clear residual artifacts
+        if matches!(
+            key,
+            KeyEvent {
+                code: Char('l') | Char('L'),
+                modifiers: KM::CONTROL,
+                ..
+            }
+        ) {
+            global::signal_full_refresh();
             return;
         }
         if self.view == ViewMode::Transcript {
