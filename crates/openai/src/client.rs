@@ -90,6 +90,34 @@ impl Default for RetryConfig {
 
 type Result<T> = std::result::Result<T, Whatever>;
 
+/// Helper macro that wraps an async operation with retry logic, including backoff setup,
+/// notification callbacks, and final error transformation.
+macro_rules! with_retry {
+    ($retry_config:expr, $log_context:literal, $operation:expr) => {{
+        let notify = $retry_config.notifier.clone();
+        let max_attempts = $retry_config.max_attempts;
+        let mut attempts = 0usize;
+        let backoff = build_backoff($retry_config);
+        let result = $operation
+            .retry(backoff)
+            .when(OpenAIRequestError::is_retryable)
+            .notify(move |err, dur| {
+                attempts = attempts.saturating_add(1);
+                if let Some(notify) = notify.as_ref() {
+                    notify(RetryAttempt {
+                        attempt: attempts,
+                        max_attempts,
+                        delay: dur,
+                        error: err.to_string(),
+                    });
+                }
+                warn!(error = %err, delay = ?dur, concat!("retrying openai ", $log_context, " request"));
+            })
+            .await;
+        result.map_err(OpenAIRequestError::into_whatever)
+    }};
+}
+
 impl Client {
     pub fn new(
         base_url: &str,
@@ -155,51 +183,30 @@ impl Client {
             .join(self.api_path("chat/completions"))
             .whatever_context("build chat completions url")?;
         let cli = self.cli.clone();
-        let request = request;
-        let url_clone = url.clone();
-        let notify = retry.notifier.clone();
-        let max_attempts = retry.max_attempts;
-        let mut attempts = 0usize;
-        let backoff = build_backoff(retry);
-        let result =
-            (|| {
-                let request = request.clone();
-                let url = url_clone.clone();
-                let cli = cli.clone();
-                async move {
-                    let resp =
-                        cli.post(url).json(&request).send().await.map_err(|err| {
-                            OpenAIRequestError::transport("chat completions", err)
-                        })?;
-                    let status = resp.status();
-                    if !status.is_success() {
-                        let body = resp
-                            .text()
-                            .await
-                            .unwrap_or_else(|err| format!("failed to read error response: {err}"));
-                        return Err(OpenAIRequestError::http_status(status, body));
-                    }
-                    resp.json::<ChatCompletionResponse>()
+        with_retry!(retry, "chat completions", || {
+            let request = request.clone();
+            let url = url.clone();
+            let cli = cli.clone();
+            async move {
+                let resp = cli
+                    .post(url)
+                    .json(&request)
+                    .send()
+                    .await
+                    .map_err(|err| OpenAIRequestError::transport("chat completions", err))?;
+                let status = resp.status();
+                if !status.is_success() {
+                    let body = resp
+                        .text()
                         .await
-                        .map_err(|err| OpenAIRequestError::decode("chat completions", err))
+                        .unwrap_or_else(|err| format!("failed to read error response: {err}"));
+                    return Err(OpenAIRequestError::http_status(status, body));
                 }
-            })
-            .retry(backoff)
-            .when(OpenAIRequestError::is_retryable)
-            .notify(move |err, dur| {
-                attempts = attempts.saturating_add(1);
-                if let Some(notify) = notify.as_ref() {
-                    notify(RetryAttempt {
-                        attempt: attempts,
-                        max_attempts,
-                        delay: dur,
-                        error: err.to_string(),
-                    });
-                }
-                warn!(error = %err, delay = ?dur, "retrying openai chat completions request");
-            })
-            .await;
-        result.map_err(OpenAIRequestError::into_whatever)
+                resp.json::<ChatCompletionResponse>()
+                    .await
+                    .map_err(|err| OpenAIRequestError::decode("chat completions", err))
+            }
+        })
     }
 
     pub async fn chat_completions_stream(
@@ -217,15 +224,9 @@ impl Client {
             .join(self.api_path("chat/completions"))
             .whatever_context("build chat completions stream url")?;
         let cli = self.cli.clone();
-        let request = request;
-        let url_clone = url.clone();
-        let notify = retry.notifier.clone();
-        let max_attempts = retry.max_attempts;
-        let mut attempts = 0usize;
-        let backoff = build_backoff(retry);
-        let result = (|| {
+        with_retry!(retry, "chat completions stream", || {
             let request = request.clone();
-            let url = url_clone.clone();
+            let url = url.clone();
             let cli = cli.clone();
             async move {
                 let resp =
@@ -243,22 +244,6 @@ impl Client {
                 Ok(ChatCompletionStream::new(resp))
             }
         })
-        .retry(backoff)
-        .when(OpenAIRequestError::is_retryable)
-        .notify(move |err, dur| {
-            attempts = attempts.saturating_add(1);
-            if let Some(notify) = notify.as_ref() {
-                notify(RetryAttempt {
-                    attempt: attempts,
-                    max_attempts,
-                    delay: dur,
-                    error: err.to_string(),
-                });
-            }
-            warn!(error = %err, delay = ?dur, "retrying openai chat completions stream request");
-        })
-        .await;
-        result.map_err(OpenAIRequestError::into_whatever)
     }
 }
 
