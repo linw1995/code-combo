@@ -1334,7 +1334,15 @@ impl Chat<'static> {
         }
     }
 
-    fn input_block_with_dynamic_titles<'a>(&'a self, mut block: Block<'a>) -> Block<'a> {
+    fn input_block_with_dynamic_titles<'a>(
+        &'a self,
+        mut block: Block<'a>,
+        width: u16,
+    ) -> Block<'a> {
+        // Threshold for compact mode: move some indicators from bottom to top
+        const COMPACT_WIDTH: u16 = 100;
+        let compact = width < COMPACT_WIDTH;
+
         block = block.title_top(Line::from(""));
         let focus = self.focus_for_shortcut_hints();
         let hints = match focus {
@@ -1347,20 +1355,33 @@ impl Chat<'static> {
             Focus::CommandPalette | Focus::ShortcutHints => block,
             _ => self.shortcut_hints.decorate_block_top(block, &hints),
         };
+
+        // In compact mode, move context usage and model to top for balanced display
+        if compact {
+            if let Some(line) = self.context_usage_indicator() {
+                block = block.title_top(line);
+            }
+            block = block.title_top(self.model_indicator());
+        }
+
         block = block
             .title_bottom(Line::from(""))
             .title_bottom(self.widget_state_indicator());
         if let Some(line) = self.retry_indicator_line() {
             block = block.title_bottom(line);
         }
+
+        // In normal mode, model and context stay at bottom
+        if !compact {
+            block = block.title_bottom(self.model_indicator());
+        }
         block = block
-            .title_bottom(self.model_indicator())
             .title_bottom(self.auto_accept_indicator())
             .title_bottom(self.thinking_indicator());
         if let Some(line) = self.ctrl_c_reminder_line() {
             block = block.title_bottom(line);
         }
-        if let Some(line) = self.context_usage_indicator() {
+        if !compact && let Some(line) = self.context_usage_indicator() {
             block = block.title_bottom(line);
         }
         block
@@ -1379,7 +1400,7 @@ impl Chat<'static> {
                 .border_style(theme.ui.block_border_inactive)
         };
 
-        block = self.input_block_with_dynamic_titles(block);
+        block = self.input_block_with_dynamic_titles(block, area.width);
         frame.render_widget(&block, area);
         self.input.draw(frame, block.inner(area))?;
 
