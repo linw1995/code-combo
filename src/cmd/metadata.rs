@@ -7,12 +7,7 @@ pub async fn handle_metadata(fields: Vec<String>) -> Result<()> {
     let payload = parse_metadata_fields(&fields)?;
     let name = payload.name.clone();
 
-    let Some(client) = SessionSocketClient::from_env()
-        .await
-        .whatever_context("failed to new from env COCO_SESSION_SOCK")?
-    else {
-        whatever!("env COCO_SESSION_SOCK is not set");
-    };
+    let client = SessionSocketClient::require_from_env().await?;
 
     let MetadataResponse { discovery } = client
         .send_metadata_wait_response(payload)

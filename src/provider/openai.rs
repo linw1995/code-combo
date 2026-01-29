@@ -112,14 +112,7 @@ fn build_request(
     if let Some(system_prompt) = system_prompt
         && !system_prompt.trim().is_empty()
     {
-        messages.push(openai_api::ChatMessage {
-            role: openai_api::Role::System,
-            content: Some(system_prompt.to_string()),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        });
+        messages.push(openai_api::ChatMessage::system(system_prompt));
     }
     messages.extend(convert_messages(conversations)?);
     let tools = tools
@@ -190,14 +183,7 @@ fn convert_user_message(
     match content {
         Content::Text(value) => {
             if !value.is_empty() {
-                output.push(openai_api::ChatMessage {
-                    role: openai_api::Role::User,
-                    content: Some(value),
-                    reasoning_content: None,
-                    tool_calls: None,
-                    tool_call_id: None,
-                    name: None,
-                });
+                output.push(openai_api::ChatMessage::user(value));
             }
             return Ok(());
         }
@@ -217,25 +203,11 @@ fn convert_user_message(
         }
     }
     if !text.is_empty() {
-        output.push(openai_api::ChatMessage {
-            role: openai_api::Role::User,
-            content: Some(text),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        });
+        output.push(openai_api::ChatMessage::user(text));
     }
     for (tool_use_id, result_content) in tool_results {
         let content = content_to_text(&result_content);
-        output.push(openai_api::ChatMessage {
-            role: openai_api::Role::Tool,
-            content: Some(content),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: Some(tool_use_id),
-            name: None,
-        });
+        output.push(openai_api::ChatMessage::tool_result(tool_use_id, content));
     }
     Ok(())
 }
@@ -250,14 +222,7 @@ fn convert_assistant_message(
     match content {
         Content::Text(value) => {
             if !value.is_empty() {
-                output.push(openai_api::ChatMessage {
-                    role: openai_api::Role::Assistant,
-                    content: Some(value),
-                    reasoning_content: None,
-                    tool_calls: None,
-                    tool_call_id: None,
-                    name: None,
-                });
+                output.push(openai_api::ChatMessage::assistant(value));
             }
             return Ok(());
         }

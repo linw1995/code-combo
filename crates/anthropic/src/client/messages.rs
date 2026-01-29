@@ -639,6 +639,36 @@ struct StreamErrorEvent {
     error: StreamErrorDetail,
 }
 
+/// Execute an operation with retry logic, notification, and error conversion.
+///
+/// This macro reduces boilerplate for setting up retry configuration,
+/// notification callbacks, and final error transformation.
+macro_rules! with_retry {
+    ($retry_config:expr, $log_context:literal, $operation:expr) => {{
+        let notify = $retry_config.notifier.clone();
+        let max_attempts = $retry_config.max_attempts;
+        let mut attempts = 0usize;
+        let backoff = build_backoff($retry_config);
+        let result = $operation
+            .retry(backoff)
+            .when(AnthropicRequestError::is_retryable)
+            .notify(move |err, dur| {
+                attempts = attempts.saturating_add(1);
+                if let Some(notify) = notify.as_ref() {
+                    notify(RetryAttempt {
+                        attempt: attempts,
+                        max_attempts,
+                        delay: dur,
+                        error: err.to_string(),
+                    });
+                }
+                warn!(error = %err, delay = ?dur, concat!("retrying anthropic ", $log_context, " request"));
+            })
+            .await;
+        result.map_err(AnthropicRequestError::into_whatever)
+    }};
+}
+
 pub async fn messages_stream(
     client: &reqwest::Client,
     base_url: &Url,
@@ -652,11 +682,8 @@ pub async fn messages_stream(
     let body = serde_json::to_string(&req).whatever_context("encode request error")?;
     let client = client.clone();
     let url_clone = url.clone();
-    let notify = retry_config.notifier.clone();
-    let max_attempts = retry_config.max_attempts;
-    let mut attempts = 0usize;
-    let backoff = build_backoff(retry_config);
-    let result = (|| {
+
+    with_retry!(retry_config, "messages stream", || {
         let body = body.clone();
         let url = url_clone.clone();
         let client = client.clone();
@@ -685,26 +712,6 @@ pub async fn messages_stream(
             Ok(MessagesStream::new(resp))
         }
     })
-    .retry(backoff)
-    .when(AnthropicRequestError::is_retryable)
-    .notify(move |err, dur| {
-        attempts = attempts.saturating_add(1);
-        if let Some(notify) = notify.as_ref() {
-            notify(RetryAttempt {
-                attempt: attempts,
-                max_attempts,
-                delay: dur,
-                error: err.to_string(),
-            });
-        }
-        warn!(
-            error = %err,
-            delay = ?dur,
-            "retrying anthropic messages stream request"
-        );
-    })
-    .await;
-    result.map_err(AnthropicRequestError::into_whatever)
 }
 
 pub async fn messages(
@@ -719,11 +726,8 @@ pub async fn messages(
     let body = serde_json::to_string(&req).whatever_context("encode request error")?;
     let client = client.clone();
     let url_clone = url.clone();
-    let notify = retry_config.notifier.clone();
-    let max_attempts = retry_config.max_attempts;
-    let mut attempts = 0usize;
-    let backoff = build_backoff(retry_config);
-    let result = (|| {
+
+    with_retry!(retry_config, "messages", || {
         let body = body.clone();
         let url = url_clone.clone();
         let client = client.clone();
@@ -752,22 +756,6 @@ pub async fn messages(
                 .map_err(|err| AnthropicRequestError::decode("messages", err))
         }
     })
-    .retry(backoff)
-    .when(AnthropicRequestError::is_retryable)
-    .notify(move |err, dur| {
-        attempts = attempts.saturating_add(1);
-        if let Some(notify) = notify.as_ref() {
-            notify(RetryAttempt {
-                attempt: attempts,
-                max_attempts,
-                delay: dur,
-                error: err.to_string(),
-            });
-        }
-        warn!(error = %err, delay = ?dur, "retrying anthropic messages request");
-    })
-    .await;
-    result.map_err(AnthropicRequestError::into_whatever)
 }
 
 fn format_error_message(status: StatusCode, body: &str) -> String {

@@ -349,6 +349,21 @@ impl SessionSocketClient {
         Self::from_env_key(MCP_SOCKET_ENV).await
     }
 
+    /// Get the session socket client from environment, returning an error if not set.
+    ///
+    /// This is a convenience method that combines `from_env()` with an error
+    /// for the missing environment variable case.
+    pub async fn require_from_env() -> crate::error::Result<Self> {
+        use snafu::prelude::*;
+        let Some(client) = Self::from_env()
+            .await
+            .whatever_context("failed to connect to COCO_SESSION_SOCK")?
+        else {
+            whatever!("env COCO_SESSION_SOCK is not set");
+        };
+        Ok(client)
+    }
+
     async fn from_env_key(key: &str) -> ClientResult<Option<Self>> {
         match std::env::var_os(key) {
             Some(path) => Ok(Some(Self::connect(path).await?)),

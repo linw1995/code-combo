@@ -27,12 +27,7 @@ pub async fn handle_record(wrap_result: bool, command: Vec<String>) -> Result<()
     ensure_whatever!(!command.is_empty(), "command is required");
     let exec_command = normalize_command(&command);
 
-    let client = SessionSocketClient::from_env()
-        .await
-        .whatever_context("failed to new from env COCO_SESSION_SOCK")?;
-    let Some(client) = client else {
-        whatever!("env COCO_SESSION_SOCK is not set");
-    };
+    let client = SessionSocketClient::require_from_env().await?;
     let started_at = OffsetDateTime::now_utc().unix_timestamp();
     let mut session = Some(
         client
