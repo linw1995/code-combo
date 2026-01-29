@@ -42,10 +42,15 @@ impl Input<'_> {
         ans
     }
 
+    /// Returns the number of lines in the textarea.
+    pub fn line_count(&self) -> usize {
+        self.textarea.lines().len().max(1)
+    }
+
     pub fn shortcut_hints(&self) -> ShortcutHints {
         let mut hints = ShortcutHints::default();
         hints.push_visible(&[("Blur", "Esc")]);
-        hints.push_visible(&[("Submit", "CR")]);
+        hints.push_visible(&[("Submit", "A-CR")]);
         hints.push_hidden(&[("Thinking", "C-r")]);
         hints.push_hidden(&[("Auto Accept Edits", "S-Tab")]);
         hints
