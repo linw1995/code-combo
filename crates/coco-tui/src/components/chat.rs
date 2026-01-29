@@ -217,14 +217,22 @@ enum TranscriptScope {
 const CTRL_C_WINDOW: Duration = Duration::from_secs(2);
 const SESSION_SUMMARY_MAX_LEN: usize = 80;
 const NOTIFY_TITLE: &str = "coco";
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ExitShortcut {
+    CtrlC,
+    CtrlQ,
+}
+
 #[derive(Debug, Default)]
 struct CancellationGuard {
     last_hit: State<Option<Instant>>,
+    last_shortcut: State<Option<ExitShortcut>>,
     cancel_token: Option<CancellationToken>,
 }
 
 impl CancellationGuard {
-    pub fn try_fire(&mut self) -> bool {
+    pub fn try_fire(&mut self, shortcut: ExitShortcut) -> bool {
         let now = Instant::now();
         if let Some(last) = self.last_hit.get()
             && now.duration_since(last) <= CTRL_C_WINDOW
@@ -236,12 +244,14 @@ impl CancellationGuard {
         }
 
         *self.last_hit.write() = Some(now);
+        *self.last_shortcut.write() = Some(shortcut);
 
         false
     }
 
     pub fn reset(&mut self) {
         *self.last_hit.write() = None;
+        *self.last_shortcut.write() = None;
     }
 
     pub fn on_trick(&mut self) {
@@ -255,6 +265,10 @@ impl CancellationGuard {
 
     pub fn is_armed(&self) -> bool {
         self.last_hit.is_some()
+    }
+
+    pub fn last_shortcut(&self) -> Option<ExitShortcut> {
+        self.last_shortcut.get()
     }
 
     pub fn token(&mut self) -> CancellationToken {
@@ -1194,14 +1208,18 @@ impl Chat<'static> {
         self.state.state == ChatState::Ready
     }
 
-    fn handle_ctrl_c(&mut self) {
-        if !self.cancellation_guard.try_fire() {
+    fn handle_exit_shortcut(&mut self, shortcut: ExitShortcut, action: Action) {
+        if !self.cancellation_guard.try_fire(shortcut) {
             return;
         }
 
         if self.is_ready_for_exit() {
-            global::action_tx().send(Action::Quit).unwrap();
+            global::action_tx().send(action).unwrap();
         }
+    }
+
+    fn handle_ctrl_c(&mut self) {
+        self.handle_exit_shortcut(ExitShortcut::CtrlC, Action::Quit);
     }
 
     fn submit_value(&mut self, value: String) {
@@ -1411,10 +1429,15 @@ impl Chat<'static> {
         if !self.cancellation_guard.is_armed() {
             return None;
         }
+        let shortcut = self.cancellation_guard.last_shortcut()?;
+        let shortcut_name = match shortcut {
+            ExitShortcut::CtrlC => "Ctrl+C",
+            ExitShortcut::CtrlQ => "Ctrl+Q",
+        };
         let message = if self.is_ready_for_exit() {
-            "Press Ctrl+C again to exit"
+            format!("Press {shortcut_name} again to exit")
         } else {
-            "Press Ctrl+C again to cancel"
+            format!("Press {shortcut_name} again to cancel")
         };
         let theme = global::theme();
         Some(Line::from(Span::styled(
@@ -2386,6 +2409,20 @@ impl Component for Chat<'static> {
             }
         ) {
             self.handle_ctrl_c();
+            return;
+        }
+        if matches!(
+            key,
+            KeyEvent {
+                code: Char('q') | Char('Q'),
+                modifiers: KM::CONTROL,
+                ..
+            }
+        ) {
+            self.handle_exit_shortcut(
+                ExitShortcut::CtrlQ,
+                Action::CommandPalette(CommandPaletteAction::ForceQuit),
+            );
             return;
         }
         if self.view == ViewMode::Chat
