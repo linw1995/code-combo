@@ -14,11 +14,14 @@ pub struct Combo {
 }
 
 mod discovery;
+pub mod runner;
 mod session;
 mod session_env;
 mod starter;
+mod types;
 
 pub use discovery::*;
+pub use runner::{RUN_COMBO_TOOL_NAME, run_combo};
 pub use session::{
     ClientMessage, ComboRunEvent, ComboRunMessage, ComboRunPayload, ComboRunResult,
     ComboRunSession, ComboStreamKind, ControlAction, MetadataPayload, MetadataResponse,
@@ -30,3 +33,6 @@ pub use session::{
 pub use session_env::{SessionEnv, SessionEnvBuilder, SessionEnvError};
 pub use starter::PromptResponseSender;
 pub use starter::{Starter, StarterCommand, StarterError, StarterEvent, StarterExecution};
+pub use types::{
+    ComboEvent, ComboEventStreamKind, ComboInfo, RunComboContext, RunComboInput, RunComboOutput,
+};

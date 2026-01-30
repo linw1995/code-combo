@@ -23,10 +23,11 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
+use crate::combo::run_combo;
 use crate::{
-    Config, Error, PromptSchema, RequestOptions, Result, ResultDisplayExt, StreamError,
-    ThinkingBlocksMode, ThinkingConfig,
-    tools::{ComboEvent, ComboInfo, RunComboContext, RunTaskContext, RunTaskTool, run_combo},
+    ComboEvent, ComboInfo, Config, Error, PromptSchema, RequestOptions, Result, ResultDisplayExt,
+    RunComboContext, StreamError, ThinkingBlocksMode, ThinkingConfig,
+    tools::{RunTaskContext, RunTaskTool},
 };
 use executor::PermissionControl;
 use message::{
@@ -57,6 +58,7 @@ pub use config::{
     load_agent_config_with_layers,
 };
 pub use executor::{ExecuteStatus, Executor, Input, Output};
+pub use streaming::{BufferSet, EmitChunkCallback, LineBuffer};
 
 // Internal submodules
 mod bash_executor;
