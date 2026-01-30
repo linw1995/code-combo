@@ -75,6 +75,7 @@ impl CancellationGuard {
         let now = Instant::now();
         if let Some(last) = self.last_hit.get()
             && now.duration_since(last) <= CTRL_C_WINDOW
+            && self.last_shortcut.get() == Some(shortcut)
         {
             // fire
             self.cancel_token();
@@ -92,6 +93,7 @@ impl CancellationGuard {
         let now = Instant::now();
         if let Some(last) = self.last_hit.get()
             && now.duration_since(last) <= CTRL_C_WINDOW
+            && self.last_shortcut.get() == Some(shortcut)
         {
             self.reset();
             return true;

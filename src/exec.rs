@@ -12,11 +12,17 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
-    process::Command,
+    process::{Child, Command},
     sync::{mpsc, oneshot},
     task::JoinHandle,
 };
 use tracing::warn;
+
+#[cfg(unix)]
+use nix::{
+    sys::signal::{Signal, killpg},
+    unistd::{Pid, setpgid},
+};
 
 const HARD_MAX_BUFFERED_BYTES: usize = 2 * 1024 * 1024;
 
@@ -106,6 +112,20 @@ impl RunningProcess {
     }
 }
 
+#[cfg(unix)]
+fn kill_process_group(child: &mut Child) {
+    let Some(pid) = child.id() else {
+        let _ = child.start_kill();
+        return;
+    };
+    let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(child: &mut Child) {
+    let _ = child.start_kill();
+}
+
 #[derive(Debug)]
 pub struct ExecCommand {
     argv: Vec<String>,
@@ -177,6 +197,13 @@ impl ExecCommand {
         if self.disable_tty {
             cmd.env_remove("GPG_TTY");
             cmd.env_remove("SSH_TTY");
+        }
+        #[cfg(unix)]
+        unsafe {
+            cmd.pre_exec(|| {
+                setpgid(Pid::from_raw(0), Pid::from_raw(0)).map_err(io::Error::other)?;
+                Ok(())
+            });
         }
 
         let mut child = cmd.spawn()?;
@@ -260,7 +287,7 @@ impl ExecCommand {
                 tokio::select! {
                     _ = &mut kill_rx, if !kill_seen => {
                         kill_seen = true;
-                        let _ = child.start_kill();
+                        kill_process_group(&mut child);
                     }
                     line = stdout_reader.read_until(b'\n', &mut stdout_buf), if !stdout_closed => {
                         match line {

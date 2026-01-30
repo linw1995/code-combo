@@ -13,6 +13,7 @@ use crate::{
     global::{self},
     session::{self, Session},
 };
+use code_combo::tools::BASH_TOOL_NAME;
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -156,6 +157,13 @@ impl Message {
         }
         if let Some(combo) = self.content.as_any().downcast_ref::<Combo>() {
             return combo.is_pending_permission();
+        }
+        false
+    }
+
+    pub fn is_executing_bash(&self) -> bool {
+        if let Some(tool) = self.content.as_any().downcast_ref::<Tool>() {
+            return tool.is_running() && tool.tool_use_name() == BASH_TOOL_NAME;
         }
         false
     }

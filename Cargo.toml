@@ -36,6 +36,7 @@ futures-core = "0.3.31"
 futures-util = "0.3.31"
 tokio-util = "0.7.16"
 clap = { version = "4.5.54", features = ["derive", "string"] }
+nix = "0.30.1"
 
 # Core dependencies for CLI and application functionality
 [dependencies]
@@ -89,6 +90,7 @@ similar = "2.7.0"
 tempfile.workspace = true
 tree-sitter.workspace = true
 tree-sitter-bash = "0.25.0"
+nix.workspace = true
 
 [dev-dependencies]
 ctor.workspace = true

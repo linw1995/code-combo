@@ -481,6 +481,13 @@ impl Messages {
         message.is_waiting_permission()
     }
 
+    pub fn has_executing_bash(&self) -> bool {
+        self.messages
+            .read()
+            .iter()
+            .any(|message| message.is_executing_bash())
+    }
+
     pub fn focus_latest_waiting_permission(&mut self) -> bool {
         let idx = {
             let messages = self.messages.read();

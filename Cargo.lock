@@ -430,6 +430,7 @@ dependencies = [
  "hyper-util",
  "indoc",
  "lazy_static",
+ "nix 0.30.1",
  "openai",
  "rmcp",
  "schemars",

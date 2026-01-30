@@ -236,6 +236,7 @@ impl CancellationGuard {
         let now = Instant::now();
         if let Some(last) = self.last_hit.get()
             && now.duration_since(last) <= CTRL_C_WINDOW
+            && self.last_shortcut.get() == Some(shortcut)
         {
             // fire
             self.cancel_token();
@@ -253,6 +254,7 @@ impl CancellationGuard {
         let now = Instant::now();
         if let Some(last) = self.last_hit.get()
             && now.duration_since(last) <= CTRL_C_WINDOW
+            && self.last_shortcut.get() == Some(shortcut)
         {
             self.reset();
             return true;
@@ -2247,9 +2249,10 @@ impl Component for Chat<'static> {
                 output,
             }) => {
                 let is_manual_combo = self.manual_combo_runs.contains(id);
-                self.forward_combo_result_to_session(id, output, *is_error);
+                let effective_is_error = if *is_user_cancelled { false } else { *is_error };
+                self.forward_combo_result_to_session(id, output, effective_is_error);
                 if let Some(idx) = self.messages.on_tool_event(event)
-                    && !is_error
+                    && !effective_is_error
                     && self.messages.selected_idx() == Some(idx)
                 {
                     // Move focus back to Input if tool use success.
@@ -2263,7 +2266,7 @@ impl Component for Chat<'static> {
                         .remove(id)
                         .unwrap_or_else(|| format!("combo {id}"));
                     self.ensure_manual_combo_tool_use(id, &command_line);
-                    let result = combo_run_result_from_final(id, output, *is_error);
+                    let result = combo_run_result_from_final(id, output, effective_is_error);
                     let mut summary = result.summary.trim().to_string();
                     if summary.is_empty() {
                         summary = result
@@ -2323,7 +2326,7 @@ impl Component for Chat<'static> {
                     // Collect this result
                     self.collected_tool_results.push(CollectedToolResult {
                         id: id.clone(),
-                        is_error: *is_error,
+                        is_error: effective_is_error,
                         content,
                     });
                     self.pending_tool_ids.remove(id);
@@ -2353,7 +2356,7 @@ impl Component for Chat<'static> {
                     // Single tool execution or not tracked - process immediately
                     let content = ChatContent::Multiple(vec![code_combo::Block::ToolResult {
                         tool_use_id: id.clone(),
-                        is_error: Some(*is_error),
+                        is_error: Some(effective_is_error),
                         content,
                     }]);
                     let content = self.build_user_content(content);
@@ -2429,6 +2432,10 @@ impl Component for Chat<'static> {
             }
         ) {
             if self.view == ViewMode::Chat {
+                if self.messages.has_executing_bash() {
+                    self.handle_ctrl_c();
+                    return;
+                }
                 let has_waiting_permission = self.messages.focused_waiting_permission()
                     || self.messages.focus_latest_waiting_permission();
                 if has_waiting_permission {
