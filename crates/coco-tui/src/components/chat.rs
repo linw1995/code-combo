@@ -1235,6 +1235,13 @@ impl Chat<'static> {
         }
     }
 
+    fn handle_force_quit_shortcut(&mut self, shortcut: ExitShortcut, action: Action) {
+        if !self.cancellation_guard.try_fire(shortcut) {
+            return;
+        }
+        global::action_tx().send(action).unwrap();
+    }
+
     fn handle_ctrl_c(&mut self) {
         self.handle_exit_shortcut(ExitShortcut::CtrlC, Action::Quit);
     }
@@ -2459,7 +2466,7 @@ impl Component for Chat<'static> {
                 ..
             }
         ) {
-            self.handle_exit_shortcut(
+            self.handle_force_quit_shortcut(
                 ExitShortcut::CtrlQ,
                 Action::CommandPalette(CommandPaletteAction::ForceQuit),
             );
