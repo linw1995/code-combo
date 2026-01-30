@@ -470,6 +470,44 @@ impl Messages {
         }
     }
 
+    pub fn focused_waiting_permission(&self) -> bool {
+        let Some(idx) = self.focus.get() else {
+            return false;
+        };
+        let messages = self.messages.read();
+        let Some(message) = messages.get(idx) else {
+            return false;
+        };
+        message.is_waiting_permission()
+    }
+
+    pub fn has_executing_bash(&self) -> bool {
+        self.messages
+            .read()
+            .iter()
+            .any(|message| message.is_executing_bash())
+    }
+
+    pub fn focus_latest_waiting_permission(&mut self) -> bool {
+        let idx = {
+            let messages = self.messages.read();
+            let mut found = None;
+            let mut i = messages.len();
+            while i > 0 {
+                i -= 1;
+                if messages[i].is_waiting_permission() {
+                    found = Some(i);
+                    break;
+                }
+            }
+            found
+        };
+        let Some(idx) = idx else {
+            return false;
+        };
+        self.focus(idx)
+    }
+
     pub fn has_actionable(&self) -> bool {
         self.messages
             .read()

@@ -75,9 +75,26 @@ impl CancellationGuard {
         let now = Instant::now();
         if let Some(last) = self.last_hit.get()
             && now.duration_since(last) <= CTRL_C_WINDOW
+            && self.last_shortcut.get() == Some(shortcut)
         {
             // fire
             self.cancel_token();
+            self.reset();
+            return true;
+        }
+
+        *self.last_hit.write() = Some(now);
+        *self.last_shortcut.write() = Some(shortcut);
+
+        false
+    }
+
+    pub fn confirm(&mut self, shortcut: ExitShortcut) -> bool {
+        let now = Instant::now();
+        if let Some(last) = self.last_hit.get()
+            && now.duration_since(last) <= CTRL_C_WINDOW
+            && self.last_shortcut.get() == Some(shortcut)
+        {
             self.reset();
             return true;
         }

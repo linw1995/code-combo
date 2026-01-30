@@ -123,6 +123,18 @@ impl Tool {
         &self.inner.tool_use.id
     }
 
+    pub fn tool_use_name(&self) -> &str {
+        &self.inner.tool_use.name
+    }
+
+    pub fn is_pending_confirmation(&self) -> bool {
+        matches!(self.inner.state, ToolState::PendingConfirmation)
+    }
+
+    pub fn is_running(&self) -> bool {
+        matches!(self.inner.state, ToolState::Initing | ToolState::Executing)
+    }
+
     pub fn update_state(&mut self, new_state: ToolState) {
         let state = &self.inner.state;
         if state == &new_state {
@@ -257,13 +269,21 @@ impl Component for Tool {
                     handle_component_event!(self, event);
                 }
             }
-            Event::Answer(AnswerEvent::ToolResult { id, is_error, .. }) => {
+            Event::Answer(AnswerEvent::ToolResult {
+                id,
+                is_error,
+                is_user_cancelled,
+                ..
+            }) => {
                 if self.tool_use_id() == id {
-                    self.update_state(if *is_error {
+                    let state = if *is_user_cancelled {
+                        ToolState::Cancelled
+                    } else if *is_error {
                         ToolState::Failed
                     } else {
                         ToolState::Completed
-                    });
+                    };
+                    self.update_state(state);
                     handle_component_event!(self, event);
                 }
             }

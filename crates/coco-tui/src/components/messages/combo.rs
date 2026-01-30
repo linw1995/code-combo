@@ -192,6 +192,10 @@ impl Combo {
         self.state.tool_use_id == id
     }
 
+    pub fn is_pending_permission(&self) -> bool {
+        self.requiring_permission()
+    }
+
     fn requiring_permission(&self) -> bool {
         matches!(self.state.starter_state, StarterState::AwaitingPermission)
     }
