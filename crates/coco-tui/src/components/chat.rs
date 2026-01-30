@@ -249,6 +249,21 @@ impl CancellationGuard {
         false
     }
 
+    pub fn confirm(&mut self, shortcut: ExitShortcut) -> bool {
+        let now = Instant::now();
+        if let Some(last) = self.last_hit.get()
+            && now.duration_since(last) <= CTRL_C_WINDOW
+        {
+            self.reset();
+            return true;
+        }
+
+        *self.last_hit.write() = Some(now);
+        *self.last_shortcut.write() = Some(shortcut);
+
+        false
+    }
+
     pub fn reset(&mut self) {
         *self.last_hit.write() = None;
         *self.last_shortcut.write() = None;
@@ -2413,6 +2428,19 @@ impl Component for Chat<'static> {
                 ..
             }
         ) {
+            if self.view == ViewMode::Chat {
+                let has_waiting_permission = self.messages.focused_waiting_permission()
+                    || self.messages.focus_latest_waiting_permission();
+                if has_waiting_permission {
+                    self.update_focus(Focus::Messages);
+                    if !self.cancellation_guard.confirm(ExitShortcut::CtrlC) {
+                        return;
+                    }
+                    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+                    self.messages.forward_key_to_selected(&esc);
+                    return;
+                }
+            }
             self.handle_ctrl_c();
             return;
         }

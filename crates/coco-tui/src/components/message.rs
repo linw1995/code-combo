@@ -150,6 +150,16 @@ impl Message {
         false
     }
 
+    pub fn is_waiting_permission(&self) -> bool {
+        if let Some(tool) = self.content.as_any().downcast_ref::<Tool>() {
+            return tool.is_pending_confirmation();
+        }
+        if let Some(combo) = self.content.as_any().downcast_ref::<Combo>() {
+            return combo.is_pending_permission();
+        }
+        false
+    }
+
     pub fn thinking_mut(&mut self) -> Option<&mut Thinking> {
         self.content.as_mut_any().downcast_mut::<Thinking>()
     }

@@ -123,6 +123,10 @@ impl Tool {
         &self.inner.tool_use.id
     }
 
+    pub fn is_pending_confirmation(&self) -> bool {
+        matches!(self.inner.state, ToolState::PendingConfirmation)
+    }
+
     pub fn update_state(&mut self, new_state: ToolState) {
         let state = &self.inner.state;
         if state == &new_state {
