@@ -31,9 +31,12 @@ pub use list::{DEFAULT_ENTRY_LIMIT, LIST_TOOL_NAME, ListInput, ListTool, MAX_ENT
 pub use read::{
     DEFAULT_LINE_LIMIT, DEFAULT_LINE_OFFSET, MAX_LINE_LIMIT, READ_TOOL_NAME, ReadInput, ReadTool,
 };
-pub use run_combo::{
-    ComboEvent, ComboInfo, ComboStreamKind, RUN_COMBO_TOOL_NAME, RunComboContext, RunComboInput,
-    RunComboOutput, run_combo,
+pub use run_combo::{RUN_COMBO_TOOL_NAME, run_combo};
+
+// Re-export combo types from combo module
+pub use crate::combo::{
+    ComboEvent, ComboEventStreamKind as ComboStreamKind, ComboInfo, RunComboContext, RunComboInput,
+    RunComboOutput,
 };
 pub use run_task::{
     RUN_TASK_TOOL_NAME, RunTaskContext, RunTaskInput, RunTaskOutput, RunTaskTool, SubagentEvent,

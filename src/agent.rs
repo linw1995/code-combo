@@ -24,9 +24,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::{
-    Config, Error, PromptSchema, RequestOptions, Result, ResultDisplayExt, StreamError,
-    ThinkingBlocksMode, ThinkingConfig,
-    tools::{ComboEvent, ComboInfo, RunComboContext, RunTaskContext, RunTaskTool, run_combo},
+    ComboEvent, ComboInfo, Config, Error, PromptSchema, RequestOptions, Result, ResultDisplayExt,
+    RunComboContext, StreamError, ThinkingBlocksMode, ThinkingConfig,
+    tools::{RunTaskContext, RunTaskTool, run_combo},
 };
 use executor::PermissionControl;
 use message::{

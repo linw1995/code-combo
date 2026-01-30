@@ -10,11 +10,11 @@ use tokio_util::sync::CancellationToken;
 
 use super::bash_executor;
 use crate::{
-    AppliedTextEdit, OutputChunk, TextEdit, error,
+    AppliedTextEdit, ComboEvent, OutputChunk, TextEdit, error,
     tools::{
-        self, BASH_TOOL_NAME, BashInput, BashTool, ComboEvent, Final, LIST_TOOL_NAME, ListTool,
-        READ_TOOL_NAME, RUN_TASK_TOOL_NAME, ReadTool, RunTaskTool, STR_REPLACE_TOOL_NAME,
-        StrReplaceTool, SubagentEvent, Tool, extra_envs_for_bash_input, run_bash_chunked, run_task,
+        self, BASH_TOOL_NAME, BashInput, BashTool, Final, LIST_TOOL_NAME, ListTool, READ_TOOL_NAME,
+        RUN_TASK_TOOL_NAME, ReadTool, RunTaskTool, STR_REPLACE_TOOL_NAME, StrReplaceTool,
+        SubagentEvent, Tool, extra_envs_for_bash_input, run_bash_chunked, run_task,
     },
 };
 

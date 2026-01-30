@@ -17,6 +17,7 @@ mod discovery;
 mod session;
 mod session_env;
 mod starter;
+mod types;
 
 pub use discovery::*;
 pub use session::{
@@ -30,3 +31,6 @@ pub use session::{
 pub use session_env::{SessionEnv, SessionEnvBuilder, SessionEnvError};
 pub use starter::PromptResponseSender;
 pub use starter::{Starter, StarterCommand, StarterError, StarterEvent, StarterExecution};
+pub use types::{
+    ComboEvent, ComboEventStreamKind, ComboInfo, RunComboContext, RunComboInput, RunComboOutput,
+};

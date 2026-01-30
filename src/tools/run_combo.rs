@@ -1,12 +1,11 @@
 //! Combo runner - executes combo scripts within agent context.
 //!
-//! This module provides combo execution helpers and shared types.
+//! This module provides combo execution helpers.
 //! Combos are executable scripts that can perform complex operations
 //! with recorded tool calls.
 
 use std::{path::PathBuf, sync::Arc};
 
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -17,225 +16,19 @@ use super::{
     run_bash_chunked,
 };
 use crate::{
-    Agent, Block, ChatStreamUpdate, Combo, Config, Content, Message, OutputChunk, PromptSchema,
-    SessionEnv, Starter, StarterCommand, StarterError, StarterEvent, ThinkingConfig, ToolUse,
-    bash_unsafe_ranges, bash_unsafe_reason, discover_starters, exec::StreamKind,
-    parse_primary_command, workspace_dir,
+    Agent, Block, ChatStreamUpdate, Config, Content, Message, OutputChunk, PromptSchema,
+    SessionEnv, Starter, StarterCommand, StarterError, StarterEvent, ToolUse, bash_unsafe_ranges,
+    bash_unsafe_reason, discover_starters, exec::StreamKind, parse_primary_command, workspace_dir,
+};
+
+// Import types from combo module
+use crate::combo::{
+    ComboEvent, ComboEventStreamKind, ComboInfo, RunComboContext, RunComboInput, RunComboOutput,
 };
 
 pub const RUN_COMBO_TOOL_NAME: &str = "run_combo";
 
 type ComboEventCallback = Arc<std::sync::Mutex<Box<dyn FnMut(&ComboEvent) + Send>>>;
-
-/// Input parameters for combo execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunComboInput {
-    /// Name of the combo to execute.
-    pub combo_name: String,
-    /// Arguments passed to the combo starter.
-    #[serde(default)]
-    pub args: Vec<String>,
-}
-
-/// Output from combo execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunComboOutput {
-    /// Whether the combo completed successfully.
-    pub success: bool,
-    /// Summary of the combo execution.
-    pub summary: String,
-    /// Number of tool calls made during execution.
-    pub tool_calls: usize,
-    /// Optional error message if failed.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    /// Optional thinking blocks from the summary response.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub summary_thinking: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ComboStreamKind {
-    Plain,
-    Thinking,
-}
-
-/// Event emitted during combo execution.
-#[derive(Debug, Clone)]
-pub enum ComboEvent {
-    /// Combo not found.
-    NotFound {
-        /// Combo name.
-        name: String,
-    },
-    /// Combo is executing.
-    Executing {
-        /// Combo name.
-        name: String,
-        /// Command line with args.
-        command_line: String,
-    },
-    /// Regular output chunk (stdout/stderr).
-    Output {
-        /// Combo name.
-        name: String,
-        /// Output chunk.
-        chunk: OutputChunk,
-    },
-    /// Tool record started.
-    RecordStart {
-        /// Combo name.
-        name: String,
-        /// Tool use info.
-        tool_use: crate::ToolUse,
-    },
-    /// Tool record output.
-    RecordOutput {
-        /// Combo name.
-        name: String,
-        /// Tool use ID.
-        tool_use_id: String,
-        /// Output chunk.
-        chunk: OutputChunk,
-    },
-    /// Tool record ended.
-    RecordEnd {
-        /// Combo name.
-        name: String,
-        /// Tool use ID.
-        tool_use_id: String,
-        /// Whether the tool failed.
-        is_error: bool,
-        /// Tool output.
-        output: Final,
-    },
-    /// Prompt message from combo.
-    Prompt {
-        /// Combo name.
-        name: String,
-        /// Prompt text.
-        prompt: String,
-        /// Optional thinking config.
-        thinking: Option<ThinkingConfig>,
-    },
-    /// Prompt stream update for combo reply.
-    PromptStream {
-        /// Combo name.
-        name: String,
-        /// Stream index.
-        index: usize,
-        /// Stream kind.
-        kind: ComboStreamKind,
-        /// Streamed text.
-        text: String,
-    },
-    /// Reset prompt stream for combo reply.
-    PromptStreamReset {
-        /// Combo name.
-        name: String,
-    },
-    /// Reset summary stream for combo summary.
-    SummaryStreamReset {
-        /// Combo name.
-        name: String,
-    },
-    /// Summary stream update for combo summary.
-    SummaryStream {
-        /// Combo name.
-        name: String,
-        /// Stream index.
-        index: usize,
-        /// Stream kind.
-        kind: ComboStreamKind,
-        /// Streamed text.
-        text: String,
-    },
-    /// Summary completion for combo summary.
-    SummaryDone {
-        /// Combo name.
-        name: String,
-        /// Summary text.
-        summary: String,
-        /// Thinking blocks.
-        thinking: Vec<String>,
-    },
-    /// Reply tool use from prompt.
-    ReplyToolUse {
-        /// Combo name.
-        name: String,
-        /// Tool use info.
-        tool_use: ToolUse,
-        /// Thinking blocks.
-        thinking: Vec<String>,
-        /// Whether this is an offload reply (executed via bash).
-        offload: bool,
-    },
-    /// Reply tool result for offload.
-    ReplyToolResult {
-        /// Combo name.
-        name: String,
-        /// Tool use ID.
-        tool_use_id: String,
-        /// Whether the tool failed.
-        is_error: bool,
-        /// Tool output.
-        output: Final,
-    },
-    /// Reply tool error.
-    ReplyToolError {
-        /// Error message.
-        message: String,
-    },
-    /// Combo execution finished.
-    Executed {
-        /// Combo name.
-        name: String,
-        /// Starter summary.
-        starter: Starter,
-        /// Exit code.
-        exit_code: Option<i32>,
-    },
-    /// Combo execution was cancelled.
-    Cancelled {
-        /// Combo name if available.
-        name: Option<String>,
-    },
-    /// Transcript messages collected during combo execution.
-    Transcript {
-        /// Combo name.
-        name: String,
-        /// Transcript messages for the combo reply agent.
-        messages: Vec<Message>,
-    },
-}
-
-/// Information about a discovered combo.
-#[derive(Debug, Clone)]
-pub struct ComboInfo {
-    /// Path to the combo executable.
-    pub path: String,
-    /// Combo metadata.
-    pub combo: Combo,
-}
-
-/// Context needed to create and run combo instances.
-#[derive(Clone)]
-pub struct RunComboContext {
-    /// Available combos discovered at startup.
-    pub combos: Vec<ComboInfo>,
-    /// Environment variables for combo execution.
-    pub envs: Vec<(String, String)>,
-    /// Config for combo reply agent.
-    pub config: Config,
-    /// System prompt used for combo reply.
-    pub system_prompt: String,
-    /// Optional model override for combo reply.
-    pub model_override: Option<String>,
-    /// Whether thinking is enabled for combo reply.
-    pub thinking_enabled: bool,
-    /// Whether to ignore workspace combo scripts.
-    pub ignore_workspace_scripts: bool,
-}
 
 /// Execute combo logic with event callback support.
 pub async fn run_combo<F>(
@@ -620,7 +413,7 @@ async fn execute_combo(
                                                         ComboEvent::PromptStream {
                                                             name: stream_name.clone(),
                                                             index,
-                                                            kind: ComboStreamKind::Plain,
+                                                            kind: ComboEventStreamKind::Plain,
                                                             text,
                                                         },
                                                     );
@@ -635,7 +428,7 @@ async fn execute_combo(
                                                         ComboEvent::PromptStream {
                                                             name: stream_name.clone(),
                                                             index,
-                                                            kind: ComboStreamKind::Thinking,
+                                                            kind: ComboEventStreamKind::Thinking,
                                                             text,
                                                         },
                                                     );
@@ -1112,7 +905,7 @@ tool_failed: {tool_failed}\n\
                             ComboEvent::SummaryStream {
                                 name: stream_name.clone(),
                                 index,
-                                kind: ComboStreamKind::Plain,
+                                kind: ComboEventStreamKind::Plain,
                                 text,
                             },
                         ),
@@ -1121,7 +914,7 @@ tool_failed: {tool_failed}\n\
                             ComboEvent::SummaryStream {
                                 name: stream_name.clone(),
                                 index,
-                                kind: ComboStreamKind::Thinking,
+                                kind: ComboEventStreamKind::Thinking,
                                 text,
                             },
                         ),
@@ -1363,7 +1156,7 @@ async fn handle_offload_combo_reply(
                     ComboEvent::PromptStream {
                         name: stream_name.clone(),
                         index,
-                        kind: ComboStreamKind::Plain,
+                        kind: ComboEventStreamKind::Plain,
                         text,
                     },
                 );
@@ -1374,7 +1167,7 @@ async fn handle_offload_combo_reply(
                     ComboEvent::PromptStream {
                         name: stream_name.clone(),
                         index,
-                        kind: ComboStreamKind::Thinking,
+                        kind: ComboEventStreamKind::Thinking,
                         text,
                     },
                 );
