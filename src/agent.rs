@@ -58,6 +58,7 @@ pub use config::{
     load_agent_config_with_layers,
 };
 pub use executor::{ExecuteStatus, Executor, Input, Output};
+pub use streaming::{BufferSet, EmitChunkCallback, LineBuffer};
 
 // Internal submodules
 mod bash_executor;

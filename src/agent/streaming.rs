@@ -4,10 +4,12 @@
 //! from AI providers, including event accumulation, retry logic, and progress updates.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
+use crate::exec::StreamKind;
 use crate::provider::{Block, ContentBlockDelta, MessagesStreamEvent, StopReason, UsageStats};
-use crate::{RetryAttempt as CoreRetryAttempt, RetryUpdate, StreamError};
+use crate::{OutputChunk, RetryAttempt as CoreRetryAttempt, RetryUpdate, StreamError};
 use snafu::ResultExt;
 use tokio_util::sync::CancellationToken;
 
@@ -272,6 +274,157 @@ pub async fn wait_for_retry(delay: Duration, cancel_token: &CancellationToken) -
     }
 }
 
+/// Callback type for emitting stream chunks.
+pub type EmitChunkCallback = Arc<dyn Fn(OutputChunk) + Send + Sync>;
+
+/// Buffer for aggregating streaming text into lines.
+pub struct LineBuffer {
+    buffer: Arc<std::sync::Mutex<String>>,
+    stream: StreamKind,
+    prefix: String,
+}
+
+impl LineBuffer {
+    /// Create a new line buffer for the given stream type.
+    pub fn new(stream: StreamKind) -> Self {
+        Self {
+            buffer: Arc::new(std::sync::Mutex::new(String::new())),
+            stream,
+            prefix: String::new(),
+        }
+    }
+
+    /// Create a new line buffer with a prefix for each line.
+    pub fn with_prefix(stream: StreamKind, prefix: impl Into<String>) -> Self {
+        Self {
+            buffer: Arc::new(std::sync::Mutex::new(String::new())),
+            stream,
+            prefix: prefix.into(),
+        }
+    }
+
+    /// Add text to the buffer and emit complete lines via callback.
+    pub fn append(&self, text: &str, emit: &EmitChunkCallback) {
+        let mut buf = self.buffer.lock().unwrap();
+        buf.push_str(text);
+
+        let now_ms = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0)
+        };
+
+        let mut lines_to_emit = Vec::new();
+        while let Some(newline_pos) = buf.find('\n') {
+            let line = buf.drain(..=newline_pos).collect::<String>();
+            let line = line.trim_end_matches('\n');
+            if !line.is_empty() || self.prefix.is_empty() {
+                lines_to_emit.push(format!("{}{}", self.prefix, line));
+            }
+        }
+
+        if !lines_to_emit.is_empty() {
+            let chunk = OutputChunk {
+                timestamp: now_ms(),
+                stream: self.stream,
+                lines: lines_to_emit,
+            };
+            emit(chunk);
+        }
+    }
+
+    /// Clear the buffer.
+    pub fn clear(&self) {
+        let mut buf = self.buffer.lock().unwrap();
+        buf.clear();
+    }
+
+    /// Flush remaining content as a single line.
+    pub fn flush(&self, emit: &EmitChunkCallback) {
+        let mut buf = self.buffer.lock().unwrap();
+        if buf.is_empty() {
+            return;
+        }
+
+        let now_ms = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0)
+        };
+
+        let content = std::mem::take(&mut *buf);
+        let line = if self.prefix.is_empty() {
+            content
+        } else {
+            format!("{}{}", self.prefix, content)
+        };
+
+        let chunk = OutputChunk {
+            timestamp: now_ms(),
+            stream: self.stream,
+            lines: vec![line],
+        };
+        emit(chunk);
+    }
+
+    /// Get a reference to the internal buffer for cloning.
+    pub fn clone_buffer(&self) -> Arc<std::sync::Mutex<String>> {
+        self.buffer.clone()
+    }
+}
+
+/// Manages multiple line buffers for different stream types.
+pub struct BufferSet {
+    pub plain: LineBuffer,
+    pub thinking: LineBuffer,
+}
+
+impl BufferSet {
+    /// Create a new buffer set.
+    pub fn new() -> Self {
+        Self {
+            plain: LineBuffer::new(StreamKind::Stdout),
+            thinking: LineBuffer::with_prefix(StreamKind::Stderr, "[thinking] "),
+        }
+    }
+
+    /// Handle a chat stream update, buffering and emitting lines as appropriate.
+    pub fn handle_update(&self, update: &ChatStreamUpdate, emit: &EmitChunkCallback) {
+        match update {
+            ChatStreamUpdate::Reset => {
+                self.plain.clear();
+                self.thinking.clear();
+            }
+            ChatStreamUpdate::Plain { text, .. } => {
+                self.plain.append(text, emit);
+            }
+            ChatStreamUpdate::Thinking { text, .. } => {
+                self.thinking.append(text, emit);
+            }
+        }
+    }
+
+    /// Flush all remaining buffered content.
+    pub fn flush_all(&self, emit: &EmitChunkCallback) {
+        self.plain.flush(emit);
+        self.thinking.flush(emit);
+    }
+
+    /// Clear all buffers.
+    pub fn clear_all(&self) {
+        self.plain.clear();
+        self.thinking.clear();
+    }
+}
+
+impl Default for BufferSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,5 +535,90 @@ mod tests {
 
         let err = StreamError::decode("chat stream cancelled".to_string());
         assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn line_buffer_emits_complete_lines() {
+        let buffer = LineBuffer::new(StreamKind::Stdout);
+        let emitted: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let emitted_clone = emitted.clone();
+        let emit: EmitChunkCallback = Arc::new(move |chunk| {
+            emitted_clone.lock().unwrap().extend(chunk.lines);
+        });
+
+        buffer.append("hello", &emit);
+        assert!(emitted.lock().unwrap().is_empty());
+
+        buffer.append(" world\n", &emit);
+        assert_eq!(emitted.lock().unwrap().len(), 1);
+        assert_eq!(emitted.lock().unwrap()[0], "hello world");
+    }
+
+    #[test]
+    fn line_buffer_with_prefix() {
+        let buffer = LineBuffer::with_prefix(StreamKind::Stderr, "[test] ");
+        let emitted: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let emitted_clone = emitted.clone();
+        let emit: EmitChunkCallback = Arc::new(move |chunk| {
+            emitted_clone.lock().unwrap().extend(chunk.lines);
+        });
+
+        buffer.append("line1\nline2\n", &emit);
+        let lines = emitted.lock().unwrap();
+        assert_eq!(lines[0], "[test] line1");
+        assert_eq!(lines[1], "[test] line2");
+    }
+
+    #[test]
+    fn buffer_set_reset_clears_all() {
+        let buffers = BufferSet::new();
+        let emit: EmitChunkCallback = Arc::new(|_| {});
+
+        buffers.plain.append("partial", &emit);
+        buffers.thinking.append("thinking", &emit);
+
+        buffers.clear_all();
+
+        buffers.flush_all(&emit);
+        // Flush should emit nothing after clear (verified by no panic)
+    }
+
+    #[test]
+    fn buffer_set_handles_chat_stream_updates() {
+        let buffers = BufferSet::new();
+        let emitted: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let emitted_clone = emitted.clone();
+        let emit: EmitChunkCallback = Arc::new(move |chunk| {
+            emitted_clone.lock().unwrap().extend(chunk.lines);
+        });
+
+        // Handle plain stream update
+        buffers.handle_update(
+            &ChatStreamUpdate::Plain {
+                index: 0,
+                text: "Hello\n".to_string(),
+            },
+            &emit,
+        );
+
+        // Handle thinking stream update
+        buffers.handle_update(
+            &ChatStreamUpdate::Thinking {
+                index: 0,
+                text: "Thinking\n".to_string(),
+            },
+            &emit,
+        );
+
+        let lines = emitted.lock().unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "Hello");
+        assert_eq!(lines[1], "[thinking] Thinking");
     }
 }
