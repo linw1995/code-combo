@@ -3,48 +3,91 @@
 //! This module provides:
 //! - [`Agent`] - The main agent struct for chat interactions
 //! - [`AgentConfig`] - Configuration types for customizing agents
+//!
+//! The module is organized into submodules for better maintainability:
+//! - [`streaming`] - Stream event handling and retry logic
+//! - [`message`] - Message processing and transformation
+//! - [`provider_selection`] - Provider selection and model resolution
+//! - [`bash_executor`] - Bash command execution with safety checks
+//! - [`config`] - Agent configuration management
+//! - [`executor`] - Tool execution framework
+//! - [`prompt`] - System prompt building
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
-use crate::provider::{
-    Block, Client, ContentBlockDelta, MessagesStreamEvent, Role, Thinking, ToolChoice,
-};
+use crate::provider::{Block, Client, Thinking, ToolChoice};
 use futures_util::StreamExt;
-use serde_json::{Map as JsonMap, Value, json};
+use serde_json::json;
 use snafu::prelude::*;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::{
-    Config, Error, PromptSchema, ProviderConfig, RequestOptions, Result, ResultDisplayExt,
-    RetryAttempt as CoreRetryAttempt, RetryUpdate, StreamError, ThinkingBlocksMode, ThinkingConfig,
+    Config, Error, PromptSchema, RequestOptions, Result, ResultDisplayExt, StreamError,
+    ThinkingBlocksMode, ThinkingConfig,
     tools::{ComboEvent, ComboInfo, RunComboContext, RunTaskContext, RunTaskTool, run_combo},
 };
 use executor::PermissionControl;
+use message::{
+    ensure_thinking_blocks, parse_stringified_tool_input, parse_stringified_tool_inputs_in_message,
+    stringify_nested_tool_inputs, stringify_nested_tool_schema, strip_thinking_blocks,
+};
 use prompt::{build_system_prompt_from_config, build_system_prompt_from_config_async};
+use provider_selection::{
+    get_current_model, get_resolved_default_model, has_offload_combo_reply, resolve_model,
+    select_provider_index,
+};
 
-mod bash_executor;
-mod config;
-mod executor;
-mod prompt;
+// Re-export from prompt_reply module
+pub use crate::prompt_reply::{
+    PROMPT_REPLY_TOOL_NAME, PromptReply, REPLY_TOOL_MISSING_ERROR, build_reply_prompt_message,
+    build_reply_retry_message, build_reply_tool, build_reply_tool_directive,
+    should_use_tool_choice_fallback,
+};
 
+// Re-export public types from submodules
 pub use crate::provider::{Content, Message, StopReason, ToolUse};
 pub use bash_executor::{
     ParsedCommandSummary, bash_unsafe_ranges, bash_unsafe_reason, parse_primary_command,
 };
-pub use executor::{ExecuteStatus, Executor, Input, Output};
-
-const DEFAULT_THINKING_BUDGET_TOKENS: usize = 1024;
 pub use config::{
     AGENT_CONFIG_FILENAME, AgentConfig, AgentConfigError, SubagentConfig, SubagentModelConfig,
     SystemPromptConfig, ToolsConfig, load_agent_config, load_agent_config_for_combo,
     load_agent_config_with_layers,
 };
+pub use executor::{ExecuteStatus, Executor, Input, Output};
 
-const PROMPT_REPLY_TOOL_NAME: &str = "combo_reply";
-const REPLY_TOOL_MISSING_ERROR: &str = "reply tool use not found in response";
+// Internal submodules
+mod bash_executor;
+mod config;
+mod executor;
+mod message;
+mod prompt;
+mod provider_selection;
+pub mod streaming;
 
+const DEFAULT_THINKING_BUDGET_TOKENS: usize = 1024;
+
+/// Update type for streaming chat responses.
+#[derive(Debug, Clone)]
+pub enum ChatStreamUpdate {
+    Plain { index: usize, text: String },
+    Thinking { index: usize, text: String },
+    Reset,
+}
+
+/// Response from a chat interaction.
+pub struct ChatResponse {
+    pub message: Message,
+    pub stop_reason: Option<StopReason>,
+    pub usage: Option<crate::provider::UsageStats>,
+}
+
+/// Import streaming types for internal use.
+use streaming::{StreamAccumulator, StreamAction};
+
+/// AI agent for chat interactions and tool execution.
 #[derive(Clone)]
 pub struct Agent {
     config: Config,
@@ -66,278 +109,6 @@ pub struct Agent {
 
     /// Shared context for run_task tool (if subagents are configured).
     run_task_context: Option<Arc<Mutex<RunTaskContext>>>,
-}
-
-pub struct ChatResponse {
-    pub message: Message,
-    pub stop_reason: Option<StopReason>,
-    pub usage: Option<crate::provider::UsageStats>,
-}
-
-#[derive(Debug, Clone)]
-pub enum ChatStreamUpdate {
-    Plain { index: usize, text: String },
-    Thinking { index: usize, text: String },
-    Reset,
-}
-
-pub struct PromptReply {
-    pub tool_use: ToolUse,
-    pub response: String,
-    pub thinking: Vec<String>,
-    pub usage: Option<crate::provider::UsageStats>,
-}
-
-enum StreamAction {
-    Continue,
-    Stop,
-}
-
-struct StreamAccumulator {
-    blocks: Vec<Block>,
-    tool_inputs: HashMap<usize, String>,
-    stop_reason: Option<StopReason>,
-    usage: Option<crate::provider::UsageStats>,
-}
-
-const STREAM_RETRY_BASE_DELAY_MS: u64 = 200;
-
-impl StreamAccumulator {
-    fn new() -> Self {
-        Self {
-            blocks: Vec::new(),
-            tool_inputs: HashMap::new(),
-            stop_reason: None,
-            usage: None,
-        }
-    }
-
-    fn finish(
-        self,
-    ) -> (
-        Vec<Block>,
-        Option<StopReason>,
-        Option<crate::provider::UsageStats>,
-    ) {
-        (self.blocks, self.stop_reason, self.usage)
-    }
-
-    fn handle_event<F>(
-        &mut self,
-        event: MessagesStreamEvent,
-        on_update: &mut F,
-    ) -> Result<StreamAction>
-    where
-        F: FnMut(ChatStreamUpdate),
-    {
-        match event {
-            MessagesStreamEvent::MessageStart { message } => {
-                if let Some(usage) = message.usage {
-                    self.update_usage(usage);
-                }
-                Ok(StreamAction::Continue)
-            }
-            MessagesStreamEvent::ContentBlockStart {
-                index,
-                content_block,
-            } => {
-                self.ensure_block_slot(index);
-                self.blocks[index] = content_block;
-                match &self.blocks[index] {
-                    Block::Text { text } if !text.is_empty() => {
-                        on_update(ChatStreamUpdate::Plain {
-                            index,
-                            text: text.clone(),
-                        });
-                    }
-                    Block::Thinking { thinking, .. } if !thinking.is_empty() => {
-                        on_update(ChatStreamUpdate::Thinking {
-                            index,
-                            text: thinking.clone(),
-                        });
-                    }
-                    _ => (),
-                }
-                Ok(StreamAction::Continue)
-            }
-            MessagesStreamEvent::ContentBlockDelta { index, delta } => {
-                self.apply_delta(index, delta, on_update)?;
-                Ok(StreamAction::Continue)
-            }
-            MessagesStreamEvent::ContentBlockStop { index } => {
-                self.finalize_tool_input(index)?;
-                Ok(StreamAction::Continue)
-            }
-            MessagesStreamEvent::MessageDelta { delta, usage } => {
-                if let Some(reason) = delta.stop_reason {
-                    self.stop_reason = Some(reason);
-                }
-                if let Some(usage) = usage {
-                    self.update_usage(usage);
-                }
-                Ok(StreamAction::Continue)
-            }
-            MessagesStreamEvent::MessageStop => Ok(StreamAction::Stop),
-            MessagesStreamEvent::Ping => Ok(StreamAction::Continue),
-            MessagesStreamEvent::Error { error } => {
-                let mut message = format!("stream error: {}", error.message);
-                if let Some(code) = error.code.as_deref() {
-                    message.push_str(&format!(" (code: {code})"));
-                }
-                if let Some(kind) = error.r#type.as_deref() {
-                    message.push_str(&format!(" (type: {kind})"));
-                }
-                whatever!("{message}")
-            }
-            MessagesStreamEvent::Unknown { .. } => Ok(StreamAction::Continue),
-        }
-    }
-
-    fn update_usage(&mut self, usage: crate::provider::UsageStats) {
-        match &mut self.usage {
-            Some(current) => current.merge(usage),
-            None => {
-                let mut current = usage;
-                if current.total_tokens.is_none()
-                    && let (Some(input), Some(output)) =
-                        (current.input_tokens, current.output_tokens)
-                {
-                    current.total_tokens = Some(input + output);
-                }
-                self.usage = Some(current);
-            }
-        }
-    }
-
-    fn ensure_block_slot(&mut self, index: usize) {
-        if self.blocks.len() <= index {
-            self.blocks.resize_with(index + 1, || Block::Text {
-                text: String::new(),
-            });
-        }
-    }
-
-    fn apply_delta<F>(
-        &mut self,
-        index: usize,
-        delta: ContentBlockDelta,
-        on_update: &mut F,
-    ) -> Result<()>
-    where
-        F: FnMut(ChatStreamUpdate),
-    {
-        self.ensure_block_slot(index);
-        match delta {
-            ContentBlockDelta::TextDelta { text } => {
-                if text.is_empty() {
-                    return Ok(());
-                }
-                match &mut self.blocks[index] {
-                    Block::Text { text: current } => current.push_str(&text),
-                    _ => {
-                        self.blocks[index] = Block::Text { text: text.clone() };
-                    }
-                }
-                on_update(ChatStreamUpdate::Plain { index, text });
-            }
-            ContentBlockDelta::ThinkingDelta { thinking } => {
-                if thinking.is_empty() {
-                    return Ok(());
-                }
-                match &mut self.blocks[index] {
-                    Block::Thinking {
-                        thinking: current, ..
-                    } => current.push_str(&thinking),
-                    _ => {
-                        self.blocks[index] = Block::Thinking {
-                            thinking: thinking.clone(),
-                            signature: None,
-                        };
-                    }
-                }
-                on_update(ChatStreamUpdate::Thinking {
-                    index,
-                    text: thinking,
-                });
-            }
-            ContentBlockDelta::SignatureDelta { signature } => {
-                if let Block::Thinking {
-                    signature: slot, ..
-                } = &mut self.blocks[index]
-                {
-                    *slot = Some(signature);
-                }
-            }
-            ContentBlockDelta::InputJsonDelta { partial_json } => {
-                if !partial_json.is_empty() {
-                    self.tool_inputs
-                        .entry(index)
-                        .or_default()
-                        .push_str(&partial_json);
-                }
-            }
-            ContentBlockDelta::Unknown => (),
-        }
-        Ok(())
-    }
-
-    fn finalize_tool_input(&mut self, index: usize) -> Result<()> {
-        let Some(buffer) = self.tool_inputs.remove(&index) else {
-            return Ok(());
-        };
-        if buffer.is_empty() {
-            return Ok(());
-        }
-        let input: serde_json::Value =
-            serde_json::from_str(&buffer).whatever_context("decode tool input json")?;
-        if let Some(Block::ToolUse(tool_use)) = self.blocks.get_mut(index) {
-            tool_use.input = input;
-        }
-        Ok(())
-    }
-}
-
-fn stream_retry_delay(attempt: usize, max_delay: Duration) -> Duration {
-    let shift = attempt.saturating_sub(1).min(30) as u32;
-    let multiplier = 1u64 << shift;
-    let delay_ms = STREAM_RETRY_BASE_DELAY_MS.saturating_mul(multiplier);
-    let mut delay = Duration::from_millis(delay_ms);
-    if max_delay != Duration::from_millis(0) && delay > max_delay {
-        delay = max_delay;
-    }
-    delay
-}
-
-fn notify_stream_retry_attempt(
-    request_options: &RequestOptions,
-    attempt: usize,
-    delay: Duration,
-    err: &StreamError,
-) {
-    if let Some(notifier) = &request_options.retry_notifier {
-        notifier.notify(RetryUpdate::Attempt(CoreRetryAttempt {
-            attempt,
-            max_attempts: request_options.retry_max_attempts,
-            delay,
-            error: err.to_string(),
-        }));
-    }
-}
-
-fn notify_stream_retry_finished(request_options: &RequestOptions, success: bool) {
-    if let Some(notifier) = &request_options.retry_notifier {
-        notifier.notify(RetryUpdate::Finished { success });
-    }
-}
-
-async fn wait_for_retry(delay: Duration, cancel_token: &CancellationToken) -> bool {
-    if delay == Duration::from_millis(0) {
-        return true;
-    }
-    tokio::select! {
-        _ = cancel_token.cancelled() => false,
-        _ = tokio::time::sleep(delay) => true,
-    }
 }
 
 impl Agent {
@@ -696,6 +467,11 @@ impl Agent {
     where
         F: FnMut(ChatStreamUpdate) + Send,
     {
+        use streaming::{
+            notify_stream_retry_attempt, notify_stream_retry_finished, stream_retry_delay,
+            wait_for_retry,
+        };
+
         let (_, client) = self.pick_provider()?;
         let thinking = self.thinking_payload(request_options);
 
@@ -1133,40 +909,25 @@ impl Agent {
     }
 
     pub fn current_model(&self) -> String {
-        let selected_model = self.selected_model();
-        match Self::select_provider_index(selected_model.as_deref(), &self.config.providers) {
-            Ok(idx) => {
-                let provider = &self.config.providers[idx];
-                Self::resolve_model(provider, selected_model)
-            }
-            Err(_) => selected_model.unwrap_or_else(|| "unknown".to_string()),
-        }
+        get_current_model(
+            self.default_model(),
+            self.model_override.as_deref(),
+            &self.config.providers,
+        )
     }
 
     pub fn resolved_default_model(&self) -> String {
-        let default_model = self.default_model().map(|s| s.to_string());
-        match Self::select_provider_index(default_model.as_deref(), &self.config.providers) {
-            Ok(idx) => {
-                let provider = &self.config.providers[idx];
-                Self::resolve_model(provider, default_model)
-            }
-            Err(_) => default_model.unwrap_or_else(|| "unknown".to_string()),
-        }
+        get_resolved_default_model(self.default_model(), &self.config.providers)
     }
 
     /// Check if the current provider has offload_combo_reply enabled.
     pub fn offload_combo_reply(&self) -> bool {
-        let selected_model = self.selected_model();
-        match Self::select_provider_index(selected_model.as_deref(), &self.config.providers) {
-            Ok(idx) => {
-                let provider = &self.config.providers[idx];
-                let model = Self::resolve_model(provider, selected_model);
-                let mut options = self.config.request_options_for_model(&model);
-                options.apply_override(&provider.request_overrides);
-                options.offload_combo_reply.unwrap_or(false)
-            }
-            Err(_) => false,
-        }
+        has_offload_combo_reply(
+            self.default_model(),
+            self.model_override.as_deref(),
+            &self.config.providers,
+            &self.config,
+        )
     }
 
     fn selected_model(&self) -> Option<String> {
@@ -1261,10 +1022,10 @@ impl Agent {
 
     fn request_options_for_current_model(&self) -> RequestOptions {
         let selected_model = self.selected_model();
-        match Self::select_provider_index(selected_model.as_deref(), &self.config.providers) {
+        match select_provider_index(selected_model.as_deref(), &self.config.providers) {
             Ok(idx) => {
                 let provider = &self.config.providers[idx];
-                let model = Self::resolve_model(provider, selected_model);
+                let model = resolve_model(provider, selected_model);
                 let mut options = self.config.request_options_for_model(&model);
                 options.apply_override(&provider.request_overrides);
                 options.retry_notifier = self.retry_notifier.clone();
@@ -1313,64 +1074,6 @@ impl Agent {
         }
     }
 
-    fn strip_thinking_block(message: &Message) -> Option<Message> {
-        let content = match &message.content {
-            Content::Multiple(blocks) => {
-                let filtered: Vec<Block> = blocks
-                    .iter()
-                    .filter(|block| !matches!(block, Block::Thinking { .. }))
-                    .cloned()
-                    .collect();
-                Content::Multiple(filtered)
-            }
-            Content::Text(_) => message.content.clone(),
-        };
-        if matches!(content, Content::Multiple(ref blocks) if blocks.is_empty()) {
-            None
-        } else {
-            Some(Message {
-                role: message.role.clone(),
-                content,
-            })
-        }
-    }
-
-    fn strip_thinking_blocks(messages: &[Message]) -> Vec<Message> {
-        messages
-            .iter()
-            .filter_map(Self::strip_thinking_block)
-            .collect()
-    }
-
-    fn ensure_thinking_blocks(messages: &mut [Message]) {
-        for message in messages {
-            if !matches!(message.role, Role::Assistant) {
-                continue;
-            }
-            let Content::Multiple(blocks) = &mut message.content else {
-                continue;
-            };
-            let has_tool_use = blocks
-                .iter()
-                .any(|block| matches!(block, Block::ToolUse(_)));
-            if !has_tool_use {
-                continue;
-            }
-            let has_thinking = blocks
-                .iter()
-                .any(|block| matches!(block, Block::Thinking { .. }));
-            if !has_thinking {
-                blocks.insert(
-                    0,
-                    Block::Thinking {
-                        thinking: String::new(),
-                        signature: None,
-                    },
-                );
-            }
-        }
-    }
-
     fn prepare_messages_for_request(
         &mut self,
         messages: Vec<Message>,
@@ -1380,7 +1083,7 @@ impl Agent {
             ThinkingBlocksMode::DropAfterTurn => {
                 if self.thinking_cleanup_pending {
                     self.thinking_cleanup_pending = false;
-                    Self::strip_thinking_blocks(&messages)
+                    strip_thinking_blocks(&messages)
                 } else {
                     messages
                 }
@@ -1390,7 +1093,7 @@ impl Agent {
                 if self.thinking_cleanup_pending {
                     self.thinking_cleanup_pending = false;
                 }
-                Self::strip_thinking_blocks(&messages)
+                strip_thinking_blocks(&messages)
             }
         };
         if request_options.ensure_toolcall_thinking
@@ -1399,7 +1102,7 @@ impl Agent {
                 ThinkingBlocksMode::DropAlways
             )
         {
-            Self::ensure_thinking_blocks(&mut messages);
+            ensure_thinking_blocks(&mut messages);
         }
         if request_options.stringify_nested_tool_inputs {
             messages = stringify_nested_tool_inputs(messages, &self.executor);
@@ -1413,303 +1116,27 @@ impl Agent {
         }
     }
 
-    /// Select the appropriate provider index for the given model.
-    ///
-    /// Selection algorithm:
-    /// 1. If no model is specified, returns the first provider
-    /// 2. If a model is specified, returns the first provider that:
-    ///    - Matches provider name, OR
-    ///    - Has the requested model in its models list
-    /// 3. If no exact match, returns the first wildcard provider
-    /// 4. If no matching provider, returns an error
-    fn select_provider_index(
-        agent_model: Option<&str>,
-        providers: &[ProviderConfig],
-    ) -> Result<usize> {
-        if providers.is_empty() {
-            whatever!("No providers configured")
-        }
-
-        // If no model specified, use first provider
-        let Some(model) = agent_model else {
-            return Ok(0);
-        };
-
-        // Exact match by provider name or declared models
-        if let Some((idx, _)) = providers.iter().enumerate().find(|(_, provider)| {
-            provider.name == model
-                || provider
-                    .models
-                    .as_ref()
-                    .is_some_and(|models| models.iter().any(|candidate| candidate == model))
-        }) {
-            return Ok(idx);
-        }
-
-        // Wildcard provider (no models specified or empty list)
-        if let Some((idx, _)) = providers.iter().enumerate().find(|(_, provider)| {
-            provider.models.is_none() || provider.models.as_ref().is_some_and(|m| m.is_empty())
-        }) {
-            return Ok(idx);
-        }
-
-        let available: Vec<_> = providers
-            .iter()
-            .map(|p| (p.name.clone(), p.models.clone()))
-            .collect();
-        whatever!(
-            "No provider supports model '{}'. Available providers: {:?}",
-            model,
-            available
-        )
-    }
-
     fn pick_provider(&mut self) -> Result<(&str, Client)> {
         let selected_model = self.selected_model();
 
         let provider_idx =
-            Self::select_provider_index(selected_model.as_deref(), &self.config.providers)?;
+            select_provider_index(selected_model.as_deref(), &self.config.providers)?;
         let provider = &mut self.config.providers[provider_idx];
 
         // Use model override or agent's default_model if configured,
         // otherwise fallback to first provider.models,
         // otherwise fallback to provider.name
-        let model = Self::resolve_model(provider, selected_model);
+        let model = resolve_model(provider, selected_model);
 
         let client = Client::new(provider, &model, crate::version::user_agent().to_string())?;
         Ok((&provider.name, client))
-    }
-
-    fn resolve_model(provider: &ProviderConfig, selected_model: Option<String>) -> String {
-        selected_model.unwrap_or_else(|| {
-            provider
-                .models
-                .as_ref()
-                .and_then(|models| models.first().cloned())
-                .unwrap_or_else(|| provider.name.to_owned())
-        })
-    }
-}
-
-fn build_reply_prompt_message(schemas: &[PromptSchema]) -> Message {
-    Message::user(Content::Text(build_reply_tool_directive(schemas)))
-}
-
-fn build_reply_retry_message(schemas: &[PromptSchema]) -> Message {
-    let directive = build_reply_tool_directive(schemas);
-    Message::user(Content::Text(format!(
-        "The previous response did not call the required tool. {directive}"
-    )))
-}
-
-fn build_reply_tool(schemas: &[PromptSchema]) -> Result<crate::provider::Tool> {
-    let mut properties = JsonMap::new();
-    let mut required = Vec::new();
-    for schema in schemas {
-        properties.insert(
-            schema.name.clone(),
-            json!({
-                "type": "string",
-                "description": schema.description.as_str(),
-            }),
-        );
-        required.push(schema.name.clone());
-    }
-    ensure_whatever!(!properties.is_empty(), "schemas cannot be empty");
-    let input_schema = json!({
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": false,
-    });
-    Ok(crate::provider::Tool {
-        name: PROMPT_REPLY_TOOL_NAME.to_string(),
-        description: "Return the response using the provided schema.".to_string(),
-        input_schema,
-    })
-}
-
-fn build_reply_tool_directive(schemas: &[PromptSchema]) -> String {
-    let fields = schemas
-        .iter()
-        .map(|schema| schema.name.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "You must call the tool \"{PROMPT_REPLY_TOOL_NAME}\" exactly once. \
-Do not output plain text. Provide all required fields in the tool input. \
-Required fields: {fields}."
-    )
-}
-
-fn should_use_tool_choice_fallback(request_options: &RequestOptions) -> bool {
-    request_options.disable_tool_choice && request_options.tool_choice_fallback
-}
-
-fn stringify_nested_tool_schema(schema: &Value) -> Value {
-    let mut output = schema.clone();
-    stringify_nested_schema_in_place(&mut output, 0);
-    output
-}
-
-fn stringify_nested_schema_in_place(schema: &mut Value, depth: usize) {
-    if depth > 0 && schema_is_object_or_array(schema) {
-        let desc = schema
-            .get("description")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let suffix = "JSON string";
-        let description = if desc.is_empty() {
-            suffix.to_string()
-        } else {
-            format!("{desc} ({suffix})")
-        };
-        *schema = json!({
-            "type": "string",
-            "description": description,
-        });
-        return;
-    }
-
-    let Some(obj) = schema.as_object_mut() else {
-        return;
-    };
-
-    if let Some(props) = obj.get_mut("properties").and_then(Value::as_object_mut) {
-        for value in props.values_mut() {
-            stringify_nested_schema_in_place(value, depth + 1);
-        }
-    }
-    if let Some(items) = obj.get_mut("items") {
-        stringify_nested_schema_in_place(items, depth + 1);
-    }
-    if let Some(additional) = obj.get_mut("additionalProperties") {
-        stringify_nested_schema_in_place(additional, depth + 1);
-    }
-    for key in ["anyOf", "oneOf", "allOf"] {
-        if let Some(list) = obj.get_mut(key).and_then(Value::as_array_mut) {
-            for value in list {
-                stringify_nested_schema_in_place(value, depth + 1);
-            }
-        }
-    }
-}
-
-fn schema_is_object_or_array(schema: &Value) -> bool {
-    if let Some(ty) = schema.get("type") {
-        match ty {
-            Value::String(value) => {
-                if value == "object" || value == "array" {
-                    return true;
-                }
-            }
-            Value::Array(values) => {
-                if values.iter().any(|value| {
-                    matches!(value, Value::String(value) if value == "object" || value == "array")
-                }) {
-                    return true;
-                }
-            }
-            _ => (),
-        }
-    }
-    if schema.get("properties").is_some() || schema.get("items").is_some() {
-        return true;
-    }
-    for key in ["anyOf", "oneOf", "allOf"] {
-        if let Some(list) = schema.get(key).and_then(Value::as_array)
-            && list.iter().any(schema_is_object_or_array)
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn stringify_nested_tool_inputs(messages: Vec<Message>, executor: &Executor) -> Vec<Message> {
-    messages
-        .into_iter()
-        .map(|mut message| {
-            let Content::Multiple(blocks) = &mut message.content else {
-                return message;
-            };
-            for block in blocks {
-                let Block::ToolUse(tool_use) = block else {
-                    continue;
-                };
-                if let Some(schema) = executor.tool_input_schema(&tool_use.name) {
-                    tool_use.input = stringify_tool_input_value(&tool_use.input, &schema);
-                }
-            }
-            message
-        })
-        .collect()
-}
-
-fn stringify_tool_input_value(input: &Value, schema: &Value) -> Value {
-    let Value::Object(map) = input else {
-        return input.clone();
-    };
-    let mut output = JsonMap::new();
-    for (key, value) in map {
-        let prop_schema = schema
-            .get("properties")
-            .and_then(Value::as_object)
-            .and_then(|props| props.get(key));
-        if let Some(schema) = prop_schema
-            && schema_is_object_or_array(schema)
-            && matches!(value, Value::Object(_) | Value::Array(_))
-        {
-            let text = serde_json::to_string(value).unwrap_or_else(|_| value.to_string());
-            output.insert(key.clone(), Value::String(text));
-        } else {
-            output.insert(key.clone(), value.clone());
-        }
-    }
-    Value::Object(output)
-}
-
-fn parse_stringified_tool_input(input: Value, schema: &Value) -> Value {
-    let Value::Object(map) = input else {
-        return input;
-    };
-    let mut output = JsonMap::new();
-    for (key, value) in map {
-        let prop_schema = schema
-            .get("properties")
-            .and_then(Value::as_object)
-            .and_then(|props| props.get(&key));
-        if let Some(schema) = prop_schema
-            && schema_is_object_or_array(schema)
-            && let Value::String(text) = &value
-            && let Ok(parsed) = serde_json::from_str::<Value>(text)
-        {
-            output.insert(key, parsed);
-            continue;
-        }
-        output.insert(key, value);
-    }
-    Value::Object(output)
-}
-
-fn parse_stringified_tool_inputs_in_message(message: &mut Message, executor: &Executor) {
-    let Content::Multiple(blocks) = &mut message.content else {
-        return;
-    };
-    for block in blocks {
-        let Block::ToolUse(tool_use) = block else {
-            continue;
-        };
-        if let Some(schema) = executor.tool_input_schema(&tool_use.name) {
-            tool_use.input = parse_stringified_tool_input(tool_use.input.clone(), &schema);
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EnvString, ModelRequestConfig, ProviderKind};
+    use crate::{EnvString, ModelRequestConfig, ProviderConfig, ProviderKind};
 
     #[test]
     fn request_options_provider_override_stringify_nested_tool_inputs() {
@@ -1728,124 +1155,6 @@ mod tests {
         let agent = Agent::new(config);
         let options = agent.request_options_for_current_model();
         assert!(options.stringify_nested_tool_inputs);
-    }
-
-    #[test]
-    fn stream_accumulator_updates_plain_and_thinking() {
-        let mut accumulator = StreamAccumulator::new();
-        let mut updates = Vec::new();
-        let mut on_update = |update| updates.push(update);
-
-        accumulator
-            .handle_event(
-                MessagesStreamEvent::ContentBlockStart {
-                    index: 0,
-                    content_block: Block::text(""),
-                },
-                &mut on_update,
-            )
-            .unwrap();
-        accumulator
-            .handle_event(
-                MessagesStreamEvent::ContentBlockDelta {
-                    index: 0,
-                    delta: ContentBlockDelta::TextDelta {
-                        text: "Hello".to_string(),
-                    },
-                },
-                &mut on_update,
-            )
-            .unwrap();
-        accumulator
-            .handle_event(
-                MessagesStreamEvent::ContentBlockStart {
-                    index: 1,
-                    content_block: Block::Thinking {
-                        thinking: String::new(),
-                        signature: None,
-                    },
-                },
-                &mut on_update,
-            )
-            .unwrap();
-        accumulator
-            .handle_event(
-                MessagesStreamEvent::ContentBlockDelta {
-                    index: 1,
-                    delta: ContentBlockDelta::ThinkingDelta {
-                        thinking: "Reasoning".to_string(),
-                    },
-                },
-                &mut on_update,
-            )
-            .unwrap();
-        accumulator
-            .handle_event(
-                MessagesStreamEvent::MessageDelta {
-                    delta: crate::provider::MessageDelta {
-                        stop_reason: Some(StopReason::EndTurn),
-                        stop_sequence: None,
-                    },
-                    usage: None,
-                },
-                &mut on_update,
-            )
-            .unwrap();
-        let action = accumulator
-            .handle_event(MessagesStreamEvent::MessageStop, &mut on_update)
-            .unwrap();
-
-        assert!(matches!(action, StreamAction::Stop));
-        assert_eq!(updates.len(), 2);
-        match &updates[0] {
-            ChatStreamUpdate::Plain { index, text } => {
-                assert_eq!(*index, 0);
-                assert_eq!(text, "Hello");
-            }
-            other => panic!("unexpected update: {other:?}"),
-        }
-        match &updates[1] {
-            ChatStreamUpdate::Thinking { index, text } => {
-                assert_eq!(*index, 1);
-                assert_eq!(text, "Reasoning");
-            }
-            other => panic!("unexpected update: {other:?}"),
-        }
-
-        let (blocks, stop_reason, _) = accumulator.finish();
-        assert_eq!(stop_reason, Some(StopReason::EndTurn));
-        assert_eq!(blocks.len(), 2);
-        match &blocks[0] {
-            Block::Text { text } => assert_eq!(text, "Hello"),
-            other => panic!("unexpected block: {other:?}"),
-        }
-        match &blocks[1] {
-            Block::Thinking { thinking, .. } => assert_eq!(thinking, "Reasoning"),
-            other => panic!("unexpected block: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn retry_stream_error_heuristics() {
-        let err = StreamError::transport("read stream chunk error: broken pipe".to_string());
-        assert!(err.is_retryable());
-
-        let err = StreamError::decode("decode stream event data".to_string());
-        assert!(!err.is_retryable());
-
-        let err = StreamError::decode("chat stream cancelled".to_string());
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn tool_choice_fallback_requires_disable() {
-        let mut options = RequestOptions {
-            tool_choice_fallback: true,
-            ..Default::default()
-        };
-        assert!(!should_use_tool_choice_fallback(&options));
-        options.disable_tool_choice = true;
-        assert!(should_use_tool_choice_fallback(&options));
     }
 
     #[test]
@@ -1924,66 +1233,5 @@ mod tests {
             }
             _ => panic!("expected multiple blocks"),
         }
-    }
-
-    #[test]
-    fn stringify_nested_schema_converts_nested_object_and_array() {
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "meta": {
-                    "type": "object",
-                    "description": "metadata",
-                    "properties": {
-                        "name": {"type": "string"}
-                    }
-                },
-                "tags": {
-                    "type": "array",
-                    "items": {"type": "string"}
-                }
-            }
-        });
-
-        let output = stringify_nested_tool_schema(&schema);
-        let props = output
-            .get("properties")
-            .and_then(Value::as_object)
-            .expect("properties");
-        assert_eq!(props["meta"]["type"], "string");
-        assert!(
-            props["meta"]["description"]
-                .as_str()
-                .unwrap_or("")
-                .contains("JSON string")
-        );
-        assert_eq!(props["tags"]["type"], "string");
-    }
-
-    #[test]
-    fn stringify_and_parse_tool_input_round_trip() {
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "meta": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"}
-                    }
-                },
-                "name": {"type": "string"}
-            }
-        });
-
-        let input = json!({
-            "meta": {"name": "coco"},
-            "name": "demo"
-        });
-        let stringified = stringify_tool_input_value(&input, &schema);
-        assert!(stringified.get("meta").is_some());
-        assert!(stringified["meta"].is_string());
-
-        let parsed = parse_stringified_tool_input(stringified, &schema);
-        assert_eq!(parsed, input);
     }
 }

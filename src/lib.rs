@@ -10,6 +10,7 @@ pub mod exec;
 pub mod global;
 pub mod logging;
 mod mcp;
+mod prompt_reply;
 mod provider;
 mod retry;
 mod runtime_overrides;
