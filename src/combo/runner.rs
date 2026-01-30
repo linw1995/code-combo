@@ -11,10 +11,24 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use super::{
-    BASH_TOOL_NAME, BashInput, ExecuteResult, Final, Input, Output, prepare_mcp_envs,
-    run_bash_chunked,
+macro_rules! err_msg {
+    ($template:literal) => {
+        crate::tools::Final::from(format!($template)).err()
+    };
+    ($template:literal, $expression:expr) => {
+        crate::tools::Final::from(format!($template, $expression)).err()
+    };
+    ($template:literal, $($expression:expr),* ) => {
+        crate::tools::Final::from(format!($template, $($expression),*)).err()
+    };
+}
+
+use crate::tools::{
+    BASH_TOOL_NAME, BashInput, Final, Input, Output, prepare_mcp_envs, run_bash_chunked,
 };
+
+pub type ExecuteResult = Result<Output, Final>;
+
 use crate::{
     Agent, Block, ChatStreamUpdate, Config, Content, Message, OutputChunk, PromptSchema,
     SessionEnv, Starter, StarterCommand, StarterError, StarterEvent, ToolUse, bash_unsafe_ranges,

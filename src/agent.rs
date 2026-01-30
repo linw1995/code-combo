@@ -23,10 +23,11 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
+use crate::combo::run_combo;
 use crate::{
     ComboEvent, ComboInfo, Config, Error, PromptSchema, RequestOptions, Result, ResultDisplayExt,
     RunComboContext, StreamError, ThinkingBlocksMode, ThinkingConfig,
-    tools::{RunTaskContext, RunTaskTool, run_combo},
+    tools::{RunTaskContext, RunTaskTool},
 };
 use executor::PermissionControl;
 use message::{
