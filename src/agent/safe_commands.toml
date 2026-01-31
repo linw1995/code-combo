@@ -208,6 +208,10 @@ command = ["git", "commit"]
 flags = [{ name = "--dry-run", arg = "none" }]
 
 [[commands]]
+command = ["git", "fetch"]
+allow_any = true
+
+[[commands]]
 command = ["cargo", "check"]
 allow_any = true
 
