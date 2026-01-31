@@ -53,6 +53,7 @@ pub async fn handle_record(wrap_result: bool, command: Vec<String>) -> Result<()
     let started_at = OffsetDateTime::now_utc().unix_timestamp();
     let mut proc = ExecCommand::from_argv(exec_command.clone())
         .stdin(Stdio::inherit())
+        .disable_tty()
         .spawn_chunked(ChunkConfig {
             interval: Duration::from_millis(500),
         })

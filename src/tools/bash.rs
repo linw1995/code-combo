@@ -153,6 +153,7 @@ where
     envs.extend(extra_envs.iter().cloned());
     let mut proc = ExecCommand::from_argv(argv)
         .remove_env_prefix("COCO_")
+        .disable_tty()
         .envs(envs)
         .spawn_chunked(ChunkConfig {
             interval: Duration::ZERO,
