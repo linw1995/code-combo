@@ -9,6 +9,7 @@ pub mod widgets;
 #[macro_use]
 pub mod components;
 pub mod events;
+mod idle_tracker;
 pub mod logging;
 mod notifications;
 pub mod theme;
