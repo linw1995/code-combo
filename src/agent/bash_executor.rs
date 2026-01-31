@@ -2111,4 +2111,15 @@ mod tests {
         assert_safe_cmd_with_rules!("agent_cmd", &rules);
         assert_safe_cmd_with_rules!("ls", &rules); // builtin should still exist
     }
+
+    #[test]
+    fn git_fetch_is_safe_command() {
+        // Test that git fetch is recognized as a safe command
+        assert_safe_cmd!("git fetch");
+        assert_safe_cmd!("git fetch origin");
+        assert_safe_cmd!("git fetch origin main");
+        assert_safe_cmd!("git fetch --all");
+        assert_safe_cmd!("git fetch --prune");
+        assert_safe_cmd!("git fetch --multiple origin upstream");
+    }
 }
