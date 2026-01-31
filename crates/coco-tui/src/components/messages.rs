@@ -336,6 +336,10 @@ impl Messages {
         *self.offset.write() = 0;
     }
 
+    fn is_at_bottom(&self) -> bool {
+        self.offset.get() == 0
+    }
+
     pub fn selected_idx(&self) -> Option<usize> {
         self.focus.get()
     }
@@ -616,6 +620,7 @@ impl Messages {
 
     /// Returns the index in the vector of the tool message that handled the event.
     pub fn on_tool_event(&mut self, event: &Event) -> Option<usize> {
+        let was_at_bottom = self.is_at_bottom();
         match event {
             Event::Ask(AskEvent::ToolUsePermission(id))
             | Event::Ask(AskEvent::TextEdit { id, .. })
@@ -625,6 +630,9 @@ impl Messages {
                 if let Some(idx) = self.locate_tool_message(id) {
                     // Pass through the relative event to its component.
                     self.messages.write_untracked()[idx].handle_event(event);
+                    if was_at_bottom {
+                        self.scroll_to_bottom();
+                    }
                     return Some(idx);
                 }
             }
@@ -683,6 +691,10 @@ impl Messages {
         let (visible_start, _) = self.scroll_position();
         let visible_end = visible_start.saturating_add(self.viewport_height);
         let max_offset = self.total_height.saturating_sub(self.viewport_height);
+
+        if self.is_at_bottom() && idx + 1 == heights.len() && focus_bottom >= visible_end {
+            return;
+        }
 
         let desired_top = if focus_top < visible_start {
             focus_top
