@@ -30,7 +30,10 @@ pub use provider::{
     ModelPreset, ModelRequestConfig, ProviderConfig, ProviderKind, RequestOptions,
     ThinkingBlocksMode,
 };
-pub use ui::{MarkdownRenderEngine, NotificationBackend, UI, UINotifications};
+pub use ui::{
+    IdleNotification, MarkdownRenderEngine, NotificationBackend, NotificationRule,
+    NotificationWhen, UI, UINotifications,
+};
 
 type BoxError = Box<dyn StdError + Send + Sync>;
 
@@ -415,7 +418,8 @@ fn table_name_from_table(table: &toml::value::Table, path: &str) -> Result<Strin
 mod tests {
     use super::{
         Config, MarkdownRenderEngine, McpServerConnection, ModelPreset, ModelRequestConfig,
-        NotificationBackend, SafeCommandsMode, ThinkingBlocksMode, merge_config_values,
+        NotificationBackend, NotificationWhen, SafeCommandsMode, ThinkingBlocksMode,
+        merge_config_values,
     };
 
     fn base_config() -> String {
@@ -458,14 +462,11 @@ mod tests {
 
     #[test]
     fn parse_config_with_notifications() {
-        let config_str = [
-            "[ui]",
-            "notifications = { enabled = false, only_when_unfocused = false }",
-        ]
-        .join("\n");
+        let config_str = ["[ui]", "notifications = { enabled = false }"].join("\n");
         let config: Config = toml::from_str(&config_str).expect("parse config");
         assert!(!config.ui.notifications.enabled);
-        assert!(!config.ui.notifications.only_when_unfocused);
+        assert!(config.ui.notifications.reply_ready.enabled);
+        assert!(config.ui.notifications.action_required.enabled);
     }
 
     #[test]
@@ -473,17 +474,56 @@ mod tests {
         let config_str = [
             "[ui.notifications]",
             "enabled = true",
-            "only_when_unfocused = true",
             "backend = { type = \"external_command\", executable = \"notify-cmd\", args = [\"--json\"] }",
         ]
         .join("\n");
         let config: Config = toml::from_str(&config_str).expect("parse config");
         assert!(config.ui.notifications.enabled);
-        assert!(config.ui.notifications.only_when_unfocused);
         assert!(matches!(
             config.ui.notifications.backend,
             NotificationBackend::ExternalCommand { .. }
         ));
+    }
+
+    #[test]
+    fn parse_config_with_idle_notifications() {
+        let config_str = [
+            "[ui.notifications.idle]",
+            "enabled = true",
+            "when = \"always\"",
+            "timeout_seconds = 120",
+            "max_notifications = 2",
+            "interval_seconds = 30",
+        ]
+        .join("\n");
+        let config: Config = toml::from_str(&config_str).expect("parse config");
+        let idle = &config.ui.notifications.idle;
+        assert!(idle.enabled);
+        assert_eq!(idle.when, NotificationWhen::Always);
+        assert_eq!(idle.timeout_seconds, 120);
+        assert_eq!(idle.max_notifications, 2);
+        assert_eq!(idle.interval_seconds, 30);
+    }
+
+    #[test]
+    fn parse_config_with_notification_rules() {
+        let config_str = [
+            "[ui.notifications.reply_ready]",
+            "enabled = true",
+            "when = \"unfocused\"",
+            "",
+            "[ui.notifications.action_required]",
+            "enabled = false",
+            "when = \"focused\"",
+        ]
+        .join("\n");
+        let config: Config = toml::from_str(&config_str).expect("parse config");
+        let reply_ready = &config.ui.notifications.reply_ready;
+        assert!(reply_ready.enabled);
+        assert_eq!(reply_ready.when, NotificationWhen::Unfocused);
+        let action_required = &config.ui.notifications.action_required;
+        assert!(!action_required.enabled);
+        assert_eq!(action_required.when, NotificationWhen::Focused);
     }
 
     #[test]

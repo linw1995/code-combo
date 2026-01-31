@@ -7,9 +7,9 @@ use code_combo::tools::{
 use code_combo::{
     Agent, Block as ChatBlock, ChatResponse, ChatStreamUpdate, ComboRunEvent, ComboRunResult,
     ComboStreamKind as ComboRunStreamKind, Config, Content as ChatContent, Message as ChatMessage,
-    Output, RetryAttempt, RetryNotifier, RetryUpdate, RuntimeOverrides, Starter, StopReason,
-    TextEdit, ToolUse, UsageStats, discover_starters, load_runtime_overrides,
-    save_runtime_overrides,
+    NotificationRule, NotificationWhen, Output, RetryAttempt, RetryNotifier, RetryUpdate,
+    RuntimeOverrides, Starter, StopReason, TextEdit, ToolUse, UsageStats, discover_starters,
+    load_runtime_overrides, save_runtime_overrides,
 };
 
 /// Holds information about a collected tool result from concurrent execution.
@@ -56,6 +56,7 @@ use crate::{
     components::{CommandPalette, Content, Persistable},
     error::*,
     global::{self, State},
+    idle_tracker::IdleTracker,
     notifications,
     session::{self, Session},
     widgets::{BRAILLE_EIGHT_DOUBLE, Throbber, ThrobberState},
@@ -98,6 +99,7 @@ pub struct Chat<'a> {
     retry_status: Option<RetryAttempt>,
     transcript_scopes: Vec<TranscriptScope>,
     terminal_focused: bool,
+    idle_tracker: IdleTracker,
 
     /// Tool IDs we're expecting results from in concurrent execution.
     /// When empty, tool results are processed immediately.
@@ -344,6 +346,7 @@ impl Chat<'static> {
             retry_status: None,
             transcript_scopes: Vec::new(),
             terminal_focused: true,
+            idle_tracker: IdleTracker::new(Instant::now()),
             pending_tool_ids: HashSet::new(),
             collected_tool_results: Vec::new(),
             token_schedule_session_save: None,
@@ -1162,7 +1165,7 @@ impl Chat<'static> {
 
     fn notify_reply_ready(&self, summary: Option<&str>) {
         let config = global::config_sync();
-        if !self.should_notify(&config) {
+        if !self.should_notify_reply_ready(&config) {
             return;
         }
         let body = match summary {
@@ -1174,7 +1177,7 @@ impl Chat<'static> {
 
     fn notify_action_required(&self, reason: &str) {
         let config = global::config_sync();
-        if !self.should_notify(&config) {
+        if !self.should_notify_action_required(&config) {
             return;
         }
         let body = if reason.trim().is_empty() {
@@ -1185,18 +1188,71 @@ impl Chat<'static> {
         notifications::send_notification(NOTIFY_TITLE, &body, &config.ui.notifications.backend);
     }
 
-    fn should_notify(&self, config: &Config) -> bool {
+    fn maybe_notify_idle(&mut self) {
+        let config = global::config_sync();
+        let idle = &config.ui.notifications.idle;
+        let should_notify = self.should_notify_idle(&config);
+        let Some(count) = self.idle_tracker.poll(Instant::now(), idle, should_notify) else {
+            return;
+        };
+        let body = Self::idle_notification_body(count);
+        notifications::send_notification(NOTIFY_TITLE, &body, &config.ui.notifications.backend);
+    }
+
+    fn idle_notification_body(count: u32) -> String {
+        match count {
+            1 => "Response ready - waiting for your input".to_string(),
+            2 => "Still waiting - your response is needed".to_string(),
+            _ => "Reminder: action required".to_string(),
+        }
+    }
+
+    fn should_notify_reply_ready(&self, config: &Config) -> bool {
+        self.should_notify_rule(config, &config.ui.notifications.reply_ready)
+    }
+
+    fn should_notify_action_required(&self, config: &Config) -> bool {
+        self.should_notify_rule(config, &config.ui.notifications.action_required)
+    }
+
+    fn should_notify_idle(&self, config: &Config) -> bool {
         if !config.ui.notifications.enabled {
             return false;
         }
-        if config.ui.notifications.only_when_unfocused && self.terminal_focused {
+        let idle = &config.ui.notifications.idle;
+        if !idle.enabled {
+            return false;
+        }
+        if !self.focus_policy_allows(idle.when) {
+            return false;
+        }
+        true
+    }
+
+    fn should_notify_rule(&self, config: &Config, rule: &NotificationRule) -> bool {
+        if !config.ui.notifications.enabled {
+            return false;
+        }
+        if !rule.enabled {
+            return false;
+        }
+        if !self.focus_policy_allows(rule.when) {
             debug!(
-                focused = true,
-                "notification suppressed: only_when_unfocused enabled"
+                focused = self.terminal_focused,
+                ?rule,
+                "notification suppressed by focus policy"
             );
             return false;
         }
         true
+    }
+
+    fn focus_policy_allows(&self, when: NotificationWhen) -> bool {
+        match when {
+            NotificationWhen::Focused => self.terminal_focused,
+            NotificationWhen::Unfocused => !self.terminal_focused,
+            NotificationWhen::Always => true,
+        }
     }
 
     fn reply_summary_from_messages(msgs: &[BotMessage]) -> Option<String> {
@@ -2089,6 +2145,8 @@ impl Component for Chat<'static> {
             self.indicator.calc_next();
             global::signal_dirty();
         }
+
+        self.maybe_notify_idle();
     }
 
     fn handle_event(&mut self, event: &Event) {
@@ -2421,6 +2479,8 @@ impl Component for Chat<'static> {
         use Focus::*;
         use KeyCode::*;
         use KeyModifiers as KM;
+
+        self.idle_tracker.record_activity(Instant::now());
 
         if matches!(key.code, BackTab) {
             if self.view == ViewMode::Chat {
