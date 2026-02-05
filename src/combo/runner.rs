@@ -350,6 +350,7 @@ async fn execute_combo(
                     StarterEvent::PromptRequest {
                         prompt,
                         schemas,
+                        interactive,
                         responder,
                         thinking,
                     } => {
@@ -363,7 +364,27 @@ async fn execute_combo(
                         });
                         summary_parts.push(format!("[Prompt] {}", prompt));
 
-                        if reply_agent.offload_combo_reply() {
+                        if interactive {
+                            let result = handle_interactive_combo_reply(
+                                &mut reply_agent,
+                                &schemas,
+                                &combo_name,
+                                cancel_token.clone(),
+                                session_socket_path.clone(),
+                                &on_event_for_emit,
+                            )
+                            .await;
+                            if let Err(err) = result {
+                                let message = err.to_string();
+                                emit_combo_event(
+                                    &on_event_for_emit,
+                                    ComboEvent::ReplyToolError {
+                                        message: message.clone(),
+                                    },
+                                );
+                                let _ = responder.send(Err(message));
+                            }
+                        } else if reply_agent.offload_combo_reply() {
                             let result = handle_offload_combo_reply_with_retry(
                                 &mut reply_agent,
                                 &schemas,
@@ -374,12 +395,14 @@ async fn execute_combo(
                             )
                             .await;
                             if let Err(err) = result {
+                                let message = err.to_string();
                                 emit_combo_event(
                                     &on_event_for_emit,
                                     ComboEvent::ReplyToolError {
-                                        message: err.to_string(),
+                                        message: message.clone(),
                                     },
                                 );
+                                let _ = responder.send(Err(message));
                             }
                         } else {
                             let disable_stream =
@@ -963,6 +986,339 @@ fn extract_thinking_blocks(message: &Message) -> Vec<String> {
     }
 }
 
+fn extract_tool_uses(message: &Message) -> Vec<ToolUse> {
+    match &message.content {
+        Content::Text(_) => Vec::new(),
+        Content::Multiple(blocks) => blocks
+            .iter()
+            .filter_map(|block| {
+                if let Block::ToolUse(tool_use) = block {
+                    Some(tool_use.clone())
+                } else {
+                    None
+                }
+            })
+            .collect(),
+    }
+}
+
+fn build_interactive_offload_reply_directive(schemas: &[PromptSchema]) -> String {
+    let field_args: Vec<String> = schemas
+        .iter()
+        .map(|schema| format!("--{}=<value>", schema.name))
+        .collect();
+    let field_descriptions: Vec<String> = schemas
+        .iter()
+        .map(|schema| format!("- --{}=<value>: {}", schema.name, schema.description))
+        .collect();
+    format!(
+        r#"You can interact in multiple rounds and call tools as needed.
+When you have enough information, finish by calling the bash tool with:
+```
+coco reply {field_args}
+```
+
+Required fields:
+{field_list}
+
+Until then, keep working with normal assistant behavior and tool usage."#,
+        field_args = field_args.join(" "),
+        field_list = field_descriptions.join("\n"),
+    )
+}
+
+fn build_interactive_offload_reply_reminder(schemas: &[PromptSchema]) -> String {
+    let field_args: Vec<String> = schemas
+        .iter()
+        .map(|schema| format!("--{}=...", schema.name))
+        .collect();
+    format!(
+        "Continue if needed. When ready, finish with: coco reply {}",
+        field_args.join(" ")
+    )
+}
+
+async fn execute_interactive_tool_use(
+    agent: &mut Agent,
+    tool_use: &ToolUse,
+    cancel_token: CancellationToken,
+) -> (Final, bool) {
+    let final_output: Arc<std::sync::Mutex<Option<(Final, bool)>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let final_output_for_cb = final_output.clone();
+    let permission_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let permission_requested_for_cb = permission_requested.clone();
+    let exec_status = agent
+        .execute_with_output(
+            &tool_use.id,
+            &tool_use.name,
+            Input::Starter(tool_use.input.clone()),
+            cancel_token.clone(),
+            move |output| match output {
+                crate::Output::AskPermission => {
+                    permission_requested_for_cb.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                crate::Output::Success(final_output_value) => {
+                    if let Ok(mut guard) = final_output_for_cb.lock() {
+                        *guard = Some((final_output_value, false));
+                    }
+                }
+                crate::Output::Failure(final_output_value) => {
+                    if let Ok(mut guard) = final_output_for_cb.lock() {
+                        *guard = Some((final_output_value, true));
+                    }
+                }
+                crate::Output::ToolOutput(_)
+                | crate::Output::TextEdit(_)
+                | crate::Output::SubagentOutput(_)
+                | crate::Output::ComboOutput(_)
+                | crate::Output::Denied => {}
+            },
+        )
+        .await;
+    if cancel_token.is_cancelled() {
+        return (Final::Message("tool execution cancelled".to_string()), true);
+    }
+    if let Some((output, is_error)) = final_output.lock().ok().and_then(|guard| guard.clone()) {
+        return (output, is_error);
+    }
+    if permission_requested.load(std::sync::atomic::Ordering::SeqCst) {
+        return (
+            Final::Message("permission required for tool execution".to_string()),
+            true,
+        );
+    }
+    match exec_status {
+        Ok(crate::ExecuteStatus::Completed) => (Final::Message("tool executed".to_string()), false),
+        Ok(crate::ExecuteStatus::Cancelled) => {
+            (Final::Message("tool execution cancelled".to_string()), true)
+        }
+        Err(err) => (
+            Final::Message(format!("tool execution failed: {err}")),
+            true,
+        ),
+    }
+}
+
+async fn handle_interactive_combo_reply(
+    agent: &mut Agent,
+    schemas: &[PromptSchema],
+    combo_name: &str,
+    cancel_token: CancellationToken,
+    session_socket_path: PathBuf,
+    on_event: &ComboEventCallback,
+) -> Result<(), ComboReplyError> {
+    if cancel_token.is_cancelled() {
+        return Err(ComboReplyError::Cancelled);
+    }
+    agent
+        .append_message(Message::user(Content::Text(
+            build_interactive_offload_reply_directive(schemas),
+        )))
+        .await;
+
+    let max_turns = 50usize;
+    for _ in 0..max_turns {
+        if cancel_token.is_cancelled() {
+            return Err(ComboReplyError::Cancelled);
+        }
+        let disable_stream = agent.disable_stream_for_current_model();
+        let response = if disable_stream {
+            agent
+                .chat_with_history()
+                .await
+                .map_err(|e| ComboReplyError::ChatFailed {
+                    message: e.to_string(),
+                })?
+        } else {
+            let on_event_stream = on_event.clone();
+            let stream_name = combo_name.to_string();
+            agent
+                .chat_stream_with_history(cancel_token.clone(), move |update| match update {
+                    ChatStreamUpdate::Reset => {
+                        emit_combo_event(
+                            &on_event_stream,
+                            ComboEvent::PromptStreamReset {
+                                name: stream_name.clone(),
+                            },
+                        );
+                    }
+                    ChatStreamUpdate::Plain { index, text } => {
+                        emit_combo_event(
+                            &on_event_stream,
+                            ComboEvent::PromptStream {
+                                name: stream_name.clone(),
+                                index,
+                                kind: ComboEventStreamKind::Plain,
+                                text,
+                            },
+                        );
+                    }
+                    ChatStreamUpdate::Thinking { index, text } => {
+                        emit_combo_event(
+                            &on_event_stream,
+                            ComboEvent::PromptStream {
+                                name: stream_name.clone(),
+                                index,
+                                kind: ComboEventStreamKind::Thinking,
+                                text,
+                            },
+                        );
+                    }
+                })
+                .await
+                .map_err(|e| ComboReplyError::ChatFailed {
+                    message: e.to_string(),
+                })?
+        };
+
+        let tool_uses = extract_tool_uses(&response.message);
+        if tool_uses.is_empty() {
+            agent
+                .append_message(Message::user(Content::Text(
+                    build_interactive_offload_reply_reminder(schemas),
+                )))
+                .await;
+            continue;
+        }
+
+        let mut tool_results = Vec::new();
+        let mut completed = false;
+        let mut guidance: Option<String> = None;
+
+        for tool_use in tool_uses {
+            emit_combo_event(
+                on_event,
+                ComboEvent::ReplyToolUse {
+                    name: combo_name.to_string(),
+                    tool_use: tool_use.clone(),
+                    thinking: Vec::new(),
+                    offload: true,
+                },
+            );
+
+            if tool_use.name == BASH_TOOL_NAME {
+                let bash_input: BashInput = serde_json::from_value(tool_use.input.clone())
+                    .map_err(|err| ComboReplyError::InvalidBashInput {
+                        message: err.to_string(),
+                    })?;
+                let command = bash_input.command.clone();
+                let command_kind = classify_offload_command(&command);
+                let (output, is_error) = match command_kind {
+                    OffloadCommandKind::Unsafe => {
+                        let reason = match bash_unsafe_reason(&command) {
+                            Ok(_) => "command not allowlisted".to_string(),
+                            Err(reason) => reason,
+                        };
+                        (
+                            Final::Message(format!(
+                                "command rejected: {reason}; expected coco reply"
+                            )),
+                            true,
+                        )
+                    }
+                    OffloadCommandKind::Safe | OffloadCommandKind::Coco => {
+                        let bash_input_value =
+                            serde_json::to_value(&bash_input).map_err(|err| {
+                                ComboReplyError::InvalidBashInput {
+                                    message: err.to_string(),
+                                }
+                            })?;
+                        let extra_envs = vec![(
+                            "COCO_SESSION_SOCK".to_string(),
+                            session_socket_path.to_string_lossy().to_string(),
+                        )];
+                        let output = run_bash_chunked(
+                            Input::Starter(bash_input_value),
+                            &extra_envs,
+                            cancel_token.clone(),
+                            |_| {},
+                        )
+                        .await;
+                        if cancel_token.is_cancelled() {
+                            return Err(ComboReplyError::Cancelled);
+                        }
+                        match output {
+                            Ok(Output::Final(output)) => (output, false),
+                            Ok(Output::TextEdit(_)) => (
+                                Final::Message("unexpected tool output from bash".to_string()),
+                                true,
+                            ),
+                            Err(output) => (output, true),
+                        }
+                    }
+                };
+
+                emit_combo_event(
+                    on_event,
+                    ComboEvent::ReplyToolResult {
+                        name: combo_name.to_string(),
+                        tool_use_id: tool_use.id.clone(),
+                        is_error,
+                        output: output.clone(),
+                    },
+                );
+                tool_results.push(Block::tool_result(
+                    &tool_use.id,
+                    Some(is_error),
+                    final_to_tool_content(&output),
+                ));
+
+                match command_kind {
+                    OffloadCommandKind::Coco if !is_error => {
+                        completed = true;
+                        break;
+                    }
+                    OffloadCommandKind::Coco => {
+                        guidance = Some(build_offload_reply_guidance(schemas, &command, true));
+                    }
+                    OffloadCommandKind::Unsafe => {
+                        guidance = Some(build_offload_reply_guidance(schemas, &command, false));
+                    }
+                    OffloadCommandKind::Safe => {}
+                }
+                continue;
+            }
+
+            let (output, is_error) =
+                execute_interactive_tool_use(agent, &tool_use, cancel_token.clone()).await;
+            emit_combo_event(
+                on_event,
+                ComboEvent::ReplyToolResult {
+                    name: combo_name.to_string(),
+                    tool_use_id: tool_use.id.clone(),
+                    is_error,
+                    output: output.clone(),
+                },
+            );
+            tool_results.push(Block::tool_result(
+                &tool_use.id,
+                Some(is_error),
+                final_to_tool_content(&output),
+            ));
+        }
+
+        if !tool_results.is_empty() {
+            agent
+                .append_message(Message::user(Content::Multiple(tool_results)))
+                .await;
+        }
+
+        if completed {
+            return Ok(());
+        }
+
+        let prompt = guidance.unwrap_or_else(|| build_interactive_offload_reply_reminder(schemas));
+        agent
+            .append_message(Message::user(Content::Text(prompt)))
+            .await;
+    }
+
+    Err(ComboReplyError::ChatFailed {
+        message: "interactive ask exceeded max turns without coco reply".to_string(),
+    })
+}
+
 fn build_offload_reply_directive(schemas: &[PromptSchema]) -> String {
     let field_args: Vec<String> = schemas
         .iter()
@@ -996,6 +1352,7 @@ fn build_offload_reply_retry_directive(schemas: &[PromptSchema]) -> String {
     format!("The previous response did not produce a valid coco reply. Retry.\n\n{directive}")
 }
 
+#[derive(Clone, Copy)]
 enum OffloadCommandKind {
     Coco,
     Safe,

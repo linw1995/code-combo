@@ -73,6 +73,7 @@ pub enum StarterEvent {
     PromptRequest {
         prompt: String,
         schemas: Vec<PromptSchema>,
+        interactive: bool,
         thinking: Option<ThinkingConfig>,
         responder: PromptResponseSender,
     },
@@ -866,6 +867,12 @@ async fn handle_session_connection(
                     }
                     .build());
                 }
+                if payload.interactive && !payload.reply {
+                    return Err(InvalidSnafu {
+                        reason: "interactive prompt requires reply mode".to_string(),
+                    }
+                    .build());
+                }
                 if payload.reply {
                     if discovery {
                         return Err(InvalidSnafu {
@@ -897,6 +904,7 @@ async fn handle_session_connection(
                         .send(StarterEvent::PromptRequest {
                             prompt: payload.prompt,
                             schemas: payload.schemas,
+                            interactive: payload.interactive,
                             thinking,
                             responder,
                         })

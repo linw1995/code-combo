@@ -64,6 +64,9 @@ enum Commands {
         /// Response schemas in field:description format (repeatable)
         #[arg(long, value_name = "field:description")]
         schemas: Vec<String>,
+        /// Enable interactive ask loop until `coco reply` is called
+        #[arg(short = 'i', long)]
+        interactive: bool,
         /// Prompt text to send via session socket (or read from stdin when omitted)
         #[arg(trailing_var_arg = true)]
         prompt: Vec<String>,
@@ -112,7 +115,15 @@ impl TryFrom<Commands> for ClientCommand {
     fn try_from(value: Commands) -> std::result::Result<Self, Self::Error> {
         let command = match value {
             Commands::Metadata { fields } => ClientCommand::Metadata { fields },
-            Commands::Ask { prompt, schemas } => ClientCommand::Ask { prompt, schemas },
+            Commands::Ask {
+                prompt,
+                schemas,
+                interactive,
+            } => ClientCommand::Ask {
+                prompt,
+                schemas,
+                interactive,
+            },
             Commands::Tell { prompt } => ClientCommand::Tell { prompt },
             Commands::Reply { fields } => ClientCommand::Reply { fields },
             Commands::Record {

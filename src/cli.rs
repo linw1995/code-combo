@@ -10,6 +10,7 @@ pub enum ClientCommand {
     Ask {
         prompt: Vec<String>,
         schemas: Vec<String>,
+        interactive: bool,
     },
     Tell {
         prompt: Vec<String>,
@@ -55,7 +56,11 @@ pub async fn handle_client_command(
         ClientCommand::Metadata { fields } => crate::cmd::handle_metadata(fields)
             .await
             .whatever_context("failed to handle metadata"),
-        ClientCommand::Ask { prompt, schemas } => crate::cmd::handle_ask(prompt.join(" "), schemas)
+        ClientCommand::Ask {
+            prompt,
+            schemas,
+            interactive,
+        } => crate::cmd::handle_ask(prompt.join(" "), schemas, interactive)
             .await
             .whatever_context("failed to handle ask"),
         ClientCommand::Tell { prompt } => crate::cmd::handle_tell(prompt.join(" "))

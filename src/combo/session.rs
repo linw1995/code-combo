@@ -96,6 +96,8 @@ pub struct PromptPayload {
     pub prompt: String,
     #[serde(default)]
     pub reply: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub interactive: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub schemas: Vec<PromptSchema>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -106,6 +108,10 @@ pub struct PromptPayload {
 pub struct PromptSchema {
     pub name: String,
     pub description: String,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -816,6 +822,7 @@ mod tests {
         let payload = PromptPayload {
             prompt: "Hello".to_string(),
             reply: true,
+            interactive: false,
             schemas: vec![PromptSchema {
                 name: "message".to_string(),
                 description: "reply message".to_string(),
