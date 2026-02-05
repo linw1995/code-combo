@@ -1351,8 +1351,8 @@ mod tests {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
     }
 
-    fn test_key_esc() -> KeyEvent {
-        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+    fn test_key_backspace() -> KeyEvent {
+        KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)
     }
 
     fn make_starter(name: &str) -> code_combo::Starter {
@@ -1462,7 +1462,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn combo_enters_and_exits_actionable_messages_with_enter_and_esc() {
+    async fn combo_enters_and_exits_actionable_messages_with_enter_and_backspace() {
         let mut combo = Combo::new(TEST_ID, TEST_NAME);
         combo.handle_event(&Event::Combo(ComboEvent::Executing {
             id: TEST_ID.to_string(),
@@ -1507,7 +1507,7 @@ mod tests {
         assert!(combo.is_child_focused);
         assert_eq!(combo.messages.selected_idx(), Some(0));
 
-        combo.handle_key_event(&test_key_esc());
+        combo.handle_key_event(&test_key_backspace());
         assert!(!combo.is_child_focused);
         assert_eq!(combo.messages.selected_idx(), None);
     }
