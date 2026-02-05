@@ -1487,6 +1487,51 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn execute_starter_records_coco_ask_interactive_prompt_with_schemas()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bash = find_bash();
+        let session_env = session_env_with_coco();
+        let (_guard, file_path) = create_temp_combo(
+            "ask_reply_interactive.sh",
+            formatdoc! {r#"
+            #!{bash}
+
+            coco metadata name=ask_reply_interactive || exit 0
+
+            coco ask -i --schemas response:message "Please do the thing"
+            "#}
+            .as_str(),
+        )
+        .await?;
+
+        let mut execution = StarterCommand::new(&file_path)
+            .session_env(session_env)
+            .execute();
+        let mut prompt_text = None;
+        let mut interactive_flag = None;
+        while let Some(event) = execution.next().await {
+            if let StarterEvent::PromptRequest {
+                prompt,
+                interactive,
+                responder,
+                ..
+            } = event
+            {
+                prompt_text = Some(prompt.clone());
+                interactive_flag = Some(interactive);
+                let _ = responder.send(Ok("ok".to_string()));
+            }
+        }
+        let Starter { combo, .. } = execution.wait().await?;
+        let combo = combo?;
+        assert_eq!(combo.metadata.name, "ask_reply_interactive");
+        assert_eq!(prompt_text.as_deref(), Some("Please do the thing"));
+        assert_eq!(interactive_flag, Some(true));
+
+        Ok(())
+    }
+
     #[test]
     fn parse_reply_fields_accepts_required_fields() {
         let schemas = vec![

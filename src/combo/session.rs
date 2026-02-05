@@ -861,6 +861,54 @@ mod tests {
 
     #[tokio::test]
     #[snafu::report]
+    async fn send_prompt_wait_response_over_socket_with_interactive() -> Result<()> {
+        let (_dir, socket_path) = unique_socket_path()?;
+        let server = SessionSocketServer::bind(&socket_path)
+            .await
+            .whatever_context("failed to bind socket")?;
+
+        let payload = PromptPayload {
+            prompt: "Hello".to_string(),
+            reply: true,
+            interactive: true,
+            schemas: vec![PromptSchema {
+                name: "message".to_string(),
+                description: "reply message".to_string(),
+            }],
+            thinking: None,
+        };
+        let client = SessionSocketClient::connect(&socket_path)
+            .await
+            .whatever_context("failed to connect socket path")?;
+
+        let send_payload = payload.clone();
+        let send_task = tokio::spawn(async move {
+            client
+                .send_prompt_wait_response(send_payload)
+                .await
+                .expect("send prompt with response")
+        });
+
+        let mut conn = server.accept().await.whatever_context("failed to accept")?;
+        let event = conn
+            .read_client_message()
+            .await
+            .whatever_context("failed to read client message")?;
+        assert_eq!(event, ClientMessage::Prompt(payload));
+
+        let response = r#"{"message":"ok"}"#.to_string();
+        conn.send_server_message(&ServerMessage::PromptResponse(response.clone()))
+            .await
+            .whatever_context("failed to send prompt response")?;
+
+        let received = send_task.await.whatever_context("failed to join")?;
+        assert_eq!(received, response);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[snafu::report]
     async fn combo_run_stream_over_socket() -> Result<()> {
         let (_dir, socket_path) = unique_socket_path()?;
         let server = SessionSocketServer::bind(&socket_path)
