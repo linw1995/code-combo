@@ -1977,16 +1977,6 @@ impl Chat<'static> {
             })
     }
 
-    fn lone_pending_combo_reply_session(&self) -> Option<(String, String)> {
-        if self.combo_pending_reply_session_socks.len() != 1 {
-            return None;
-        }
-        self.combo_pending_reply_session_socks
-            .iter()
-            .next()
-            .map(|(combo_id, session_sock)| (combo_id.clone(), session_sock.clone()))
-    }
-
     fn add_pending_tool_use_action(&mut self, tool_use_id: String, combo_id: Option<String>) {
         self.pending_user_actions.retain(|action| {
             !matches!(
@@ -2147,40 +2137,7 @@ impl Chat<'static> {
             let combo_id = self.pending_combo_id_for_session_sock(session_sock)?;
             return Some((combo_id, tool_use.clone()));
         }
-        let (combo_id, session_sock) = self.lone_pending_combo_reply_session()?;
-        let tool_use = inject_session_sock_into_tool_use(tool_use, &session_sock)?;
-        Some((combo_id, tool_use))
-    }
-
-    fn patch_tool_use_with_pending_combo_session_sock(&self, tool_use: &ToolUse) -> ToolUse {
-        if tool_use.name != BASH_TOOL_NAME {
-            return tool_use.clone();
-        }
-        let Ok(input) = serde_json::from_value::<BashInput>(tool_use.input.clone()) else {
-            return tool_use.clone();
-        };
-        if !is_coco_reply_command(&input.command) {
-            return tool_use.clone();
-        }
-        if session_sock_from_tool_use(tool_use).is_some() {
-            return tool_use.clone();
-        }
-
-        let session_sock =
-            if let Some(combo_id) = self.combo_offload_tool_use_to_combo_id.get(&tool_use.id) {
-                self.combo_pending_reply_session_socks
-                    .get(combo_id)
-                    .cloned()
-            } else {
-                self.lone_pending_combo_reply_session()
-                    .map(|(_, session_sock)| session_sock)
-            };
-        if let Some(session_sock) = session_sock
-            && let Some(patched) = inject_session_sock_into_tool_use(tool_use, &session_sock)
-        {
-            return patched;
-        }
-        tool_use.clone()
+        None
     }
 
     fn push_combo_offload_reply_tool_use(&mut self, combo_id: String, tool_use: ToolUse) {
@@ -3111,19 +3068,14 @@ impl Component for Chat<'static> {
             },
             Action::Tool(action) => match action {
                 ToolAction::Grant(tool_use) => {
-                    let patched_tool_use =
-                        self.patch_tool_use_with_pending_combo_session_sock(tool_use);
-                    self.remove_pending_tool_use_action(&patched_tool_use.id);
-                    self.agent
-                        .grant_once(&patched_tool_use.id, &patched_tool_use.name);
-                    self.spawn_tool_use(&patched_tool_use);
+                    self.remove_pending_tool_use_action(&tool_use.id);
+                    self.agent.grant_once(&tool_use.id, &tool_use.name);
+                    self.spawn_tool_use(tool_use);
                 }
                 ToolAction::GrantSession(tool_use) => {
-                    let patched_tool_use =
-                        self.patch_tool_use_with_pending_combo_session_sock(tool_use);
-                    self.remove_pending_tool_use_action(&patched_tool_use.id);
-                    self.agent.grant_session(&patched_tool_use);
-                    self.spawn_tool_use(&patched_tool_use);
+                    self.remove_pending_tool_use_action(&tool_use.id);
+                    self.agent.grant_session(tool_use);
+                    self.spawn_tool_use(tool_use);
                 }
                 ToolAction::Cancel(tool_use) => {
                     let pending_combo_id =
@@ -3462,25 +3414,6 @@ fn session_sock_from_tool_use(tool_use: &ToolUse) -> Option<String> {
         .get("COCO_SESSION_SOCK")
         .filter(|value| !value.is_empty())
         .cloned()
-}
-
-fn inject_session_sock_into_tool_use(tool_use: &ToolUse, session_sock: &str) -> Option<ToolUse> {
-    if tool_use.name != BASH_TOOL_NAME {
-        return None;
-    }
-    let mut input = serde_json::from_value::<BashInput>(tool_use.input.clone()).ok()?;
-    let has_session_sock = input
-        .env
-        .get("COCO_SESSION_SOCK")
-        .is_some_and(|value| !value.is_empty());
-    if !has_session_sock {
-        input
-            .env
-            .insert("COCO_SESSION_SOCK".to_string(), session_sock.to_string());
-    }
-    let mut patched = tool_use.clone();
-    patched.input = serde_json::to_value(&input).ok()?;
-    Some(patched)
 }
 
 fn session_summary_prompt() -> String {

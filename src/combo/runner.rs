@@ -1523,14 +1523,75 @@ fn is_coco_command_name(name: &str) -> bool {
 }
 
 fn is_coco_reply_command(command: &str) -> bool {
-    let summary = match parse_primary_command(command) {
-        Ok(summary) => summary,
-        Err(_) => return false,
-    };
-    if !is_coco_command_name(&summary.name) {
+    if let Ok(summary) = parse_primary_command(command)
+        && is_coco_command_name(&summary.name)
+    {
+        return matches!(summary.args.first(), Some(arg) if arg == "reply");
+    }
+    contains_coco_reply_invocation(command)
+}
+
+fn contains_coco_reply_invocation(command: &str) -> bool {
+    let tokens = command
+        .split_whitespace()
+        .map(normalize_token)
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    if tokens.len() < 2 {
         return false;
     }
-    matches!(summary.args.first(), Some(arg) if arg == "reply")
+    for i in 0..(tokens.len() - 1) {
+        if !is_coco_command_name(tokens[i].as_str()) {
+            continue;
+        }
+        if tokens[i + 1] != "reply" {
+            continue;
+        }
+        if i == 0 {
+            return true;
+        }
+        if tokens[..i]
+            .iter()
+            .all(|token| is_env_assignment_token(token))
+        {
+            return true;
+        }
+        if i >= 2 && is_shell_command_name(tokens[0].as_str()) {
+            let flag_index = (1..i)
+                .rev()
+                .find(|index| matches!(tokens[*index].as_str(), "-c" | "-lc"));
+            if let Some(flag_index) = flag_index
+                && tokens[(flag_index + 1)..i]
+                    .iter()
+                    .all(|token| is_env_assignment_token(token))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn normalize_token(token: &str) -> String {
+    token
+        .trim_matches(|c| matches!(c, '\'' | '"' | ';'))
+        .to_string()
+}
+
+fn is_shell_command_name(token: &str) -> bool {
+    matches!(token.rsplit('/').next(), Some("sh" | "bash" | "zsh"))
+}
+
+fn is_env_assignment_token(token: &str) -> bool {
+    let Some((name, _)) = token.split_once('=') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
 fn is_safe_command(command: &str) -> bool {
@@ -1923,14 +1984,32 @@ mod tests {
         assert!(is_coco_reply_command(
             "/usr/local/bin/coco reply --message='hello world'"
         ));
+        assert!(is_coco_reply_command(
+            "COCO_SESSION_SOCK='/tmp/coco.sock' coco reply --message='hello world'"
+        ));
+        assert!(is_coco_reply_command(
+            "/run/current-system/sw/bin/zsh -lc \"coco reply --message='hello world'\""
+        ));
+        assert!(is_coco_reply_command(
+            "bash -lc \"COCO_SESSION_SOCK=/tmp/coco.sock coco reply --message='hello world'\""
+        ));
         assert!(!is_coco_reply_command("coco ask hello"));
         assert!(!is_coco_reply_command("echo coco reply --message=hello"));
+        assert!(!is_coco_reply_command(
+            "/run/current-system/sw/bin/zsh -lc \"echo coco reply --message=hello\""
+        ));
     }
 
     #[test]
     fn classify_offload_command_distinguishes_coco_safe_and_unsafe() {
         assert!(matches!(
             classify_offload_command("coco reply --message=done --status=ok"),
+            OffloadCommandKind::Coco
+        ));
+        assert!(matches!(
+            classify_offload_command(
+                "/run/current-system/sw/bin/zsh -lc \"coco reply --message=done --status=ok\""
+            ),
             OffloadCommandKind::Coco
         ));
         assert!(matches!(
