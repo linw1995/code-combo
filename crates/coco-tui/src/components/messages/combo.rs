@@ -325,6 +325,9 @@ impl Combo {
         self.messages.push(Message::bot(Tool::new(tool_use).into()));
         let ask = Event::Ask(AskEvent::ToolUsePermission(tool_use_id));
         let _ = self.messages.on_tool_event(&ask);
+        if self.messages.select_first_actionable() {
+            self.is_child_focused = true;
+        }
     }
 
     fn forward_output_to_child(&mut self, tool_use_id: &str, chunk: &OutputChunk) -> bool {

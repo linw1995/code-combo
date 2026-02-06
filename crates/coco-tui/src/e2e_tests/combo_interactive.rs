@@ -4,8 +4,8 @@ use vt100::Parser;
 
 use super::support::{
     KillOnDrop, MockOpenAiScenario, MockOpenAiServer, assert_screen_not_contains,
-    create_mock_e2e_config, send_alt_enter, send_text, shutdown_tui, spawn_reader, spawn_tui,
-    wait_for_screen_contains,
+    create_mock_e2e_config, send_alt_enter, send_enter, send_text, shutdown_tui, spawn_reader,
+    spawn_tui, wait_for_screen_contains,
 };
 
 const COMBO_NAME: &str = "e2e_mock_interactive";
@@ -219,6 +219,12 @@ fn combo_interactive_reply_tool_use_command_contains_required_fields() {
         "--reason='used user feedback'",
         Duration::from_secs(30),
     );
+    assert_screen_not_contains(
+        &mut parser,
+        &rx,
+        "COCO_SESSION_SOCK=",
+        Duration::from_secs(2),
+    );
 
     assert_shutdown_ok(&mut *child, &mut *writer, &parser, &mut guard);
 }
@@ -279,4 +285,31 @@ fn combo_interactive_auto_accept_edits_still_requires_bash_confirmation() {
     assert_screen_not_contains(&mut parser, &rx, "Completed", Duration::from_secs(2));
 
     assert_shutdown_ok(&mut *child, &mut *writer, &parser, &mut guard);
+}
+
+#[test]
+fn combo_interactive_approval_executes_coco_reply_and_completes() {
+    let mock = MockOpenAiServer::start_with_scenario(MockOpenAiScenario::ImmediateReply);
+    let (mut guard, mut writer, rx, mut parser, mut child, _temp) = run_combo_with_mock(&mock);
+
+    wait_for_screen_contains(
+        &mut parser,
+        &rx,
+        "Bash Awaiting confirmation",
+        Duration::from_secs(30),
+    );
+    send_enter(&mut *writer);
+    wait_for_screen_contains(&mut parser, &rx, "Completed", Duration::from_secs(30));
+    assert_screen_not_contains(
+        &mut parser,
+        &rx,
+        "failed to read COCO_SESSION_SOCK",
+        Duration::from_secs(2),
+    );
+    child
+        .clone_killer()
+        .kill()
+        .expect("kill tui after assertion");
+    let _ = child.try_wait();
+    guard.disarm();
 }

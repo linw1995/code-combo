@@ -468,13 +468,18 @@ impl Executor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::StrReplaceInput;
+    use crate::tools::{BashOutput, StrReplaceInput};
     use std::collections::HashSet;
+    use std::sync::OnceLock;
+    use tokio::sync::Mutex;
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn bash_input_value(command: &str) -> serde_json::Value {
         serde_json::to_value(BashInput {
             command: command.to_string(),
             timeout: 1_000,
+            env: std::collections::BTreeMap::new(),
         })
         .expect("serialize BashInput")
     }
@@ -557,6 +562,43 @@ mod tests {
             .await
             .expect("read updated file");
         assert_eq!(updated, "world\n");
+    }
+
+    #[tokio::test]
+    async fn bash_execution_receives_session_socket_env() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().await;
+        let previous = std::env::var_os("COCO_SESSION_SOCK");
+        // Safety: test-only mutation guarded by ENV_LOCK and restored before return.
+        unsafe {
+            std::env::set_var("COCO_SESSION_SOCK", "/tmp/coco-executor.sock");
+        }
+
+        let mut executor = Executor::default();
+        let input_value = bash_input_value(r#"printf "%s" "$COCO_SESSION_SOCK""#);
+        executor.update_pcl(
+            BASH_TOOL_NAME,
+            PermissionControl::Once("inject-test".to_string()),
+        );
+        let output = executor
+            .execute("inject-test", BASH_TOOL_NAME, Input::Starter(input_value))
+            .await
+            .expect("execute bash with injected env");
+
+        // Safety: test-only mutation guarded by ENV_LOCK.
+        unsafe {
+            if let Some(value) = previous {
+                std::env::set_var("COCO_SESSION_SOCK", value);
+            } else {
+                std::env::remove_var("COCO_SESSION_SOCK");
+            }
+        }
+
+        let Output::Success(Final::Json(value)) = output else {
+            panic!("expected successful bash output");
+        };
+        let output: BashOutput =
+            serde_json::from_value(value).expect("deserialize bash output json");
+        assert_eq!(output.stdout, "/tmp/coco-executor.sock\n");
     }
 
     #[test]

@@ -4,10 +4,7 @@
 //! Combos are executable scripts that can perform complex operations
 //! with recorded tool calls.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{path::PathBuf, sync::Arc};
 
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -1199,8 +1196,10 @@ async fn handle_interactive_combo_reply(
                 let mut emitted_tool_use = tool_use.clone();
                 if matches!(command_kind, OffloadCommandKind::Coco) {
                     let mut bash_input_for_emit = bash_input.clone();
-                    bash_input_for_emit.command =
-                        command_with_session_socket(&bash_input.command, &session_socket_path);
+                    bash_input_for_emit.env.insert(
+                        "COCO_SESSION_SOCK".to_string(),
+                        session_socket_path.to_string_lossy().to_string(),
+                    );
                     emitted_tool_use.input =
                         serde_json::to_value(&bash_input_for_emit).map_err(|err| {
                             ComboReplyError::InvalidBashInput {
@@ -1464,19 +1463,6 @@ fn is_coco_reply_command(command: &str) -> bool {
         return false;
     }
     matches!(summary.args.first(), Some(arg) if arg == "reply")
-}
-
-fn shell_single_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
-fn command_with_session_socket(command: &str, session_socket_path: &Path) -> String {
-    let socket = session_socket_path.to_string_lossy();
-    format!(
-        "COCO_SESSION_SOCK={} {}",
-        shell_single_quote(&socket),
-        command
-    )
 }
 
 fn is_safe_command(command: &str) -> bool {

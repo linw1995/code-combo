@@ -574,11 +574,14 @@ impl Chat<'static> {
             } => {
                 self.combo_offload_tool_use_to_combo_id
                     .insert(tool_use.id.clone(), id.clone());
+                if let Some(idx) = self.messages.locate_tool_message(id) {
+                    self.update_focus(Focus::Messages);
+                    self.messages.focus(idx);
+                }
+                self.notify_action_required("Tool permission requested");
                 self.set_processing();
             }
-            ComboEvent::Executed { id, starter, .. } => {
-                self.combo_offload_tool_use_to_combo_id
-                    .retain(|_, combo_id| combo_id != id);
+            ComboEvent::Executed { starter, .. } => {
                 self.set_combo_thinking_active(false);
                 if let Err(err) = starter.combo.as_ref() {
                     warn!(?err, "Failed to execute starter");
