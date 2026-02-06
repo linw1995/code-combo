@@ -194,6 +194,8 @@ pub enum ComboRunEvent {
         name: String,
         prompt: String,
         thinking: Option<ThinkingConfig>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_sock: Option<String>,
     },
     PromptStream {
         id: String,

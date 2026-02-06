@@ -4,8 +4,8 @@ use vt100::Parser;
 
 use super::support::{
     KillOnDrop, MockOpenAiScenario, MockOpenAiServer, assert_screen_not_contains,
-    create_mock_e2e_config, send_alt_enter, send_enter, send_text, shutdown_tui, spawn_reader,
-    spawn_tui, wait_for_screen_contains,
+    create_mock_e2e_config, send_alt_enter, send_enter, send_escape, send_text, shutdown_tui,
+    spawn_reader, spawn_tui, wait_for_screen_contains,
 };
 
 const COMBO_NAME: &str = "e2e_mock_interactive";
@@ -335,6 +335,51 @@ fn combo_interactive_approval_executes_coco_reply_and_completes() {
         "failed to read COCO_SESSION_SOCK",
         Duration::from_secs(2),
     );
+    child
+        .clone_killer()
+        .kill()
+        .expect("kill tui after assertion");
+    let _ = child.try_wait();
+    guard.disarm();
+}
+
+#[test]
+fn combo_interactive_coco_reply_reject_then_feedback_can_complete() {
+    const FEEDBACK_TOKEN: &str = "E2E_REJECT_FEEDBACK";
+    let mock = MockOpenAiServer::start_with_scenario(
+        MockOpenAiScenario::ImmediateReplyThenRequireFeedbackToken(FEEDBACK_TOKEN.to_string()),
+    );
+    let (mut guard, mut writer, rx, mut parser, mut child, _temp) = run_combo_with_mock(&mock);
+
+    wait_for_screen_contains(
+        &mut parser,
+        &rx,
+        "Bash Awaiting confirmation",
+        Duration::from_secs(30),
+    );
+    send_escape(&mut *writer);
+    wait_for_screen_contains(&mut parser, &rx, "Cancelled", Duration::from_secs(30));
+
+    // Ensure focus returns to input before submitting feedback.
+    send_escape(&mut *writer);
+    send_text(&mut *writer, "i");
+    send_text(&mut *writer, "retry with feedback E2E_REJECT_FEEDBACK");
+    send_alt_enter(&mut *writer);
+
+    wait_for_screen_contains(
+        &mut parser,
+        &rx,
+        "Bash Awaiting confirmation",
+        Duration::from_secs(30),
+    );
+    send_enter(&mut *writer);
+    wait_for_screen_contains(&mut parser, &rx, "Completed", Duration::from_secs(30));
+
+    assert!(
+        mock.saw_token(FEEDBACK_TOKEN),
+        "expected feedback token in model request after cancellation"
+    );
+
     child
         .clone_killer()
         .kill()

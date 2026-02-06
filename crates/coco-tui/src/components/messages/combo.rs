@@ -1405,6 +1405,7 @@ mod tests {
             name: TEST_NAME.to_string(),
             prompt: "line1".to_string(),
             thinking: None,
+            session_sock: None,
         }));
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
             id: TEST_ID.to_string(),
@@ -1453,6 +1454,7 @@ mod tests {
             name: TEST_NAME.to_string(),
             prompt: "line1".to_string(),
             thinking: None,
+            session_sock: None,
         }));
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
             id: TEST_ID.to_string(),

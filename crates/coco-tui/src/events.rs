@@ -132,6 +132,7 @@ pub enum ComboEvent {
         name: String,
         prompt: String,
         thinking: Option<ThinkingConfig>,
+        session_sock: Option<String>,
     },
     PromptStream {
         id: String,

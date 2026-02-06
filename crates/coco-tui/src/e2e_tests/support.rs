@@ -154,6 +154,7 @@ struct MockOpenAiState {
 pub(crate) enum MockOpenAiScenario {
     RequireFeedbackTokens(Vec<String>),
     ImmediateReply,
+    ImmediateReplyThenRequireFeedbackToken(String),
     RejectThenNeedFeedbackToken(String),
     RateLimited,
 }
@@ -394,6 +395,11 @@ fn build_mock_openai_response(
                     guard.seen_tokens.insert(token.clone());
                 }
             }
+            MockOpenAiScenario::ImmediateReplyThenRequireFeedbackToken(token) => {
+                if user_text.contains(token) {
+                    guard.seen_tokens.insert(token.clone());
+                }
+            }
             MockOpenAiScenario::ImmediateReply | MockOpenAiScenario::RateLimited => {}
         }
         guard.request_count
@@ -420,6 +426,18 @@ fn build_mock_openai_response(
             let command =
                 "coco reply --result='mock polished result' --reason='used user feedback'";
             MockHttpResponse::Ok(mock_bash_tool_call_response(command))
+        }
+        MockOpenAiScenario::ImmediateReplyThenRequireFeedbackToken(token) => {
+            if request_count == 1 || user_text.contains(token) {
+                let command =
+                    "coco reply --result='mock polished result' --reason='used user feedback'";
+                return MockHttpResponse::Ok(mock_bash_tool_call_response(command));
+            }
+            thread::sleep(Duration::from_millis(120));
+            MockHttpResponse::Ok(mock_text_response(&format!(
+                "Please provide feedback first (missing: {}).",
+                token
+            )))
         }
         MockOpenAiScenario::RejectThenNeedFeedbackToken(token) => {
             if user_text.contains(token) {

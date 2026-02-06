@@ -344,6 +344,7 @@ async fn execute_combo(
                             name: combo_name.clone(),
                             prompt: prompt.clone(),
                             thinking: None,
+                            session_sock: None,
                         });
                         summary_parts.push(format!("[Prompt] {}", prompt));
                     }
@@ -361,6 +362,7 @@ async fn execute_combo(
                             name: combo_name.clone(),
                             prompt: prompt.clone(),
                             thinking: thinking.clone(),
+                            session_sock: Some(session_socket_path.to_string_lossy().to_string()),
                         });
                         summary_parts.push(format!("[Prompt] {}", prompt));
 
@@ -1175,6 +1177,20 @@ async fn handle_interactive_combo_reply(
 
         let tool_uses = extract_tool_uses(&response.message);
         if tool_uses.is_empty() {
+            if disable_stream {
+                let response_text = extract_text_response(&response.message);
+                if !response_text.trim().is_empty() {
+                    emit_combo_event(
+                        on_event,
+                        ComboEvent::Prompt {
+                            name: combo_name.to_string(),
+                            prompt: response_text,
+                            thinking: None,
+                            session_sock: Some(session_socket_path.to_string_lossy().to_string()),
+                        },
+                    );
+                }
+            }
             agent
                 .append_message(Message::user(Content::Text(
                     build_interactive_offload_reply_reminder(schemas),
