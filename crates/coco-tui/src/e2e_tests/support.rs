@@ -1,4 +1,5 @@
 use std::{
+    env,
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::mpsc::{Receiver, RecvTimeoutError},
@@ -9,20 +10,10 @@ use std::{
 use portable_pty::{
     Child, ChildKiller, CommandBuilder, ExitStatus, NativePtySystem, PtySize, PtySystem,
 };
-use tempfile::TempDir;
 use vt100::Parser;
 
 pub(crate) type PtyChild = dyn Child + Send;
 
-pub(crate) fn write_config(dir: &TempDir) -> PathBuf {
-    let config_dir = dir.path().join("coco");
-    std::fs::create_dir_all(&config_dir).expect("create config dir");
-    let config_path = config_dir.join("config.toml");
-    std::fs::write(&config_path, "providers = []\n").expect("write config");
-    config_dir
-}
-
-#[allow(dead_code)]
 pub(crate) fn require_e2e_config_dir() -> PathBuf {
     let config_dir =
         PathBuf::from(std::env::var("COCO_E2E_CONFIG_DIR").expect("set COCO_E2E_CONFIG_DIR"));
@@ -33,7 +24,7 @@ pub(crate) fn require_e2e_config_dir() -> PathBuf {
     config_dir
 }
 
-fn repo_root() -> PathBuf {
+pub(crate) fn repo_root() -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_dir
         .parent()
@@ -42,9 +33,54 @@ fn repo_root() -> PathBuf {
         .expect("resolve repo root")
 }
 
+fn resolve_coco_bin_from_env() -> Option<PathBuf> {
+    if let Ok(path) = env::var("COCO_TEST_BIN") {
+        return Some(PathBuf::from(path));
+    }
+    if let Ok(path) = env::var("COCO_TUI_BIN") {
+        return Some(PathBuf::from(path));
+    }
+    if let Ok(path) = env::var("CARGO_BIN_EXE_coco") {
+        return Some(PathBuf::from(path));
+    }
+    None
+}
+
+fn resolve_coco_bin_from_target() -> PathBuf {
+    let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+    let base = if let Some(target_dir) = env::var_os("CARGO_TARGET_DIR") {
+        PathBuf::from(target_dir).join(profile)
+    } else {
+        repo_root().join("target").join(profile)
+    };
+    let mut path = base.join("coco");
+    if cfg!(windows) {
+        path.set_extension("exe");
+    }
+    path
+}
+
+pub(crate) fn coco_binary() -> PathBuf {
+    let path = resolve_coco_bin_from_env().unwrap_or_else(resolve_coco_bin_from_target);
+    assert!(
+        path.exists(),
+        "coco binary not found at {:?}; build `cargo build -p coco-tui --bin coco` or set COCO_TUI_BIN/COCO_TEST_BIN",
+        path
+    );
+    path
+}
+
 pub(crate) fn spawn_tui(
     config_dir: Option<&Path>,
     args: &[&str],
+) -> (Box<PtyChild>, Box<dyn Read + Send>, Box<dyn Write + Send>) {
+    spawn_tui_with_env(config_dir, args, &[])
+}
+
+pub(crate) fn spawn_tui_with_env(
+    config_dir: Option<&Path>,
+    args: &[&str],
+    envs: &[(&str, &str)],
 ) -> (Box<PtyChild>, Box<dyn Read + Send>, Box<dyn Write + Send>) {
     let pty_system = NativePtySystem::default();
     let pair = pty_system
@@ -56,8 +92,7 @@ pub(crate) fn spawn_tui(
         })
         .expect("open pty");
 
-    let mut cmd = CommandBuilder::new("cargo");
-    cmd.args(["run", "-p", "coco-tui", "--bin", "coco", "--"]);
+    let mut cmd = CommandBuilder::new(coco_binary());
     cmd.cwd(repo_root());
 
     if let Some(dir) = config_dir {
@@ -65,6 +100,9 @@ pub(crate) fn spawn_tui(
     }
 
     cmd.env("COCO_LOG", "trace");
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
 
     if !args.is_empty() {
         cmd.args(args);
