@@ -116,6 +116,31 @@ offload_combo_reply = true
     temp
 }
 
+pub(crate) fn create_minimal_e2e_config(auto_accept_edits: bool) -> TempDir {
+    let temp = TempDir::new().expect("create e2e temp config dir");
+    let config_dir = temp.path().join("coco");
+    fs::create_dir_all(config_dir.join("combos")).expect("create temp combo dir");
+
+    let config_path = config_dir.join("config.toml");
+    let config_content = format!(
+        r#"[ui.notifications]
+enabled = false
+
+[agent]
+auto_accept_edits = {auto_accept_edits}
+
+[[providers]]
+name = "minimal-openai"
+kind = "openai"
+api_key = "test-api-key"
+base_url = "http://127.0.0.1:1"
+disable_stream = true
+"#
+    );
+    fs::write(&config_path, config_content).expect("write minimal e2e config");
+    temp
+}
+
 #[derive(Debug, Default)]
 struct MockOpenAiState {
     request_count: usize,
