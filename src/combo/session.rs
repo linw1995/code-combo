@@ -230,6 +230,8 @@ pub enum ComboRunEvent {
         tool_use: ToolUse,
         thinking: Vec<String>,
         offload: bool,
+        #[serde(default)]
+        requires_confirmation: bool,
     },
     ReplyToolResult {
         id: String,

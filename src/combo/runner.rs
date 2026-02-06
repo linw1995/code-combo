@@ -492,6 +492,7 @@ async fn execute_combo(
                                         tool_use: reply.tool_use.clone(),
                                         thinking: thinking_blocks,
                                         offload: false,
+                                        requires_confirmation: false,
                                     },
                                 );
                             }
@@ -1214,6 +1215,7 @@ async fn handle_interactive_combo_reply(
                         tool_use: emitted_tool_use,
                         thinking: Vec::new(),
                         offload: true,
+                        requires_confirmation: matches!(command_kind, OffloadCommandKind::Coco),
                     },
                 );
 
@@ -1300,6 +1302,7 @@ async fn handle_interactive_combo_reply(
                     tool_use: tool_use.clone(),
                     thinking: Vec::new(),
                     offload: true,
+                    requires_confirmation: false,
                 },
             );
 
@@ -1528,45 +1531,54 @@ async fn handle_offload_combo_reply(
         .append_message(Message::user(Content::Text(directive.to_string())))
         .await;
 
-    let on_event_stream = on_event.clone();
-    let stream_name = combo_name.to_string();
-    let chat_response = agent
-        .chat_stream_with_history(cancel_token.clone(), move |update| match update {
-            ChatStreamUpdate::Reset => {
-                emit_combo_event(
-                    &on_event_stream,
-                    ComboEvent::PromptStreamReset {
-                        name: stream_name.clone(),
-                    },
-                );
-            }
-            ChatStreamUpdate::Plain { index, text } => {
-                emit_combo_event(
-                    &on_event_stream,
-                    ComboEvent::PromptStream {
-                        name: stream_name.clone(),
-                        index,
-                        kind: ComboEventStreamKind::Plain,
-                        text,
-                    },
-                );
-            }
-            ChatStreamUpdate::Thinking { index, text } => {
-                emit_combo_event(
-                    &on_event_stream,
-                    ComboEvent::PromptStream {
-                        name: stream_name.clone(),
-                        index,
-                        kind: ComboEventStreamKind::Thinking,
-                        text,
-                    },
-                );
-            }
-        })
-        .await
-        .map_err(|e| ComboReplyError::ChatFailed {
-            message: e.to_string(),
-        })?;
+    let chat_response = if agent.disable_stream_for_current_model() {
+        agent
+            .chat_with_history()
+            .await
+            .map_err(|e| ComboReplyError::ChatFailed {
+                message: e.to_string(),
+            })?
+    } else {
+        let on_event_stream = on_event.clone();
+        let stream_name = combo_name.to_string();
+        agent
+            .chat_stream_with_history(cancel_token.clone(), move |update| match update {
+                ChatStreamUpdate::Reset => {
+                    emit_combo_event(
+                        &on_event_stream,
+                        ComboEvent::PromptStreamReset {
+                            name: stream_name.clone(),
+                        },
+                    );
+                }
+                ChatStreamUpdate::Plain { index, text } => {
+                    emit_combo_event(
+                        &on_event_stream,
+                        ComboEvent::PromptStream {
+                            name: stream_name.clone(),
+                            index,
+                            kind: ComboEventStreamKind::Plain,
+                            text,
+                        },
+                    );
+                }
+                ChatStreamUpdate::Thinking { index, text } => {
+                    emit_combo_event(
+                        &on_event_stream,
+                        ComboEvent::PromptStream {
+                            name: stream_name.clone(),
+                            index,
+                            kind: ComboEventStreamKind::Thinking,
+                            text,
+                        },
+                    );
+                }
+            })
+            .await
+            .map_err(|e| ComboReplyError::ChatFailed {
+                message: e.to_string(),
+            })?
+    };
 
     let blocks = match &chat_response.message.content {
         Content::Multiple(blocks) => blocks.as_slice(),
@@ -1602,6 +1614,7 @@ async fn handle_offload_combo_reply(
             tool_use: bash_tool_use.clone(),
             thinking: Vec::new(),
             offload: true,
+            requires_confirmation: false,
         },
     );
 

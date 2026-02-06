@@ -319,14 +319,16 @@ impl Combo {
         true
     }
 
-    fn push_offload_bash_tool_use(&mut self, tool_use: ToolUse) {
+    fn push_offload_bash_tool_use(&mut self, tool_use: ToolUse, requires_confirmation: bool) {
         self.state.write().view = ComboView::Messages;
         let tool_use_id = tool_use.id.clone();
         self.messages.push(Message::bot(Tool::new(tool_use).into()));
-        let ask = Event::Ask(AskEvent::ToolUsePermission(tool_use_id));
-        let _ = self.messages.on_tool_event(&ask);
-        if self.messages.select_first_actionable() {
-            self.is_child_focused = true;
+        if requires_confirmation {
+            let ask = Event::Ask(AskEvent::ToolUsePermission(tool_use_id));
+            let _ = self.messages.on_tool_event(&ask);
+            if self.messages.select_first_actionable() {
+                self.is_child_focused = true;
+            }
         }
     }
 
@@ -519,6 +521,7 @@ impl Combo {
                 tool_use,
                 thinking,
                 offload,
+                requires_confirmation,
                 ..
             } => {
                 if self.matches_id(id) {
@@ -528,7 +531,7 @@ impl Combo {
                         self.push_prompt_thinking(block);
                     }
                     if *offload {
-                        self.push_offload_bash_tool_use(tool_use.clone());
+                        self.push_offload_bash_tool_use(tool_use.clone(), *requires_confirmation);
                     } else {
                         self.push_prompt_reply(tool_use);
                     }

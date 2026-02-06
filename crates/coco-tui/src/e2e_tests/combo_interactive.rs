@@ -9,6 +9,7 @@ use super::support::{
 };
 
 const COMBO_NAME: &str = "e2e_mock_interactive";
+const COMBO_NAME_NON_INTERACTIVE: &str = "e2e_mock_non_interactive";
 type ComboHarness = (
     KillOnDrop,
     Box<dyn std::io::Write + Send>,
@@ -33,6 +34,21 @@ echo "$response"
     )
 }
 
+fn mock_combo_script_non_interactive() -> String {
+    format!(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+
+input="${{*:-Long time no see}}"
+
+coco metadata name={COMBO_NAME_NON_INTERACTIVE} description="mock non-interactive combo" || exit 0
+
+response="$(coco ask --schemas result:result --schemas reason:reason "Process input: ${{input}}")"
+echo "$response"
+"#
+    )
+}
+
 fn run_combo_with_mock(mock: &MockOpenAiServer) -> ComboHarness {
     run_combo_with_mock_and_auto_accept(mock, false)
 }
@@ -41,16 +57,29 @@ fn run_combo_with_mock_and_auto_accept(
     mock: &MockOpenAiServer,
     auto_accept_edits: bool,
 ) -> ComboHarness {
-    let temp = create_mock_e2e_config(
-        mock.base_url(),
-        auto_accept_edits,
-        COMBO_NAME,
-        &mock_combo_script(),
-    );
+    run_combo_with_script(mock, auto_accept_edits, COMBO_NAME, &mock_combo_script())
+}
+
+fn run_combo_non_interactive_with_mock(mock: &MockOpenAiServer) -> ComboHarness {
+    run_combo_with_script(
+        mock,
+        false,
+        COMBO_NAME_NON_INTERACTIVE,
+        &mock_combo_script_non_interactive(),
+    )
+}
+
+fn run_combo_with_script(
+    mock: &MockOpenAiServer,
+    auto_accept_edits: bool,
+    combo_name: &str,
+    combo_script: &str,
+) -> ComboHarness {
+    let temp = create_mock_e2e_config(mock.base_url(), auto_accept_edits, combo_name, combo_script);
     let config_dir = temp.path().join("coco");
     let (child, reader, writer) = spawn_tui(
         Some(&config_dir),
-        &["combo", "run", COMBO_NAME, "Long time no see"],
+        &["combo", "run", combo_name, "Long time no see"],
     );
     let guard = KillOnDrop::new(child.clone_killer());
     let rx = spawn_reader(reader);
@@ -312,4 +341,22 @@ fn combo_interactive_approval_executes_coco_reply_and_completes() {
         .expect("kill tui after assertion");
     let _ = child.try_wait();
     guard.disarm();
+}
+
+#[test]
+fn combo_non_interactive_executes_reply_without_confirmation() {
+    let mock = MockOpenAiServer::start_with_scenario(MockOpenAiScenario::ImmediateReply);
+    let (mut guard, mut writer, rx, mut parser, mut child, _temp) =
+        run_combo_non_interactive_with_mock(&mock);
+
+    wait_for_screen_contains(
+        &mut parser,
+        &rx,
+        "Combo: e2e_mock_non_interactive",
+        Duration::from_secs(30),
+    );
+    // Non-interactive ask should finish without any user approval input.
+    wait_for_screen_contains(&mut parser, &rx, "Completed", Duration::from_secs(10));
+
+    assert_shutdown_ok(&mut *child, &mut *writer, &parser, &mut guard);
 }

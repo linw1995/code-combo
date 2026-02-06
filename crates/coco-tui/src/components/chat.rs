@@ -570,15 +570,18 @@ impl Chat<'static> {
                 id,
                 tool_use,
                 offload: true,
+                requires_confirmation,
                 ..
             } => {
-                self.combo_offload_tool_use_to_combo_id
-                    .insert(tool_use.id.clone(), id.clone());
-                if let Some(idx) = self.messages.locate_tool_message(id) {
-                    self.update_focus(Focus::Messages);
-                    self.messages.focus(idx);
+                if *requires_confirmation {
+                    self.combo_offload_tool_use_to_combo_id
+                        .insert(tool_use.id.clone(), id.clone());
+                    if let Some(idx) = self.messages.locate_tool_message(id) {
+                        self.update_focus(Focus::Messages);
+                        self.messages.focus(idx);
+                    }
+                    self.notify_action_required("Tool permission requested");
                 }
-                self.notify_action_required("Tool permission requested");
                 self.set_processing();
             }
             ComboEvent::Executed { starter, .. } => {
@@ -840,12 +843,14 @@ impl Chat<'static> {
                 tool_use,
                 thinking,
                 offload,
+                requires_confirmation,
             } => ComboEvent::ReplyToolUse {
                 id: id.to_string(),
                 name: name.clone(),
                 tool_use: tool_use.clone(),
                 thinking: thinking.clone(),
                 offload: *offload,
+                requires_confirmation: *requires_confirmation,
             },
             ComboToolEvent::ReplyToolResult {
                 name,
@@ -1001,12 +1006,14 @@ impl Chat<'static> {
                 tool_use,
                 thinking,
                 offload,
+                requires_confirmation,
             } => ComboRunEvent::ReplyToolUse {
                 id: id.clone(),
                 name: name.clone(),
                 tool_use: tool_use.clone(),
                 thinking: thinking.clone(),
                 offload: *offload,
+                requires_confirmation: *requires_confirmation,
             },
             ComboEvent::ReplyToolResult {
                 id,

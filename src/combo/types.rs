@@ -126,6 +126,8 @@ pub enum ComboEvent {
         thinking: Vec<String>,
         /// Whether this is an offload reply (executed via bash).
         offload: bool,
+        /// Whether this tool use requires explicit user confirmation in UI.
+        requires_confirmation: bool,
     },
     /// Reply tool result for offload.
     ReplyToolResult {
