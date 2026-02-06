@@ -154,6 +154,7 @@ struct MockOpenAiState {
 pub(crate) enum MockOpenAiScenario {
     RequireFeedbackTokens(Vec<String>),
     ImmediateReply,
+    RejectThenNeedFeedbackToken(String),
     RateLimited,
 }
 
@@ -377,17 +378,26 @@ fn build_mock_openai_response(
 
     let is_summary_prompt = user_text.contains("Summarize the combo execution for the user.");
 
-    {
+    let request_count = {
         let mut guard = state.lock().expect("lock mock state");
         guard.request_count += 1;
-        if let MockOpenAiScenario::RequireFeedbackTokens(tokens) = scenario {
-            for token in tokens {
+        match scenario {
+            MockOpenAiScenario::RequireFeedbackTokens(tokens) => {
+                for token in tokens {
+                    if user_text.contains(token) {
+                        guard.seen_tokens.insert(token.clone());
+                    }
+                }
+            }
+            MockOpenAiScenario::RejectThenNeedFeedbackToken(token) => {
                 if user_text.contains(token) {
                     guard.seen_tokens.insert(token.clone());
                 }
             }
+            MockOpenAiScenario::ImmediateReply | MockOpenAiScenario::RateLimited => {}
         }
-    }
+        guard.request_count
+    };
 
     if is_summary_prompt {
         return MockHttpResponse::Ok(mock_text_response(
@@ -410,6 +420,21 @@ fn build_mock_openai_response(
             let command =
                 "coco reply --result='mock polished result' --reason='used user feedback'";
             MockHttpResponse::Ok(mock_bash_tool_call_response(command))
+        }
+        MockOpenAiScenario::RejectThenNeedFeedbackToken(token) => {
+            if user_text.contains(token) {
+                let command =
+                    "coco reply --result='mock polished result' --reason='used user feedback'";
+                return MockHttpResponse::Ok(mock_bash_tool_call_response(command));
+            }
+            if request_count == 1 {
+                return MockHttpResponse::Ok(mock_bash_tool_call_response("rm -rf /"));
+            }
+            thread::sleep(Duration::from_millis(500));
+            MockHttpResponse::Ok(mock_text_response(&format!(
+                "Please provide feedback first (missing: {}).",
+                token
+            )))
         }
         MockOpenAiScenario::RequireFeedbackTokens(tokens) => {
             let missing = tokens

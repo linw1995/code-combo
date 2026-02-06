@@ -320,10 +320,19 @@ impl Combo {
     }
 
     fn push_offload_bash_tool_use(&mut self, tool_use: ToolUse, requires_confirmation: bool) {
-        self.state.write().view = ComboView::Messages;
+        {
+            let mut state = self.state.write();
+            state.view = ComboView::Messages;
+            state.bash_tool_use = if requires_confirmation {
+                Some(tool_use.clone())
+            } else {
+                None
+            };
+        }
         let tool_use_id = tool_use.id.clone();
         self.messages.push(Message::bot(Tool::new(tool_use).into()));
         if requires_confirmation {
+            self.state.write().starter_state = StarterState::AwaitingPermission;
             let ask = Event::Ask(AskEvent::ToolUsePermission(tool_use_id));
             let _ = self.messages.on_tool_event(&ask);
             if self.messages.select_first_actionable() {
@@ -546,6 +555,7 @@ impl Combo {
             } => {
                 if self.matches_id(id) {
                     self.forward_result_to_child(tool_use_id, *is_error, output.clone());
+                    self.state.write().bash_tool_use = None;
                 }
             }
             ComboEvent::Executing {
@@ -595,6 +605,7 @@ impl Combo {
                         }
                     };
                     state.starter_state = StarterState::Finalized;
+                    state.bash_tool_use = None;
                     state.display_state.expand();
                     drop(state);
                     if let Some(message) = error_message {
@@ -619,6 +630,7 @@ impl Combo {
                     {
                         let mut state = self.state.write();
                         state.starter_state = StarterState::Cancelled;
+                        state.bash_tool_use = None;
                         state.display_state.expand();
                     }
                 }

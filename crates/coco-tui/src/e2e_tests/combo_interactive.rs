@@ -344,6 +344,31 @@ fn combo_interactive_approval_executes_coco_reply_and_completes() {
 }
 
 #[test]
+fn combo_interactive_reject_then_feedback_allows_second_reply_attempt() {
+    let mock = MockOpenAiServer::start_with_scenario(
+        MockOpenAiScenario::RejectThenNeedFeedbackToken("E2E_RETRY_REASON".to_string()),
+    );
+    let (mut guard, mut writer, rx, mut parser, mut child, _temp) = run_combo_with_mock(&mock);
+
+    wait_for_screen_contains(&mut parser, &rx, "rm -rf /", Duration::from_secs(30));
+    wait_for_screen_contains(&mut parser, &rx, "Ready", Duration::from_secs(30));
+    wait_for_screen_contains(
+        &mut parser,
+        &rx,
+        "Please provide feedback first (missing: E2E_RETRY_REASON).",
+        Duration::from_secs(30),
+    );
+    assert_screen_not_contains(
+        &mut parser,
+        &rx,
+        "Bash Awaiting confirmation",
+        Duration::from_secs(2),
+    );
+    assert_shutdown_ok(&mut *child, &mut *writer, &parser, &mut guard);
+    assert!(mock.request_count() >= 2);
+}
+
+#[test]
 fn combo_non_interactive_executes_reply_without_confirmation() {
     let mock = MockOpenAiServer::start_with_scenario(MockOpenAiScenario::ImmediateReply);
     let (mut guard, mut writer, rx, mut parser, mut child, _temp) =
