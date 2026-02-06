@@ -1156,7 +1156,7 @@ impl Component for Combo {
 
         if self.is_child_focused {
             match (key.modifiers, key.code) {
-                (KeyModifiers::NONE, KeyCode::Esc) => self.clear_child_focus(),
+                (KeyModifiers::NONE, KeyCode::Esc | KeyCode::Backspace) => self.clear_child_focus(),
                 (KeyModifiers::NONE, KeyCode::Char('r')) => {
                     self.messages.toggle_thinking_for_focus();
                 }
