@@ -149,6 +149,7 @@ struct MockOpenAiState {
     request_count: usize,
     combo_request_count: usize,
     seen_tokens: HashSet<String>,
+    request_paths: Vec<String>,
     request_user_texts: Vec<String>,
     request_last_user_texts: Vec<String>,
     combo_request_user_texts: Vec<String>,
@@ -160,6 +161,7 @@ struct MockOpenAiState {
 pub(crate) enum MockOpenAiScenario {
     RequireFeedbackTokens(Vec<String>),
     ImmediateReply,
+    TextThenReplyAfterImplicitNudge,
     ImmediateReplyThenRequireFeedbackToken(String),
     RejectThenNeedFeedbackToken(String),
     RateLimited,
@@ -228,6 +230,14 @@ impl MockOpenAiServer {
 
     pub(crate) fn request_count(&self) -> usize {
         self.state.lock().expect("lock mock state").request_count
+    }
+
+    pub(crate) fn request_paths(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .expect("lock mock state")
+            .request_paths
+            .clone()
     }
 
     pub(crate) fn saw_feedback_token(&self) -> bool {
@@ -309,6 +319,10 @@ fn handle_mock_openai_connection(
         let _ = write_http_response(stream, 400, br#"{"error":"bad request"}"#);
         return;
     };
+    {
+        let mut guard = state.lock().expect("lock mock state");
+        guard.request_paths.push(path.clone());
+    }
     if path != "/v1/chat/completions" && path != "/chat/completions" {
         let _ = write_http_response(stream, 404, br#"{"error":"not found"}"#);
         return;
@@ -464,7 +478,9 @@ fn build_mock_openai_response(
                     guard.seen_tokens.insert(token.clone());
                 }
             }
-            MockOpenAiScenario::ImmediateReply | MockOpenAiScenario::RateLimited => {}
+            MockOpenAiScenario::ImmediateReply
+            | MockOpenAiScenario::TextThenReplyAfterImplicitNudge
+            | MockOpenAiScenario::RateLimited => {}
         }
         (guard.request_count, guard.combo_request_count)
     };
@@ -487,6 +503,21 @@ fn build_mock_openai_response(
             }),
         },
         MockOpenAiScenario::ImmediateReply => {
+            let command =
+                "coco reply --result='mock polished result' --reason='used user feedback'";
+            MockHttpResponse::Ok(mock_bash_tool_call_response(command))
+        }
+        MockOpenAiScenario::TextThenReplyAfterImplicitNudge => {
+            if !is_combo_request {
+                return MockHttpResponse::Ok(mock_text_response(
+                    "Please provide feedback in combo interactive flow.",
+                ));
+            }
+            if combo_request_count == 1 {
+                return MockHttpResponse::Ok(mock_text_response(
+                    "Still checking. I need one more confirmation round before reply.",
+                ));
+            }
             let command =
                 "coco reply --result='mock polished result' --reason='used user feedback'";
             MockHttpResponse::Ok(mock_bash_tool_call_response(command))

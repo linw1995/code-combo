@@ -1,4 +1,7 @@
-use std::time::Duration;
+use std::{
+    thread,
+    time::{Duration, Instant},
+};
 
 use vt100::Parser;
 
@@ -98,6 +101,23 @@ fn assert_shutdown_ok(
     assert!(status.success(), "tui exit failed: {status:?}");
 }
 
+fn wait_for_request_count(mock: &MockOpenAiServer, min: usize, timeout: Duration) {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if mock.request_count() >= min {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!(
+        "timed out waiting for mock request count >= {min}, current={}, paths={:#?}, all_user_texts={:#?}, combo_user_texts={:#?}",
+        mock.request_count(),
+        mock.request_paths(),
+        mock.request_user_texts(),
+        mock.combo_request_user_texts()
+    );
+}
+
 #[test]
 fn combo_interactive_shows_feedback_prompt_before_reply_tool_use() {
     let mock = MockOpenAiServer::start("E2E_TOKEN_PROMPT");
@@ -121,17 +141,47 @@ fn combo_interactive_shows_feedback_prompt_before_reply_tool_use() {
         "Bash Awaiting confirmation",
         Duration::from_secs(2),
     );
+    wait_for_request_count(&mock, 3, Duration::from_secs(5));
 
     assert_shutdown_ok(&mut *child, &mut *writer, &parser, &mut guard);
     assert!(
-        mock.request_count() >= 1,
-        "expected at least one LLM call, got {}",
+        mock.request_count() >= 3,
+        "expected auto implicit nudges before waiting feedback, got {} requests",
         mock.request_count()
     );
     assert!(
         !mock.saw_feedback_token(),
         "unexpectedly observed feedback token before user input"
     );
+}
+
+#[test]
+fn combo_interactive_auto_nudge_can_reach_reply_without_manual_feedback() {
+    let mock =
+        MockOpenAiServer::start_with_scenario(MockOpenAiScenario::TextThenReplyAfterImplicitNudge);
+    let (mut guard, mut writer, rx, mut parser, mut child, _temp) = run_combo_with_mock(&mock);
+
+    wait_for_screen_contains(
+        &mut parser,
+        &rx,
+        "Combo: e2e_mock_interactive",
+        Duration::from_secs(30),
+    );
+    wait_for_screen_contains(
+        &mut parser,
+        &rx,
+        "Bash Awaiting confirmation",
+        Duration::from_secs(30),
+    );
+    assert!(
+        mock.request_count() >= 2,
+        "expected at least two model requests for auto-nudge flow, got {}",
+        mock.request_count()
+    );
+
+    send_enter(&mut *writer);
+    wait_for_screen_contains(&mut parser, &rx, "Completed", Duration::from_secs(30));
+    assert_shutdown_ok(&mut *child, &mut *writer, &parser, &mut guard);
 }
 
 #[test]

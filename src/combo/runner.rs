@@ -1080,10 +1080,13 @@ fn build_interactive_offload_reply_reminder(schemas: &[PromptSchema]) -> String 
         .map(|schema| format!("--{}=...", schema.name))
         .collect();
     format!(
-        "Continue if needed. When ready, finish with: coco reply {}",
+        "{INTERACTIVE_REPLY_REMINDER_PREFIX} {}",
         field_args.join(" ")
     )
 }
+
+const INTERACTIVE_REPLY_REMINDER_PREFIX: &str =
+    "Continue if needed. When ready, finish with: coco reply";
 
 async fn execute_interactive_tool_use(
     agent: &mut Agent,
@@ -1156,6 +1159,8 @@ async fn handle_interactive_combo_reply(
     on_event: &ComboEventCallback,
     seed_directive: bool,
 ) -> Result<(), ComboReplyError> {
+    const AUTO_IMPLICIT_NUDGE_LIMIT: usize = 2;
+
     if cancel_token.is_cancelled() {
         return Err(ComboReplyError::Cancelled);
     }
@@ -1168,6 +1173,7 @@ async fn handle_interactive_combo_reply(
     }
 
     let max_turns = 50usize;
+    let mut empty_tool_use_turns = 0usize;
     for _ in 0..max_turns {
         if cancel_token.is_cancelled() {
             return Err(ComboReplyError::Cancelled);
@@ -1224,9 +1230,12 @@ async fn handle_interactive_combo_reply(
 
         let tool_uses = extract_tool_uses(&response.message);
         if tool_uses.is_empty() {
+            empty_tool_use_turns += 1;
+            let reminder = build_interactive_offload_reply_reminder(schemas);
+            let should_pause_for_feedback = empty_tool_use_turns > AUTO_IMPLICIT_NUDGE_LIMIT;
             if disable_stream {
                 let response_text = extract_text_response(&response.message);
-                if !response_text.trim().is_empty() {
+                if should_pause_for_feedback && !response_text.trim().is_empty() {
                     emit_combo_event(
                         on_event,
                         ComboEvent::Prompt {
@@ -1239,14 +1248,16 @@ async fn handle_interactive_combo_reply(
                 }
             }
             agent
-                .append_message(Message::user(Content::Text(
-                    build_interactive_offload_reply_reminder(schemas),
-                )))
+                .append_message(Message::user(Content::Text(reminder)))
                 .await;
-            // Pause and wait for user feedback from combo session.
+            if !should_pause_for_feedback {
+                continue;
+            }
+            // Pause and wait for user feedback from combo session after bounded auto nudges.
             // The next feedback prompt will re-enter interactive handling.
             return Ok(());
         }
+        empty_tool_use_turns = 0;
 
         let mut tool_results = Vec::new();
         let mut guidance: Option<String> = None;
