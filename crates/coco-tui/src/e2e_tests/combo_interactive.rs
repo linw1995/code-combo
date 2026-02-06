@@ -359,10 +359,14 @@ fn combo_interactive_coco_reply_reject_then_feedback_can_complete() {
     );
     send_escape(&mut *writer);
     wait_for_screen_contains(&mut parser, &rx, "Cancelled", Duration::from_secs(30));
+    assert_screen_not_contains(
+        &mut parser,
+        &rx,
+        "Combo execution was cancelled",
+        Duration::from_secs(2),
+    );
 
-    // Ensure focus returns to input before submitting feedback.
-    send_escape(&mut *writer);
-    send_text(&mut *writer, "i");
+    // Submit feedback directly after cancellation.
     send_text(&mut *writer, "retry with feedback E2E_REJECT_FEEDBACK");
     send_alt_enter(&mut *writer);
 

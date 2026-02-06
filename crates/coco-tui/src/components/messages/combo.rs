@@ -1141,7 +1141,9 @@ impl Component for Combo {
                             .unwrap();
                     }
                     (KeyModifiers::NONE, KeyCode::Esc) => {
-                        self.state.write().starter_state = StarterState::Cancelled;
+                        // Reject only current reply tool use; combo should stay alive for feedback.
+                        self.state.write().starter_state = StarterState::Executing;
+                        self.state.write().bash_tool_use = None;
                         global::action_tx()
                             .send(ToolAction::Cancel(tool_use).into())
                             .unwrap();
