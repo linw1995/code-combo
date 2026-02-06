@@ -1775,6 +1775,19 @@ fn display_combo_arg(value: &str) -> String {
 mod tests {
     use super::*;
 
+    fn prompt_schemas() -> Vec<PromptSchema> {
+        vec![
+            PromptSchema {
+                name: "message".to_string(),
+                description: "Final answer".to_string(),
+            },
+            PromptSchema {
+                name: "status".to_string(),
+                description: "Execution status".to_string(),
+            },
+        ]
+    }
+
     #[test]
     fn serialize_run_combo_output() {
         let output = RunComboOutput {
@@ -1789,5 +1802,61 @@ mod tests {
         assert_eq!(json["success"], true);
         assert_eq!(json["tool_calls"], 3);
         assert!(json.get("error").is_none() || json["error"].is_null());
+    }
+
+    #[test]
+    fn interactive_offload_directive_contains_required_fields() {
+        let directive = build_interactive_offload_reply_directive(&prompt_schemas());
+        assert!(directive.contains("interact in multiple rounds"));
+        assert!(directive.contains("coco reply --message=<value> --status=<value>"));
+        assert!(directive.contains("- --message=<value>: Final answer"));
+        assert!(directive.contains("- --status=<value>: Execution status"));
+    }
+
+    #[test]
+    fn interactive_offload_reminder_contains_reply_command() {
+        let reminder = build_interactive_offload_reply_reminder(&prompt_schemas());
+        assert!(reminder.contains("Continue if needed"));
+        assert!(reminder.contains("coco reply --message=... --status=..."));
+    }
+
+    #[test]
+    fn is_coco_reply_command_accepts_expected_forms() {
+        assert!(is_coco_reply_command("coco reply --message='hello world'"));
+        assert!(is_coco_reply_command(
+            "/usr/local/bin/coco reply --message='hello world'"
+        ));
+        assert!(!is_coco_reply_command("coco ask hello"));
+        assert!(!is_coco_reply_command("echo coco reply --message=hello"));
+    }
+
+    #[test]
+    fn classify_offload_command_distinguishes_coco_safe_and_unsafe() {
+        assert!(matches!(
+            classify_offload_command("coco reply --message=done --status=ok"),
+            OffloadCommandKind::Coco
+        ));
+        assert!(matches!(
+            classify_offload_command("ls -la"),
+            OffloadCommandKind::Safe
+        ));
+        assert!(matches!(
+            classify_offload_command("rm -rf /"),
+            OffloadCommandKind::Unsafe
+        ));
+    }
+
+    #[test]
+    fn offload_reply_guidance_reflects_command_status() {
+        let blocked = build_offload_reply_guidance(&prompt_schemas(), "rm -rf /", false);
+        assert!(blocked.contains("previous tool call was blocked"));
+        assert!(blocked.contains("command: rm -rf /"));
+        assert!(blocked.contains("- message: Final answer"));
+        assert!(blocked.contains("- status: Execution status"));
+
+        let executed = build_offload_reply_guidance(&prompt_schemas(), "ls -la", true);
+        assert!(executed.contains("previous tool call was executed"));
+        assert!(executed.contains("command: ls -la"));
+        assert!(executed.contains("coco reply --message=... --status=..."));
     }
 }
