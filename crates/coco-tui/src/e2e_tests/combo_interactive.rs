@@ -359,6 +359,10 @@ fn combo_interactive_coco_reply_reject_then_feedback_can_complete() {
     );
     send_escape(&mut *writer);
     wait_for_screen_contains(&mut parser, &rx, "Cancelled", Duration::from_secs(30));
+    println!(
+        "=== screen after reject ===\n{}\n=== end ===",
+        parser.screen().contents()
+    );
     assert_screen_not_contains(
         &mut parser,
         &rx,
@@ -369,6 +373,16 @@ fn combo_interactive_coco_reply_reject_then_feedback_can_complete() {
     // Submit feedback directly after cancellation.
     send_text(&mut *writer, "retry with feedback E2E_REJECT_FEEDBACK");
     send_alt_enter(&mut *writer);
+    wait_for_screen_contains(
+        &mut parser,
+        &rx,
+        "retry with feedback E2E_REJECT_FEEDBACK",
+        Duration::from_secs(30),
+    );
+    println!(
+        "=== screen after feedback ===\n{}\n=== end ===",
+        parser.screen().contents()
+    );
 
     wait_for_screen_contains(
         &mut parser,
@@ -378,6 +392,10 @@ fn combo_interactive_coco_reply_reject_then_feedback_can_complete() {
     );
     send_enter(&mut *writer);
     wait_for_screen_contains(&mut parser, &rx, "Completed", Duration::from_secs(30));
+    println!(
+        "=== screen after complete ===\n{}\n=== end ===",
+        parser.screen().contents()
+    );
 
     assert!(
         mock.saw_token(FEEDBACK_TOKEN),
