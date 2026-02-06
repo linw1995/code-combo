@@ -2042,6 +2042,36 @@ impl Chat<'static> {
         });
     }
 
+    fn focus_next_pending_user_action(&mut self) -> bool {
+        for action in self.pending_user_actions.clone() {
+            match action {
+                PendingUserAction::ToolUse {
+                    tool_use_id,
+                    combo_id,
+                } => {
+                    if let Some(combo_id) = combo_id
+                        && let Some(idx) = self.messages.locate_tool_message(&combo_id)
+                    {
+                        self.update_focus(Focus::Messages);
+                        self.messages.focus(idx);
+                        return true;
+                    }
+                    if let Some(idx) = self.messages.locate_tool_message(&tool_use_id) {
+                        self.update_focus(Focus::Messages);
+                        self.messages.focus(idx);
+                        return true;
+                    }
+                }
+                PendingUserAction::ComboFeedback { .. } => {
+                    self.update_focus(Focus::Input);
+                    self.messages.blur();
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn try_submit_combo_feedback(&mut self, feedback: &str) -> bool {
         let pending_feedback_combo_ids = self
             .pending_user_actions
@@ -3071,11 +3101,13 @@ impl Component for Chat<'static> {
                     self.remove_pending_tool_use_action(&tool_use.id);
                     self.agent.grant_once(&tool_use.id, &tool_use.name);
                     self.spawn_tool_use(tool_use);
+                    self.focus_next_pending_user_action();
                 }
                 ToolAction::GrantSession(tool_use) => {
                     self.remove_pending_tool_use_action(&tool_use.id);
                     self.agent.grant_session(tool_use);
                     self.spawn_tool_use(tool_use);
+                    self.focus_next_pending_user_action();
                 }
                 ToolAction::Cancel(tool_use) => {
                     let pending_combo_id =
@@ -3100,6 +3132,7 @@ impl Component for Chat<'static> {
                     if let Some(combo_id) = cancelled_combo_id {
                         self.set_pending_combo_feedback_action(combo_id);
                         self.set_ready();
+                        self.focus_next_pending_user_action();
                         global::trigger_schedule_session_save();
                         return;
                     }
@@ -3115,6 +3148,7 @@ impl Component for Chat<'static> {
                         });
                     // Set chat status to Ready after cancellation
                     self.set_ready();
+                    self.focus_next_pending_user_action();
                     // Trigger session save after tool cancellation
                     global::trigger_schedule_session_save();
                 }
