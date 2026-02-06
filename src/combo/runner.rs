@@ -30,9 +30,10 @@ use crate::tools::{
 pub type ExecuteResult = Result<Output, Final>;
 
 use crate::{
-    Agent, Block, ChatStreamUpdate, Config, Content, Message, OutputChunk, PromptSchema,
-    SessionEnv, Starter, StarterCommand, StarterError, StarterEvent, ToolUse, bash_unsafe_ranges,
-    bash_unsafe_reason, discover_starters, exec::StreamKind, parse_primary_command, workspace_dir,
+    Agent, Block, ChatStreamUpdate, Config, Content, Message, OutputChunk, PromptResponseSender,
+    PromptSchema, SessionEnv, Starter, StarterCommand, StarterError, StarterEvent, ToolUse,
+    bash_unsafe_ranges, bash_unsafe_reason, discover_starters, exec::StreamKind,
+    parse_primary_command, workspace_dir,
 };
 
 // Import types from combo module
@@ -250,6 +251,8 @@ async fn execute_combo(
     let mut tool_failed = false;
     let mut starter_failed = false;
     let mut cancelled = false;
+    let mut pending_interactive_schemas: Option<Vec<PromptSchema>> = None;
+    let mut pending_interactive_responder: Option<PromptResponseSender> = None;
 
     let command_line = format_combo_run_command(&combo_name, &args);
     // Emit executing event
@@ -347,6 +350,32 @@ async fn execute_combo(
                             session_sock: None,
                         });
                         summary_parts.push(format!("[Prompt] {}", prompt));
+
+                        if let Some(schemas) = pending_interactive_schemas.clone() {
+                            let result = handle_interactive_combo_reply(
+                                &mut reply_agent,
+                                &schemas,
+                                &combo_name,
+                                cancel_token.clone(),
+                                session_socket_path.clone(),
+                                &on_event_for_emit,
+                                false,
+                            )
+                            .await;
+                            if let Err(err) = result {
+                                let message = err.to_string();
+                                emit_combo_event(
+                                    &on_event_for_emit,
+                                    ComboEvent::ReplyToolError {
+                                        message: message.clone(),
+                                    },
+                                );
+                                if let Some(responder) = pending_interactive_responder.take() {
+                                    let _ = responder.send(Err(message));
+                                }
+                                pending_interactive_schemas = None;
+                            }
+                        }
                     }
                     StarterEvent::PromptRequest {
                         prompt,
@@ -367,6 +396,8 @@ async fn execute_combo(
                         summary_parts.push(format!("[Prompt] {}", prompt));
 
                         if interactive {
+                            pending_interactive_schemas = Some(schemas.clone());
+                            pending_interactive_responder = Some(responder.clone());
                             let result = handle_interactive_combo_reply(
                                 &mut reply_agent,
                                 &schemas,
@@ -374,6 +405,7 @@ async fn execute_combo(
                                 cancel_token.clone(),
                                 session_socket_path.clone(),
                                 &on_event_for_emit,
+                                true,
                             )
                             .await;
                             if let Err(err) = result {
@@ -385,8 +417,12 @@ async fn execute_combo(
                                     },
                                 );
                                 let _ = responder.send(Err(message));
+                                pending_interactive_schemas = None;
+                                pending_interactive_responder = None;
                             }
                         } else if reply_agent.offload_combo_reply() {
+                            pending_interactive_schemas = None;
+                            pending_interactive_responder = None;
                             let result = handle_offload_combo_reply_with_retry(
                                 &mut reply_agent,
                                 &schemas,
@@ -407,6 +443,8 @@ async fn execute_combo(
                                 let _ = responder.send(Err(message));
                             }
                         } else {
+                            pending_interactive_schemas = None;
+                            pending_interactive_responder = None;
                             let disable_stream =
                                 reply_agent.disable_stream_for_current_model();
                             let mut streamed_thinking = false;
@@ -517,13 +555,19 @@ async fn execute_combo(
                     }
                     StarterEvent::Finished { exit_code: code } => {
                         exit_code = code;
+                        pending_interactive_schemas = None;
+                        pending_interactive_responder = None;
                     }
                     StarterEvent::Cancelled => {
                         cancelled = true;
+                        pending_interactive_schemas = None;
+                        pending_interactive_responder = None;
                     }
                     StarterEvent::Failed { reason } => {
                         starter_failed = true;
                         summary_parts.push(format!("[Failed] {}", reason));
+                        pending_interactive_schemas = None;
+                        pending_interactive_responder = None;
                     }
                 }
             }
@@ -1110,15 +1154,18 @@ async fn handle_interactive_combo_reply(
     cancel_token: CancellationToken,
     session_socket_path: PathBuf,
     on_event: &ComboEventCallback,
+    seed_directive: bool,
 ) -> Result<(), ComboReplyError> {
     if cancel_token.is_cancelled() {
         return Err(ComboReplyError::Cancelled);
     }
-    agent
-        .append_message(Message::user(Content::Text(
-            build_interactive_offload_reply_directive(schemas),
-        )))
-        .await;
+    if seed_directive {
+        agent
+            .append_message(Message::user(Content::Text(
+                build_interactive_offload_reply_directive(schemas),
+            )))
+            .await;
+    }
 
     let max_turns = 50usize;
     for _ in 0..max_turns {
@@ -1196,7 +1243,9 @@ async fn handle_interactive_combo_reply(
                     build_interactive_offload_reply_reminder(schemas),
                 )))
                 .await;
-            continue;
+            // Pause and wait for user feedback from combo session.
+            // The next feedback prompt will re-enter interactive handling.
+            return Ok(());
         }
 
         let mut tool_results = Vec::new();

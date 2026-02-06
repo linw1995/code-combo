@@ -359,10 +359,6 @@ fn combo_interactive_coco_reply_reject_then_feedback_can_complete() {
     );
     send_escape(&mut *writer);
     wait_for_screen_contains(&mut parser, &rx, "Cancelled", Duration::from_secs(30));
-    println!(
-        "=== screen after reject ===\n{}\n=== end ===",
-        parser.screen().contents()
-    );
     assert_screen_not_contains(
         &mut parser,
         &rx,
@@ -370,19 +366,23 @@ fn combo_interactive_coco_reply_reject_then_feedback_can_complete() {
         Duration::from_secs(2),
     );
 
-    // Submit feedback directly after cancellation.
-    send_text(&mut *writer, "retry with feedback E2E_REJECT_FEEDBACK");
+    let feedback_phrase = "retry with feedback E2E_REJECT_FEEDBACK";
+    let combo_requests_before_submit = mock.combo_request_user_texts();
+    assert!(
+        !combo_requests_before_submit.is_empty(),
+        "expected combo interactive requests before feedback submit"
+    );
+    assert!(
+        combo_requests_before_submit
+            .iter()
+            .all(|text| !text.contains(feedback_phrase)),
+        "feedback should not appear in combo history before submit: {combo_requests_before_submit:#?}"
+    );
+    let non_combo_last_user_texts_before = mock.non_combo_request_last_user_texts();
+
+    send_text(&mut *writer, feedback_phrase);
+    wait_for_screen_contains(&mut parser, &rx, feedback_phrase, Duration::from_secs(30));
     send_alt_enter(&mut *writer);
-    wait_for_screen_contains(
-        &mut parser,
-        &rx,
-        "retry with feedback E2E_REJECT_FEEDBACK",
-        Duration::from_secs(30),
-    );
-    println!(
-        "=== screen after feedback ===\n{}\n=== end ===",
-        parser.screen().contents()
-    );
 
     wait_for_screen_contains(
         &mut parser,
@@ -392,16 +392,31 @@ fn combo_interactive_coco_reply_reject_then_feedback_can_complete() {
     );
     send_enter(&mut *writer);
     wait_for_screen_contains(&mut parser, &rx, "Completed", Duration::from_secs(30));
-    println!(
-        "=== screen after complete ===\n{}\n=== end ===",
-        parser.screen().contents()
-    );
 
     assert!(
         mock.saw_token(FEEDBACK_TOKEN),
-        "expected feedback token in model request after cancellation"
+        "expected feedback token in combo interactive request after cancellation"
     );
-
+    let combo_requests_after_submit = mock.combo_request_user_texts();
+    assert!(
+        combo_requests_after_submit.len() > combo_requests_before_submit.len(),
+        "expected additional combo request after feedback submit, before={combo_requests_before_submit:#?}, after={combo_requests_after_submit:#?}"
+    );
+    assert!(
+        combo_requests_after_submit
+            .iter()
+            .skip(combo_requests_before_submit.len())
+            .any(|text| text.contains(feedback_phrase)),
+        "expected feedback to be merged into combo history, got: {combo_requests_after_submit:#?}"
+    );
+    let non_combo_last_user_texts_after = mock.non_combo_request_last_user_texts();
+    assert!(
+        non_combo_last_user_texts_after
+            .iter()
+            .skip(non_combo_last_user_texts_before.len())
+            .all(|text| !text.contains(feedback_phrase)),
+        "feedback should not be sent to non-combo history, got: {non_combo_last_user_texts_after:#?}"
+    );
     child
         .clone_killer()
         .kill()

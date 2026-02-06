@@ -7,9 +7,9 @@ use code_combo::tools::{
 use code_combo::{
     Agent, Block as ChatBlock, ChatResponse, ChatStreamUpdate, ComboRunEvent, ComboRunResult,
     ComboStreamKind as ComboRunStreamKind, Config, Content as ChatContent, Message as ChatMessage,
-    NotificationRule, NotificationWhen, Output, RetryAttempt, RetryNotifier, RetryUpdate,
-    RuntimeOverrides, Starter, StopReason, TextEdit, ToolUse, UsageStats, discover_starters,
-    load_runtime_overrides, save_runtime_overrides,
+    NotificationRule, NotificationWhen, Output, PromptPayload, RetryAttempt, RetryNotifier,
+    RetryUpdate, RuntimeOverrides, SessionSocketClient, Starter, StopReason, TextEdit, ToolUse,
+    UsageStats, discover_starters, load_runtime_overrides, save_runtime_overrides,
 };
 
 /// Holds information about a collected tool result from concurrent execution.
@@ -18,6 +18,17 @@ struct CollectedToolResult {
     id: String,
     is_error: bool,
     content: code_combo::Content,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PendingUserAction {
+    ToolUse {
+        tool_use_id: String,
+        combo_id: Option<String>,
+    },
+    ComboFeedback {
+        combo_id: String,
+    },
 }
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -97,6 +108,7 @@ pub struct Chat<'a> {
     pending_combo_tool_events: HashMap<String, Vec<ComboEvent>>,
     combo_offload_tool_use_to_combo_id: HashMap<String, String>,
     combo_pending_reply_session_socks: HashMap<String, String>,
+    pending_user_actions: Vec<PendingUserAction>,
     last_usage: Option<UsageStats>,
     retry_status: Option<RetryAttempt>,
     transcript_scopes: Vec<TranscriptScope>,
@@ -346,6 +358,7 @@ impl Chat<'static> {
             pending_combo_tool_events: HashMap::new(),
             combo_offload_tool_use_to_combo_id: HashMap::new(),
             combo_pending_reply_session_socks: HashMap::new(),
+            pending_user_actions: Vec::new(),
             last_usage: None,
             retry_status: None,
             transcript_scopes: Vec::new(),
@@ -570,6 +583,7 @@ impl Chat<'static> {
                 {
                     self.combo_pending_reply_session_socks
                         .insert(id.clone(), session_sock.clone());
+                    self.set_pending_combo_feedback_action(id.clone());
                 }
                 self.set_combo_thinking_active(thinking.as_ref().is_some_and(|cfg| cfg.enabled));
                 self.set_ready();
@@ -592,6 +606,8 @@ impl Chat<'static> {
                         self.combo_pending_reply_session_socks
                             .insert(id.clone(), session_sock);
                     }
+                    self.clear_pending_combo_feedback_action(id);
+                    self.add_pending_tool_use_action(tool_use.id.clone(), Some(id.clone()));
                     if let Some(idx) = self.messages.locate_tool_message(id) {
                         self.update_focus(Focus::Messages);
                         self.messages.focus(idx);
@@ -603,6 +619,7 @@ impl Chat<'static> {
             ComboEvent::Executed { id, starter, .. } => {
                 self.set_combo_thinking_active(false);
                 self.combo_pending_reply_session_socks.remove(id);
+                self.clear_pending_actions_for_combo(id);
                 if let Err(err) = starter.combo.as_ref() {
                     warn!(?err, "Failed to execute starter");
                 }
@@ -618,6 +635,7 @@ impl Chat<'static> {
                 self.combo_offload_tool_use_to_combo_id
                     .retain(|_, combo_id| combo_id != id);
                 self.combo_pending_reply_session_socks.remove(id);
+                self.clear_pending_actions_for_combo(id);
                 self.set_combo_thinking_active(false);
                 self.set_ready();
             }
@@ -626,6 +644,7 @@ impl Chat<'static> {
                     self.combo_offload_tool_use_to_combo_id
                         .retain(|_, combo_id| combo_id != id);
                     self.combo_pending_reply_session_socks.remove(id);
+                    self.clear_pending_actions_for_combo(id);
                 }
                 self.set_combo_thinking_active(false);
                 self.set_ready();
@@ -640,6 +659,7 @@ impl Chat<'static> {
             }
             ComboEvent::ReplyToolResult { tool_use_id, .. } => {
                 self.combo_offload_tool_use_to_combo_id.remove(tool_use_id);
+                self.remove_pending_tool_use_action(tool_use_id);
                 // Result is handled by Combo component
             }
             ComboEvent::Transcript { id, name, messages } => {
@@ -1134,6 +1154,7 @@ impl Chat<'static> {
                 self.combo_offload_tool_use_to_combo_id
                     .retain(|_, combo_id| combo_id != id);
                 self.combo_pending_reply_session_socks.remove(id);
+                self.clear_pending_actions_for_combo(id);
                 self.set_combo_thinking_active(false);
                 if let Err(err) = starter.combo.as_ref() {
                     warn!(?err, "Failed to execute starter");
@@ -1374,6 +1395,9 @@ impl Chat<'static> {
             return;
         }
         debug!(?value, "submiting");
+        if self.try_submit_combo_feedback(&value) {
+            return;
+        }
         self.messages.collapse_thinking();
         self.messages
             .push(Message::user(Plain::new(value.clone()).into()));
@@ -1961,6 +1985,147 @@ impl Chat<'static> {
             .iter()
             .next()
             .map(|(combo_id, session_sock)| (combo_id.clone(), session_sock.clone()))
+    }
+
+    fn add_pending_tool_use_action(&mut self, tool_use_id: String, combo_id: Option<String>) {
+        self.pending_user_actions.retain(|action| {
+            !matches!(
+                action,
+                PendingUserAction::ToolUse {
+                    tool_use_id: id,
+                    ..
+                } if id == &tool_use_id
+            )
+        });
+        self.pending_user_actions.push(PendingUserAction::ToolUse {
+            tool_use_id,
+            combo_id,
+        });
+    }
+
+    fn remove_pending_tool_use_action(&mut self, tool_use_id: &str) -> Option<Option<String>> {
+        let mut removed = None;
+        self.pending_user_actions.retain(|action| {
+            let PendingUserAction::ToolUse {
+                tool_use_id: id,
+                combo_id,
+            } = action
+            else {
+                return true;
+            };
+            if id != tool_use_id {
+                return true;
+            }
+            removed = Some(combo_id.clone());
+            false
+        });
+        removed
+    }
+
+    fn set_pending_combo_feedback_action(&mut self, combo_id: String) {
+        self.pending_user_actions.retain(|action| {
+            !matches!(
+                action,
+                PendingUserAction::ComboFeedback { combo_id: id } if id == &combo_id
+            )
+        });
+        self.pending_user_actions
+            .push(PendingUserAction::ComboFeedback { combo_id });
+    }
+
+    fn clear_pending_combo_feedback_action(&mut self, combo_id: &str) {
+        self.pending_user_actions.retain(|action| {
+            !matches!(
+                action,
+                PendingUserAction::ComboFeedback { combo_id: id } if id == combo_id
+            )
+        });
+    }
+
+    fn clear_pending_actions_for_combo(&mut self, combo_id: &str) {
+        self.pending_user_actions.retain(|action| match action {
+            PendingUserAction::ToolUse {
+                combo_id: Some(id), ..
+            } => id != combo_id,
+            PendingUserAction::ToolUse { combo_id: None, .. } => true,
+            PendingUserAction::ComboFeedback { combo_id: id } => id != combo_id,
+        });
+    }
+
+    fn try_submit_combo_feedback(&mut self, feedback: &str) -> bool {
+        let pending_feedback_combo_ids = self
+            .pending_user_actions
+            .iter()
+            .filter_map(|action| {
+                if let PendingUserAction::ComboFeedback { combo_id } = action {
+                    Some(combo_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if pending_feedback_combo_ids.is_empty() {
+            return false;
+        }
+
+        if pending_feedback_combo_ids.len() != 1 {
+            self.messages.push(Message::system(
+                Plain::new("multiple combo feedback actions are pending".to_string()).into(),
+            ));
+            self.set_ready();
+            return true;
+        }
+
+        let combo_id = pending_feedback_combo_ids[0].clone();
+        let Some(session_sock) = self
+            .combo_pending_reply_session_socks
+            .get(&combo_id)
+            .cloned()
+        else {
+            self.messages.push(Message::system(
+                Plain::new("combo feedback session is unavailable".to_string()).into(),
+            ));
+            self.set_ready();
+            return true;
+        };
+
+        let prompt = feedback.trim().to_string();
+        if prompt.is_empty() {
+            return true;
+        }
+
+        let payload = PromptPayload {
+            prompt,
+            reply: false,
+            interactive: false,
+            schemas: Vec::new(),
+            thinking: None,
+        };
+        let session_sock_for_send = session_sock.clone();
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async move {
+                let client = SessionSocketClient::connect(&session_sock_for_send).await?;
+                client.send_prompt(payload).await
+            })
+        });
+
+        match result {
+            Ok(_) => {
+                self.set_processing();
+            }
+            Err(err) => {
+                warn!(
+                    ?err,
+                    combo_id, session_sock, "failed to forward combo feedback to session socket"
+                );
+                self.messages.push(Message::system(
+                    Plain::new("failed to forward combo feedback".to_string()).into(),
+                ));
+                self.set_ready();
+            }
+        }
+        true
     }
 
     fn maybe_route_pending_combo_reply_tool_use(
@@ -2948,6 +3113,7 @@ impl Component for Chat<'static> {
                 ToolAction::Grant(tool_use) => {
                     let patched_tool_use =
                         self.patch_tool_use_with_pending_combo_session_sock(tool_use);
+                    self.remove_pending_tool_use_action(&patched_tool_use.id);
                     self.agent
                         .grant_once(&patched_tool_use.id, &patched_tool_use.name);
                     self.spawn_tool_use(&patched_tool_use);
@@ -2955,12 +3121,17 @@ impl Component for Chat<'static> {
                 ToolAction::GrantSession(tool_use) => {
                     let patched_tool_use =
                         self.patch_tool_use_with_pending_combo_session_sock(tool_use);
+                    self.remove_pending_tool_use_action(&patched_tool_use.id);
                     self.agent.grant_session(&patched_tool_use);
                     self.spawn_tool_use(&patched_tool_use);
                 }
                 ToolAction::Cancel(tool_use) => {
-                    let cancelled_combo_id =
-                        self.combo_offload_tool_use_to_combo_id.remove(&tool_use.id);
+                    let pending_combo_id =
+                        self.remove_pending_tool_use_action(&tool_use.id).flatten();
+                    let cancelled_combo_id = self
+                        .combo_offload_tool_use_to_combo_id
+                        .remove(&tool_use.id)
+                        .or(pending_combo_id);
                     let cancelled_combo_offload = cancelled_combo_id.is_some();
                     // Move focus back to Input when tool use is cancelled.
                     if let Some(idx) = self.messages.locate_tool_message(&tool_use.id)
@@ -2973,6 +3144,12 @@ impl Component for Chat<'static> {
                         // discoverable via locate_tool_message. Restore input focus explicitly.
                         self.update_focus(Focus::Input);
                         self.messages.blur();
+                    }
+                    if let Some(combo_id) = cancelled_combo_id {
+                        self.set_pending_combo_feedback_action(combo_id);
+                        self.set_ready();
+                        global::trigger_schedule_session_save();
+                        return;
                     }
                     // Await the next user message to avoid the LLM reacting without further user
                     // instructions

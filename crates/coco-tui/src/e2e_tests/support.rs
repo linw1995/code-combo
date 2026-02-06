@@ -147,7 +147,13 @@ disable_stream = true
 #[derive(Debug, Default)]
 struct MockOpenAiState {
     request_count: usize,
+    combo_request_count: usize,
     seen_tokens: HashSet<String>,
+    request_user_texts: Vec<String>,
+    request_last_user_texts: Vec<String>,
+    combo_request_user_texts: Vec<String>,
+    combo_request_last_user_texts: Vec<String>,
+    non_combo_request_last_user_texts: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -237,6 +243,49 @@ impl MockOpenAiServer {
             .expect("lock mock state")
             .seen_tokens
             .contains(token)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn request_user_texts(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .expect("lock mock state")
+            .request_user_texts
+            .clone()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn request_last_user_texts(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .expect("lock mock state")
+            .request_last_user_texts
+            .clone()
+    }
+
+    pub(crate) fn combo_request_user_texts(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .expect("lock mock state")
+            .combo_request_user_texts
+            .clone()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn combo_request_last_user_texts(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .expect("lock mock state")
+            .combo_request_last_user_texts
+            .clone()
+    }
+
+    pub(crate) fn non_combo_request_last_user_texts(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .expect("lock mock state")
+            .non_combo_request_last_user_texts
+            .clone()
     }
 }
 
@@ -356,7 +405,7 @@ fn build_mock_openai_response(
     scenario: &MockOpenAiScenario,
     state: &Arc<Mutex<MockOpenAiState>>,
 ) -> MockHttpResponse {
-    let user_text = request
+    let user_messages = request
         .get("messages")
         .and_then(|value| value.as_array())
         .map(|messages| {
@@ -367,42 +416,57 @@ fn build_mock_openai_response(
                     if role != "user" {
                         return None;
                     }
-                    message
+                    let text = message
                         .get("content")
-                        .and_then(|value| value.as_str())
-                        .map(str::to_string)
+                        .map(extract_text_content)
+                        .unwrap_or_default();
+                    if text.is_empty() { None } else { Some(text) }
                 })
                 .collect::<Vec<_>>()
-                .join("\n")
         })
         .unwrap_or_default();
+    let user_text = user_messages.join("\n");
+    let last_user_text = user_messages.last().cloned().unwrap_or_default();
 
     let is_summary_prompt = user_text.contains("Summarize the combo execution for the user.");
-
-    let request_count = {
+    let is_combo_request = is_combo_interactive_history(&user_text);
+    let (_request_count, combo_request_count) = {
         let mut guard = state.lock().expect("lock mock state");
         guard.request_count += 1;
+        guard.request_user_texts.push(user_text.clone());
+        guard.request_last_user_texts.push(last_user_text.clone());
+        if is_combo_request {
+            guard.combo_request_count += 1;
+            guard.combo_request_user_texts.push(user_text.clone());
+            guard
+                .combo_request_last_user_texts
+                .push(last_user_text.clone());
+        } else {
+            guard
+                .non_combo_request_last_user_texts
+                .push(last_user_text.clone());
+        }
         match scenario {
             MockOpenAiScenario::RequireFeedbackTokens(tokens) => {
                 for token in tokens {
-                    if user_text.contains(token) {
+                    if is_combo_request && user_text.contains(token) {
                         guard.seen_tokens.insert(token.clone());
                     }
                 }
             }
             MockOpenAiScenario::RejectThenNeedFeedbackToken(token) => {
-                if user_text.contains(token) {
+                if is_combo_request && user_text.contains(token) {
                     guard.seen_tokens.insert(token.clone());
                 }
             }
             MockOpenAiScenario::ImmediateReplyThenRequireFeedbackToken(token) => {
-                if user_text.contains(token) {
+                if is_combo_request && user_text.contains(token) {
                     guard.seen_tokens.insert(token.clone());
                 }
             }
             MockOpenAiScenario::ImmediateReply | MockOpenAiScenario::RateLimited => {}
         }
-        guard.request_count
+        (guard.request_count, guard.combo_request_count)
     };
 
     if is_summary_prompt {
@@ -428,7 +492,12 @@ fn build_mock_openai_response(
             MockHttpResponse::Ok(mock_bash_tool_call_response(command))
         }
         MockOpenAiScenario::ImmediateReplyThenRequireFeedbackToken(token) => {
-            if request_count == 1 || user_text.contains(token) {
+            if !is_combo_request {
+                return MockHttpResponse::Ok(mock_text_response(
+                    "Please provide feedback in combo interactive flow.",
+                ));
+            }
+            if combo_request_count == 1 || user_text.contains(token) {
                 let command =
                     "coco reply --result='mock polished result' --reason='used user feedback'";
                 return MockHttpResponse::Ok(mock_bash_tool_call_response(command));
@@ -440,12 +509,17 @@ fn build_mock_openai_response(
             )))
         }
         MockOpenAiScenario::RejectThenNeedFeedbackToken(token) => {
+            if !is_combo_request {
+                return MockHttpResponse::Ok(mock_text_response(
+                    "Please provide feedback in combo interactive flow.",
+                ));
+            }
             if user_text.contains(token) {
                 let command =
                     "coco reply --result='mock polished result' --reason='used user feedback'";
                 return MockHttpResponse::Ok(mock_bash_tool_call_response(command));
             }
-            if request_count == 1 {
+            if combo_request_count == 1 {
                 return MockHttpResponse::Ok(mock_bash_tool_call_response("rm -rf /"));
             }
             thread::sleep(Duration::from_millis(500));
@@ -455,6 +529,11 @@ fn build_mock_openai_response(
             )))
         }
         MockOpenAiScenario::RequireFeedbackTokens(tokens) => {
+            if !is_combo_request {
+                return MockHttpResponse::Ok(mock_text_response(
+                    "Please provide feedback in combo interactive flow.",
+                ));
+            }
             let missing = tokens
                 .iter()
                 .filter(|token| !user_text.contains(token.as_str()))
@@ -472,6 +551,41 @@ fn build_mock_openai_response(
             )))
         }
     }
+}
+
+fn extract_text_content(content: &serde_json::Value) -> String {
+    if let Some(text) = content.as_str() {
+        return text.to_string();
+    }
+    let Some(parts) = content.as_array() else {
+        return String::new();
+    };
+    parts
+        .iter()
+        .filter_map(|part| {
+            part.get("text")
+                .and_then(|value| value.as_str())
+                .or_else(|| part.get("input_text").and_then(|value| value.as_str()))
+                .or_else(|| {
+                    part.get("type")
+                        .and_then(|value| value.as_str())
+                        .and_then(|kind| match kind {
+                            "text" | "input_text" => {
+                                part.get("value").and_then(|value| value.as_str())
+                            }
+                            _ => None,
+                        })
+                })
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn is_combo_interactive_history(user_text: &str) -> bool {
+    user_text.contains("You can interact in multiple rounds and call tools as needed.")
+        || user_text.contains("Continue if needed. When ready, finish with: coco reply")
+        || user_text.contains("Process input:")
 }
 
 fn mock_text_response(content: &str) -> serde_json::Value {
