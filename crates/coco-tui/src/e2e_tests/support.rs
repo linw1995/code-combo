@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     env, fs,
     io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
@@ -97,6 +98,8 @@ api_key = "mock-api-key"
 base_url = "{base_url}"
 disable_stream = true
 offload_combo_reply = true
+retry_max_attempts = 1
+retry_max_delay_ms = 10
 "#
     );
     fs::write(&config_path, config_content).expect("write mock e2e config");
@@ -144,11 +147,19 @@ disable_stream = true
 #[derive(Debug, Default)]
 struct MockOpenAiState {
     request_count: usize,
-    saw_feedback_token: bool,
+    seen_tokens: HashSet<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum MockOpenAiScenario {
+    RequireFeedbackTokens(Vec<String>),
+    ImmediateReply,
+    RateLimited,
 }
 
 pub(crate) struct MockOpenAiServer {
     base_url: String,
+    primary_feedback_token: Option<String>,
     shutdown: Arc<AtomicBool>,
     state: Arc<Mutex<MockOpenAiState>>,
     worker: Option<thread::JoinHandle<()>>,
@@ -156,6 +167,18 @@ pub(crate) struct MockOpenAiServer {
 
 impl MockOpenAiServer {
     pub(crate) fn start(feedback_token: impl Into<String>) -> Self {
+        let feedback_token = feedback_token.into();
+        Self::start_inner(
+            Some(feedback_token.clone()),
+            MockOpenAiScenario::RequireFeedbackTokens(vec![feedback_token]),
+        )
+    }
+
+    pub(crate) fn start_with_scenario(scenario: MockOpenAiScenario) -> Self {
+        Self::start_inner(None, scenario)
+    }
+
+    fn start_inner(primary_feedback_token: Option<String>, scenario: MockOpenAiScenario) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock openai listener");
         listener
             .set_nonblocking(true)
@@ -164,16 +187,15 @@ impl MockOpenAiServer {
         let base_url = format!("http://{addr}");
         let shutdown = Arc::new(AtomicBool::new(false));
         let state = Arc::new(Mutex::new(MockOpenAiState::default()));
-        let feedback_token = feedback_token.into();
         let worker = thread::spawn({
             let shutdown = shutdown.clone();
             let state = state.clone();
-            let feedback_token = feedback_token.clone();
+            let scenario = scenario.clone();
             move || {
                 while !shutdown.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
-                            handle_mock_openai_connection(&mut stream, &feedback_token, &state);
+                            handle_mock_openai_connection(&mut stream, &scenario, &state);
                         }
                         Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                             thread::sleep(Duration::from_millis(10));
@@ -185,6 +207,7 @@ impl MockOpenAiServer {
         });
         Self {
             base_url,
+            primary_feedback_token,
             shutdown,
             state,
             worker: Some(worker),
@@ -200,10 +223,18 @@ impl MockOpenAiServer {
     }
 
     pub(crate) fn saw_feedback_token(&self) -> bool {
+        let Some(token) = self.primary_feedback_token.as_ref() else {
+            return false;
+        };
+        self.saw_token(token)
+    }
+
+    pub(crate) fn saw_token(&self, token: &str) -> bool {
         self.state
             .lock()
             .expect("lock mock state")
-            .saw_feedback_token
+            .seen_tokens
+            .contains(token)
     }
 }
 
@@ -220,7 +251,7 @@ impl Drop for MockOpenAiServer {
 
 fn handle_mock_openai_connection(
     stream: &mut TcpStream,
-    feedback_token: &str,
+    scenario: &MockOpenAiScenario,
     state: &Arc<Mutex<MockOpenAiState>>,
 ) {
     let Ok((path, body)) = read_http_request(stream) else {
@@ -239,9 +270,16 @@ fn handle_mock_openai_connection(
             return;
         }
     };
-    let response = build_mock_openai_response(&request, feedback_token, state);
-    let body = serde_json::to_vec(&response).expect("serialize mock openai response");
-    let _ = write_http_response(stream, 200, &body);
+    match build_mock_openai_response(&request, scenario, state) {
+        MockHttpResponse::Ok(response) => {
+            let body = serde_json::to_vec(&response).expect("serialize mock openai response");
+            let _ = write_http_response(stream, 200, &body);
+        }
+        MockHttpResponse::Error { status, body } => {
+            let body = serde_json::to_vec(&body).expect("serialize mock openai error");
+            let _ = write_http_response(stream, status, &body);
+        }
+    }
 }
 
 fn read_http_request(stream: &mut TcpStream) -> Result<(String, Vec<u8>), std::io::Error> {
@@ -303,11 +341,19 @@ fn write_http_response(
     Ok(())
 }
 
+enum MockHttpResponse {
+    Ok(serde_json::Value),
+    Error {
+        status: u16,
+        body: serde_json::Value,
+    },
+}
+
 fn build_mock_openai_response(
     request: &serde_json::Value,
-    feedback_token: &str,
+    scenario: &MockOpenAiScenario,
     state: &Arc<Mutex<MockOpenAiState>>,
-) -> serde_json::Value {
+) -> MockHttpResponse {
     let user_text = request
         .get("messages")
         .and_then(|value| value.as_array())
@@ -330,29 +376,59 @@ fn build_mock_openai_response(
         .unwrap_or_default();
 
     let is_summary_prompt = user_text.contains("Summarize the combo execution for the user.");
-    let saw_feedback = user_text.contains(feedback_token);
 
     {
         let mut guard = state.lock().expect("lock mock state");
         guard.request_count += 1;
-        guard.saw_feedback_token |= saw_feedback;
+        if let MockOpenAiScenario::RequireFeedbackTokens(tokens) = scenario {
+            for token in tokens {
+                if user_text.contains(token) {
+                    guard.seen_tokens.insert(token.clone());
+                }
+            }
+        }
     }
 
     if is_summary_prompt {
-        return mock_text_response(
+        return MockHttpResponse::Ok(mock_text_response(
             "- status: success\n- interaction: feedback captured\n- output: reply fields generated",
-        );
-    }
-    if saw_feedback {
-        let command = "coco reply --result='mock polished result' --reason='used user feedback'";
-        return mock_bash_tool_call_response(command);
+        ));
     }
 
-    // Slow down no-feedback turns so the UI has time to capture manual input.
-    thread::sleep(Duration::from_millis(120));
-    mock_text_response(&format!(
-        "Please provide feedback first (include token: {feedback_token})."
-    ))
+    match scenario {
+        MockOpenAiScenario::RateLimited => MockHttpResponse::Error {
+            status: 429,
+            body: serde_json::json!({
+                "error": {
+                    "message": "mock rate limited",
+                    "type": "rate_limit_error",
+                "code": "rate_limit"
+                }
+            }),
+        },
+        MockOpenAiScenario::ImmediateReply => {
+            let command =
+                "coco reply --result='mock polished result' --reason='used user feedback'";
+            MockHttpResponse::Ok(mock_bash_tool_call_response(command))
+        }
+        MockOpenAiScenario::RequireFeedbackTokens(tokens) => {
+            let missing = tokens
+                .iter()
+                .filter(|token| !user_text.contains(token.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            if missing.is_empty() {
+                let command =
+                    "coco reply --result='mock polished result' --reason='used user feedback'";
+                return MockHttpResponse::Ok(mock_bash_tool_call_response(command));
+            }
+            thread::sleep(Duration::from_millis(120));
+            MockHttpResponse::Ok(mock_text_response(&format!(
+                "Please provide feedback first (missing: {}).",
+                missing.join(", ")
+            )))
+        }
+    }
 }
 
 fn mock_text_response(content: &str) -> serde_json::Value {

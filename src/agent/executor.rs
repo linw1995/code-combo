@@ -8,7 +8,6 @@ use serde_json::Value;
 use snafu::prelude::*;
 use tokio_util::sync::CancellationToken;
 
-use super::bash_executor;
 use crate::{
     AppliedTextEdit, ComboEvent, OutputChunk, TextEdit, error,
     tools::{
@@ -272,29 +271,12 @@ impl Executor {
             if let Some(_pcl) = self.tools_pcl.get(name) {
                 // TODO: Implement permission control list validation logic
                 unimplemented!("Permission control list validation not yet implemented")
-            } else {
-                // Some tools can execute without explicit permission
-                let bypass_permission = match (&input, name) {
-                    (Input::Starter(value), BASH_TOOL_NAME) => {
-                        serde_json::from_value::<BashInput>(value.clone())
-                            .ok()
-                            .map(|input| bash_executor::should_bypass_permission(&input))
-                            .unwrap_or(false)
-                    }
-                    _ => false,
-                };
-                if !bypass_permission
-                    && !matches!(
-                        name,
-                        STR_REPLACE_TOOL_NAME
-                            | READ_TOOL_NAME
-                            | LIST_TOOL_NAME
-                            | RUN_TASK_TOOL_NAME
-                    )
-                {
-                    on_output(Output::AskPermission);
-                    return Ok(ExecuteStatus::Completed);
-                }
+            } else if !matches!(
+                name,
+                STR_REPLACE_TOOL_NAME | READ_TOOL_NAME | LIST_TOOL_NAME | RUN_TASK_TOOL_NAME
+            ) {
+                on_output(Output::AskPermission);
+                return Ok(ExecuteStatus::Completed);
             };
         }
 
