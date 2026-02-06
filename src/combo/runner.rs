@@ -4,7 +4,10 @@
 //! Combos are executable scripts that can perform complex operations
 //! with recorded tool calls.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -1183,20 +1186,9 @@ async fn handle_interactive_combo_reply(
         }
 
         let mut tool_results = Vec::new();
-        let mut completed = false;
         let mut guidance: Option<String> = None;
 
         for tool_use in tool_uses {
-            emit_combo_event(
-                on_event,
-                ComboEvent::ReplyToolUse {
-                    name: combo_name.to_string(),
-                    tool_use: tool_use.clone(),
-                    thinking: Vec::new(),
-                    offload: true,
-                },
-            );
-
             if tool_use.name == BASH_TOOL_NAME {
                 let bash_input: BashInput = serde_json::from_value(tool_use.input.clone())
                     .map_err(|err| ComboReplyError::InvalidBashInput {
@@ -1204,6 +1196,34 @@ async fn handle_interactive_combo_reply(
                     })?;
                 let command = bash_input.command.clone();
                 let command_kind = classify_offload_command(&command);
+                let mut emitted_tool_use = tool_use.clone();
+                if matches!(command_kind, OffloadCommandKind::Coco) {
+                    let mut bash_input_for_emit = bash_input.clone();
+                    bash_input_for_emit.command =
+                        command_with_session_socket(&bash_input.command, &session_socket_path);
+                    emitted_tool_use.input =
+                        serde_json::to_value(&bash_input_for_emit).map_err(|err| {
+                            ComboReplyError::InvalidBashInput {
+                                message: err.to_string(),
+                            }
+                        })?;
+                }
+                emit_combo_event(
+                    on_event,
+                    ComboEvent::ReplyToolUse {
+                        name: combo_name.to_string(),
+                        tool_use: emitted_tool_use,
+                        thinking: Vec::new(),
+                        offload: true,
+                    },
+                );
+
+                if matches!(command_kind, OffloadCommandKind::Coco) {
+                    // Do not auto-run coco reply in interactive ask mode.
+                    // Wait for user confirmation and execution through the regular ToolUse flow.
+                    return Ok(());
+                }
+
                 let (output, is_error) = match command_kind {
                     OffloadCommandKind::Unsafe => {
                         let reason = match bash_unsafe_reason(&command) {
@@ -1265,20 +1285,24 @@ async fn handle_interactive_combo_reply(
                 ));
 
                 match command_kind {
-                    OffloadCommandKind::Coco if !is_error => {
-                        completed = true;
-                        break;
-                    }
-                    OffloadCommandKind::Coco => {
-                        guidance = Some(build_offload_reply_guidance(schemas, &command, true));
-                    }
                     OffloadCommandKind::Unsafe => {
                         guidance = Some(build_offload_reply_guidance(schemas, &command, false));
                     }
                     OffloadCommandKind::Safe => {}
+                    OffloadCommandKind::Coco => unreachable!("coco reply returns early"),
                 }
                 continue;
             }
+
+            emit_combo_event(
+                on_event,
+                ComboEvent::ReplyToolUse {
+                    name: combo_name.to_string(),
+                    tool_use: tool_use.clone(),
+                    thinking: Vec::new(),
+                    offload: true,
+                },
+            );
 
             let (output, is_error) =
                 execute_interactive_tool_use(agent, &tool_use, cancel_token.clone()).await;
@@ -1302,10 +1326,6 @@ async fn handle_interactive_combo_reply(
             agent
                 .append_message(Message::user(Content::Multiple(tool_results)))
                 .await;
-        }
-
-        if completed {
-            return Ok(());
         }
 
         let prompt = guidance.unwrap_or_else(|| build_interactive_offload_reply_reminder(schemas));
@@ -1444,6 +1464,19 @@ fn is_coco_reply_command(command: &str) -> bool {
         return false;
     }
     matches!(summary.args.first(), Some(arg) if arg == "reply")
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn command_with_session_socket(command: &str, session_socket_path: &Path) -> String {
+    let socket = session_socket_path.to_string_lossy();
+    format!(
+        "COCO_SESSION_SOCK={} {}",
+        shell_single_quote(&socket),
+        command
+    )
 }
 
 fn is_safe_command(command: &str) -> bool {

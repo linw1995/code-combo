@@ -95,6 +95,7 @@ pub struct Chat<'a> {
     manual_combo_commands: HashMap<String, String>,
     manual_combo_prompted: HashSet<String>,
     pending_combo_tool_events: HashMap<String, Vec<ComboEvent>>,
+    combo_offload_tool_use_to_combo_id: HashMap<String, String>,
     last_usage: Option<UsageStats>,
     retry_status: Option<RetryAttempt>,
     transcript_scopes: Vec<TranscriptScope>,
@@ -342,6 +343,7 @@ impl Chat<'static> {
             manual_combo_commands: HashMap::new(),
             manual_combo_prompted: HashSet::new(),
             pending_combo_tool_events: HashMap::new(),
+            combo_offload_tool_use_to_combo_id: HashMap::new(),
             last_usage: None,
             retry_status: None,
             transcript_scopes: Vec::new(),
@@ -564,10 +566,19 @@ impl Chat<'static> {
                 self.set_combo_thinking_active(false);
                 self.set_processing();
             }
-            ComboEvent::ReplyToolUse { offload: true, .. } => {
+            ComboEvent::ReplyToolUse {
+                id,
+                tool_use,
+                offload: true,
+                ..
+            } => {
+                self.combo_offload_tool_use_to_combo_id
+                    .insert(tool_use.id.clone(), id.clone());
                 self.set_processing();
             }
-            ComboEvent::Executed { starter, .. } => {
+            ComboEvent::Executed { id, starter, .. } => {
+                self.combo_offload_tool_use_to_combo_id
+                    .retain(|_, combo_id| combo_id != id);
                 self.set_combo_thinking_active(false);
                 if let Err(err) = starter.combo.as_ref() {
                     warn!(?err, "Failed to execute starter");
@@ -576,9 +587,21 @@ impl Chat<'static> {
                 // For ExecuteViaBash: manual_combo_runs handles LLM trigger via ToolResult.
                 // For LLM Bash Tool: Bash Tool completion triggers LLM automatically.
             }
-            ComboEvent::Discovered { .. }
-            | ComboEvent::NotFound { .. }
-            | ComboEvent::Cancelled { .. } => {
+            ComboEvent::Discovered { .. } => {
+                self.set_combo_thinking_active(false);
+                self.set_ready();
+            }
+            ComboEvent::NotFound { id, .. } => {
+                self.combo_offload_tool_use_to_combo_id
+                    .retain(|_, combo_id| combo_id != id);
+                self.set_combo_thinking_active(false);
+                self.set_ready();
+            }
+            ComboEvent::Cancelled { id, .. } => {
+                if let Some(id) = id {
+                    self.combo_offload_tool_use_to_combo_id
+                        .retain(|_, combo_id| combo_id != id);
+                }
                 self.set_combo_thinking_active(false);
                 self.set_ready();
             }
@@ -590,7 +613,8 @@ impl Chat<'static> {
                 self.set_ready();
                 global::trigger_schedule_session_save();
             }
-            ComboEvent::ReplyToolResult { .. } => {
+            ComboEvent::ReplyToolResult { tool_use_id, .. } => {
+                self.combo_offload_tool_use_to_combo_id.remove(tool_use_id);
                 // Result is handled by Combo component
             }
             ComboEvent::Transcript { id, name, messages } => {
@@ -1067,7 +1091,9 @@ impl Chat<'static> {
                 }
                 self.handle_combo_event(event);
             }
-            ComboEvent::Executed { starter, .. } => {
+            ComboEvent::Executed { id, starter, .. } => {
+                self.combo_offload_tool_use_to_combo_id
+                    .retain(|_, combo_id| combo_id != id);
                 self.set_combo_thinking_active(false);
                 if let Err(err) = starter.combo.as_ref() {
                     warn!(?err, "Failed to execute starter");
@@ -2276,7 +2302,17 @@ impl Component for Chat<'static> {
                 self.messages.reset_stream();
                 self.set_ready();
             }
-            Event::Ask(AskEvent::ToolUsePermission(_)) => {
+            Event::Ask(AskEvent::ToolUsePermission(id)) => {
+                if let Some(combo_id) = self.combo_offload_tool_use_to_combo_id.get(id)
+                    && let Some(idx) = self.messages.locate_tool_message(combo_id)
+                {
+                    handle_component_event!(self, event);
+                    self.update_focus(Focus::Messages);
+                    self.messages.focus(idx);
+                    self.notify_action_required("Tool permission requested");
+                    global::trigger_schedule_session_save();
+                    return;
+                }
                 if let Some(idx) = self.messages.on_tool_event(event) {
                     // Move focus to tool use message when permission is required
                     self.update_focus(Focus::Messages);
@@ -2316,6 +2352,11 @@ impl Component for Chat<'static> {
                 let is_manual_combo = self.manual_combo_runs.contains(id);
                 let effective_is_error = if *is_user_cancelled { false } else { *is_error };
                 self.forward_combo_result_to_session(id, output, effective_is_error);
+                if self.combo_offload_tool_use_to_combo_id.remove(id).is_some() {
+                    handle_component_event!(self, event);
+                    global::trigger_schedule_session_save();
+                    return;
+                }
                 if let Some(idx) = self.messages.on_tool_event(event)
                     && !effective_is_error
                     && self.messages.selected_idx() == Some(idx)
@@ -2465,7 +2506,11 @@ impl Component for Chat<'static> {
                 self.set_processing();
                 let _ = self.messages.on_tool_event(evt);
             }
-            Event::Answer(AnswerEvent::ToolOutput { .. }) => {
+            Event::Answer(AnswerEvent::ToolOutput { id, .. }) => {
+                if self.combo_offload_tool_use_to_combo_id.contains_key(id) {
+                    handle_component_event!(self, event);
+                    return;
+                }
                 let _ = self.messages.on_tool_event(event);
             }
             _ => {

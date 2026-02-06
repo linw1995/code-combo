@@ -636,6 +636,12 @@ pub(crate) fn send_enter(writer: &mut dyn Write) {
 }
 
 #[allow(dead_code)]
+pub(crate) fn send_escape(writer: &mut dyn Write) {
+    writer.write_all(&[0x1b]).expect("write escape");
+    writer.flush().expect("flush");
+}
+
+#[allow(dead_code)]
 pub(crate) fn send_alt_enter(writer: &mut dyn Write) {
     writer.write_all(&[0x1b, 0x0d]).expect("write alt-enter");
     writer.flush().expect("flush");

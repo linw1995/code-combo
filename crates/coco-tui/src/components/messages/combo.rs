@@ -321,7 +321,10 @@ impl Combo {
 
     fn push_offload_bash_tool_use(&mut self, tool_use: ToolUse) {
         self.state.write().view = ComboView::Messages;
+        let tool_use_id = tool_use.id.clone();
         self.messages.push(Message::bot(Tool::new(tool_use).into()));
+        let ask = Event::Ask(AskEvent::ToolUsePermission(tool_use_id));
+        let _ = self.messages.on_tool_event(&ask);
     }
 
     fn forward_output_to_child(&mut self, tool_use_id: &str, chunk: &OutputChunk) -> bool {

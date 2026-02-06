@@ -276,6 +276,7 @@ fn combo_interactive_auto_accept_edits_still_requires_bash_confirmation() {
         "coco reply --result='mock polished result'",
         Duration::from_secs(30),
     );
+    assert_screen_not_contains(&mut parser, &rx, "Completed", Duration::from_secs(2));
 
     assert_shutdown_ok(&mut *child, &mut *writer, &parser, &mut guard);
 }
