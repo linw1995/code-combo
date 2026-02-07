@@ -30,9 +30,10 @@ use crate::tools::{
 pub type ExecuteResult = Result<Output, Final>;
 
 use crate::{
-    Agent, Block, ChatStreamUpdate, Config, Content, Message, OutputChunk, PromptSchema,
-    SessionEnv, Starter, StarterCommand, StarterError, StarterEvent, ToolUse, bash_unsafe_ranges,
-    bash_unsafe_reason, discover_starters, exec::StreamKind, parse_primary_command, workspace_dir,
+    Agent, Block, ChatStreamUpdate, Config, Content, Message, OutputChunk, PromptResponseSender,
+    PromptSchema, SessionEnv, Starter, StarterCommand, StarterError, StarterEvent, ToolUse,
+    bash_unsafe_ranges, bash_unsafe_reason, discover_starters, exec::StreamKind,
+    parse_primary_command, workspace_dir,
 };
 
 // Import types from combo module
@@ -250,6 +251,8 @@ async fn execute_combo(
     let mut tool_failed = false;
     let mut starter_failed = false;
     let mut cancelled = false;
+    let mut pending_interactive_schemas: Option<Vec<PromptSchema>> = None;
+    let mut pending_interactive_responder: Option<PromptResponseSender> = None;
 
     let command_line = format_combo_run_command(&combo_name, &args);
     // Emit executing event
@@ -344,12 +347,40 @@ async fn execute_combo(
                             name: combo_name.clone(),
                             prompt: prompt.clone(),
                             thinking: None,
+                            session_sock: None,
                         });
                         summary_parts.push(format!("[Prompt] {}", prompt));
+
+                        if let Some(schemas) = pending_interactive_schemas.clone() {
+                            let result = handle_interactive_combo_reply(
+                                &mut reply_agent,
+                                &schemas,
+                                &combo_name,
+                                cancel_token.clone(),
+                                session_socket_path.clone(),
+                                &on_event_for_emit,
+                                false,
+                            )
+                            .await;
+                            if let Err(err) = result {
+                                let message = err.to_string();
+                                emit_combo_event(
+                                    &on_event_for_emit,
+                                    ComboEvent::ReplyToolError {
+                                        message: message.clone(),
+                                    },
+                                );
+                                if let Some(responder) = pending_interactive_responder.take() {
+                                    let _ = responder.send(Err(message));
+                                }
+                                pending_interactive_schemas = None;
+                            }
+                        }
                     }
                     StarterEvent::PromptRequest {
                         prompt,
                         schemas,
+                        interactive,
                         responder,
                         thinking,
                     } => {
@@ -360,10 +391,38 @@ async fn execute_combo(
                             name: combo_name.clone(),
                             prompt: prompt.clone(),
                             thinking: thinking.clone(),
+                            session_sock: Some(session_socket_path.to_string_lossy().to_string()),
                         });
                         summary_parts.push(format!("[Prompt] {}", prompt));
 
-                        if reply_agent.offload_combo_reply() {
+                        if interactive {
+                            pending_interactive_schemas = Some(schemas.clone());
+                            pending_interactive_responder = Some(responder.clone());
+                            let result = handle_interactive_combo_reply(
+                                &mut reply_agent,
+                                &schemas,
+                                &combo_name,
+                                cancel_token.clone(),
+                                session_socket_path.clone(),
+                                &on_event_for_emit,
+                                true,
+                            )
+                            .await;
+                            if let Err(err) = result {
+                                let message = err.to_string();
+                                emit_combo_event(
+                                    &on_event_for_emit,
+                                    ComboEvent::ReplyToolError {
+                                        message: message.clone(),
+                                    },
+                                );
+                                let _ = responder.send(Err(message));
+                                pending_interactive_schemas = None;
+                                pending_interactive_responder = None;
+                            }
+                        } else if reply_agent.offload_combo_reply() {
+                            pending_interactive_schemas = None;
+                            pending_interactive_responder = None;
                             let result = handle_offload_combo_reply_with_retry(
                                 &mut reply_agent,
                                 &schemas,
@@ -374,14 +433,18 @@ async fn execute_combo(
                             )
                             .await;
                             if let Err(err) = result {
+                                let message = err.to_string();
                                 emit_combo_event(
                                     &on_event_for_emit,
                                     ComboEvent::ReplyToolError {
-                                        message: err.to_string(),
+                                        message: message.clone(),
                                     },
                                 );
+                                let _ = responder.send(Err(message));
                             }
                         } else {
+                            pending_interactive_schemas = None;
+                            pending_interactive_responder = None;
                             let disable_stream =
                                 reply_agent.disable_stream_for_current_model();
                             let mut streamed_thinking = false;
@@ -469,6 +532,7 @@ async fn execute_combo(
                                         tool_use: reply.tool_use.clone(),
                                         thinking: thinking_blocks,
                                         offload: false,
+                                        requires_confirmation: false,
                                     },
                                 );
                             }
@@ -491,13 +555,19 @@ async fn execute_combo(
                     }
                     StarterEvent::Finished { exit_code: code } => {
                         exit_code = code;
+                        pending_interactive_schemas = None;
+                        pending_interactive_responder = None;
                     }
                     StarterEvent::Cancelled => {
                         cancelled = true;
+                        pending_interactive_schemas = None;
+                        pending_interactive_responder = None;
                     }
                     StarterEvent::Failed { reason } => {
                         starter_failed = true;
                         summary_parts.push(format!("[Failed] {}", reason));
+                        pending_interactive_schemas = None;
+                        pending_interactive_responder = None;
                     }
                 }
             }
@@ -963,6 +1033,390 @@ fn extract_thinking_blocks(message: &Message) -> Vec<String> {
     }
 }
 
+fn extract_tool_uses(message: &Message) -> Vec<ToolUse> {
+    match &message.content {
+        Content::Text(_) => Vec::new(),
+        Content::Multiple(blocks) => blocks
+            .iter()
+            .filter_map(|block| {
+                if let Block::ToolUse(tool_use) = block {
+                    Some(tool_use.clone())
+                } else {
+                    None
+                }
+            })
+            .collect(),
+    }
+}
+
+fn build_interactive_offload_reply_directive(schemas: &[PromptSchema]) -> String {
+    let field_args: Vec<String> = schemas
+        .iter()
+        .map(|schema| format!("--{}=<value>", schema.name))
+        .collect();
+    let field_descriptions: Vec<String> = schemas
+        .iter()
+        .map(|schema| format!("- --{}=<value>: {}", schema.name, schema.description))
+        .collect();
+    format!(
+        r#"You can interact in multiple rounds and call tools as needed.
+When you have enough information, finish by calling the bash tool with:
+```
+coco reply {field_args}
+```
+
+Required fields:
+{field_list}
+
+Until then, keep working with normal assistant behavior and tool usage."#,
+        field_args = field_args.join(" "),
+        field_list = field_descriptions.join("\n"),
+    )
+}
+
+fn build_interactive_offload_reply_reminder(schemas: &[PromptSchema]) -> String {
+    let field_args: Vec<String> = schemas
+        .iter()
+        .map(|schema| format!("--{}=...", schema.name))
+        .collect();
+    format!(
+        "{INTERACTIVE_REPLY_REMINDER_PREFIX} {}",
+        field_args.join(" ")
+    )
+}
+
+const INTERACTIVE_REPLY_REMINDER_PREFIX: &str =
+    "Continue if needed. When ready, finish with: coco reply";
+
+async fn execute_interactive_tool_use(
+    agent: &mut Agent,
+    tool_use: &ToolUse,
+    cancel_token: CancellationToken,
+) -> (Final, bool) {
+    let final_output: Arc<std::sync::Mutex<Option<(Final, bool)>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let final_output_for_cb = final_output.clone();
+    let permission_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let permission_requested_for_cb = permission_requested.clone();
+    let exec_status = agent
+        .execute_with_output(
+            &tool_use.id,
+            &tool_use.name,
+            Input::Starter(tool_use.input.clone()),
+            cancel_token.clone(),
+            move |output| match output {
+                crate::Output::AskPermission => {
+                    permission_requested_for_cb.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                crate::Output::Success(final_output_value) => {
+                    if let Ok(mut guard) = final_output_for_cb.lock() {
+                        *guard = Some((final_output_value, false));
+                    }
+                }
+                crate::Output::Failure(final_output_value) => {
+                    if let Ok(mut guard) = final_output_for_cb.lock() {
+                        *guard = Some((final_output_value, true));
+                    }
+                }
+                crate::Output::ToolOutput(_)
+                | crate::Output::TextEdit(_)
+                | crate::Output::SubagentOutput(_)
+                | crate::Output::ComboOutput(_)
+                | crate::Output::Denied => {}
+            },
+        )
+        .await;
+    if cancel_token.is_cancelled() {
+        return (Final::Message("tool execution cancelled".to_string()), true);
+    }
+    if let Some((output, is_error)) = final_output.lock().ok().and_then(|guard| guard.clone()) {
+        return (output, is_error);
+    }
+    if permission_requested.load(std::sync::atomic::Ordering::SeqCst) {
+        return (
+            Final::Message("permission required for tool execution".to_string()),
+            true,
+        );
+    }
+    match exec_status {
+        Ok(crate::ExecuteStatus::Completed) => (Final::Message("tool executed".to_string()), false),
+        Ok(crate::ExecuteStatus::Cancelled) => {
+            (Final::Message("tool execution cancelled".to_string()), true)
+        }
+        Err(err) => (
+            Final::Message(format!("tool execution failed: {err}")),
+            true,
+        ),
+    }
+}
+
+async fn handle_interactive_combo_reply(
+    agent: &mut Agent,
+    schemas: &[PromptSchema],
+    combo_name: &str,
+    cancel_token: CancellationToken,
+    session_socket_path: PathBuf,
+    on_event: &ComboEventCallback,
+    seed_directive: bool,
+) -> Result<(), ComboReplyError> {
+    const AUTO_IMPLICIT_NUDGE_LIMIT: usize = 2;
+
+    if cancel_token.is_cancelled() {
+        return Err(ComboReplyError::Cancelled);
+    }
+    if seed_directive {
+        agent
+            .append_message(Message::user(Content::Text(
+                build_interactive_offload_reply_directive(schemas),
+            )))
+            .await;
+    }
+
+    let max_turns = 50usize;
+    let mut empty_tool_use_turns = 0usize;
+    for _ in 0..max_turns {
+        if cancel_token.is_cancelled() {
+            return Err(ComboReplyError::Cancelled);
+        }
+        let disable_stream = agent.disable_stream_for_current_model();
+        let response = if disable_stream {
+            agent
+                .chat_with_history()
+                .await
+                .map_err(|e| ComboReplyError::ChatFailed {
+                    message: e.to_string(),
+                })?
+        } else {
+            let on_event_stream = on_event.clone();
+            let stream_name = combo_name.to_string();
+            agent
+                .chat_stream_with_history(cancel_token.clone(), move |update| match update {
+                    ChatStreamUpdate::Reset => {
+                        emit_combo_event(
+                            &on_event_stream,
+                            ComboEvent::PromptStreamReset {
+                                name: stream_name.clone(),
+                            },
+                        );
+                    }
+                    ChatStreamUpdate::Plain { index, text } => {
+                        emit_combo_event(
+                            &on_event_stream,
+                            ComboEvent::PromptStream {
+                                name: stream_name.clone(),
+                                index,
+                                kind: ComboEventStreamKind::Plain,
+                                text,
+                            },
+                        );
+                    }
+                    ChatStreamUpdate::Thinking { index, text } => {
+                        emit_combo_event(
+                            &on_event_stream,
+                            ComboEvent::PromptStream {
+                                name: stream_name.clone(),
+                                index,
+                                kind: ComboEventStreamKind::Thinking,
+                                text,
+                            },
+                        );
+                    }
+                })
+                .await
+                .map_err(|e| ComboReplyError::ChatFailed {
+                    message: e.to_string(),
+                })?
+        };
+
+        let tool_uses = extract_tool_uses(&response.message);
+        if tool_uses.is_empty() {
+            empty_tool_use_turns += 1;
+            let reminder = build_interactive_offload_reply_reminder(schemas);
+            let should_pause_for_feedback = empty_tool_use_turns > AUTO_IMPLICIT_NUDGE_LIMIT;
+            if disable_stream {
+                let response_text = extract_text_response(&response.message);
+                if should_pause_for_feedback && !response_text.trim().is_empty() {
+                    emit_combo_event(
+                        on_event,
+                        ComboEvent::Prompt {
+                            name: combo_name.to_string(),
+                            prompt: response_text,
+                            thinking: None,
+                            session_sock: Some(session_socket_path.to_string_lossy().to_string()),
+                        },
+                    );
+                }
+            }
+            agent
+                .append_message(Message::user(Content::Text(reminder)))
+                .await;
+            if !should_pause_for_feedback {
+                continue;
+            }
+            // Pause and wait for user feedback from combo session after bounded auto nudges.
+            // The next feedback prompt will re-enter interactive handling.
+            return Ok(());
+        }
+        empty_tool_use_turns = 0;
+
+        let mut tool_results = Vec::new();
+        let mut guidance: Option<String> = None;
+
+        for tool_use in tool_uses {
+            if tool_use.name == BASH_TOOL_NAME {
+                let bash_input: BashInput = serde_json::from_value(tool_use.input.clone())
+                    .map_err(|err| ComboReplyError::InvalidBashInput {
+                        message: err.to_string(),
+                    })?;
+                let command = bash_input.command.clone();
+                let command_kind = classify_offload_command(&command);
+                let mut emitted_tool_use = tool_use.clone();
+                if matches!(command_kind, OffloadCommandKind::Coco) {
+                    let mut bash_input_for_emit = bash_input.clone();
+                    bash_input_for_emit.env.insert(
+                        "COCO_SESSION_SOCK".to_string(),
+                        session_socket_path.to_string_lossy().to_string(),
+                    );
+                    emitted_tool_use.input =
+                        serde_json::to_value(&bash_input_for_emit).map_err(|err| {
+                            ComboReplyError::InvalidBashInput {
+                                message: err.to_string(),
+                            }
+                        })?;
+                }
+                emit_combo_event(
+                    on_event,
+                    ComboEvent::ReplyToolUse {
+                        name: combo_name.to_string(),
+                        tool_use: emitted_tool_use,
+                        thinking: Vec::new(),
+                        offload: true,
+                        requires_confirmation: matches!(command_kind, OffloadCommandKind::Coco),
+                    },
+                );
+
+                if matches!(command_kind, OffloadCommandKind::Coco) {
+                    // Do not auto-run coco reply in interactive ask mode.
+                    // Wait for user confirmation and execution through the regular ToolUse flow.
+                    return Ok(());
+                }
+
+                let (output, is_error) = match command_kind {
+                    OffloadCommandKind::Unsafe => {
+                        let reason = match bash_unsafe_reason(&command) {
+                            Ok(_) => "command not allowlisted".to_string(),
+                            Err(reason) => reason,
+                        };
+                        (
+                            Final::Message(format!(
+                                "command rejected: {reason}; expected coco reply"
+                            )),
+                            true,
+                        )
+                    }
+                    OffloadCommandKind::Safe | OffloadCommandKind::Coco => {
+                        let bash_input_value =
+                            serde_json::to_value(&bash_input).map_err(|err| {
+                                ComboReplyError::InvalidBashInput {
+                                    message: err.to_string(),
+                                }
+                            })?;
+                        let extra_envs = vec![(
+                            "COCO_SESSION_SOCK".to_string(),
+                            session_socket_path.to_string_lossy().to_string(),
+                        )];
+                        let output = run_bash_chunked(
+                            Input::Starter(bash_input_value),
+                            &extra_envs,
+                            cancel_token.clone(),
+                            |_| {},
+                        )
+                        .await;
+                        if cancel_token.is_cancelled() {
+                            return Err(ComboReplyError::Cancelled);
+                        }
+                        match output {
+                            Ok(Output::Final(output)) => (output, false),
+                            Ok(Output::TextEdit(_)) => (
+                                Final::Message("unexpected tool output from bash".to_string()),
+                                true,
+                            ),
+                            Err(output) => (output, true),
+                        }
+                    }
+                };
+
+                emit_combo_event(
+                    on_event,
+                    ComboEvent::ReplyToolResult {
+                        name: combo_name.to_string(),
+                        tool_use_id: tool_use.id.clone(),
+                        is_error,
+                        output: output.clone(),
+                    },
+                );
+                tool_results.push(Block::tool_result(
+                    &tool_use.id,
+                    Some(is_error),
+                    final_to_tool_content(&output),
+                ));
+
+                match command_kind {
+                    OffloadCommandKind::Unsafe => {
+                        guidance = Some(build_offload_reply_guidance(schemas, &command, false));
+                    }
+                    OffloadCommandKind::Safe => {}
+                    OffloadCommandKind::Coco => unreachable!("coco reply returns early"),
+                }
+                continue;
+            }
+
+            emit_combo_event(
+                on_event,
+                ComboEvent::ReplyToolUse {
+                    name: combo_name.to_string(),
+                    tool_use: tool_use.clone(),
+                    thinking: Vec::new(),
+                    offload: true,
+                    requires_confirmation: false,
+                },
+            );
+
+            let (output, is_error) =
+                execute_interactive_tool_use(agent, &tool_use, cancel_token.clone()).await;
+            emit_combo_event(
+                on_event,
+                ComboEvent::ReplyToolResult {
+                    name: combo_name.to_string(),
+                    tool_use_id: tool_use.id.clone(),
+                    is_error,
+                    output: output.clone(),
+                },
+            );
+            tool_results.push(Block::tool_result(
+                &tool_use.id,
+                Some(is_error),
+                final_to_tool_content(&output),
+            ));
+        }
+
+        if !tool_results.is_empty() {
+            agent
+                .append_message(Message::user(Content::Multiple(tool_results)))
+                .await;
+        }
+
+        let prompt = guidance.unwrap_or_else(|| build_interactive_offload_reply_reminder(schemas));
+        agent
+            .append_message(Message::user(Content::Text(prompt)))
+            .await;
+    }
+
+    Err(ComboReplyError::ChatFailed {
+        message: "interactive ask exceeded max turns without coco reply".to_string(),
+    })
+}
+
 fn build_offload_reply_directive(schemas: &[PromptSchema]) -> String {
     let field_args: Vec<String> = schemas
         .iter()
@@ -996,6 +1450,7 @@ fn build_offload_reply_retry_directive(schemas: &[PromptSchema]) -> String {
     format!("The previous response did not produce a valid coco reply. Retry.\n\n{directive}")
 }
 
+#[derive(Clone, Copy)]
 enum OffloadCommandKind {
     Coco,
     Safe,
@@ -1079,14 +1534,75 @@ fn is_coco_command_name(name: &str) -> bool {
 }
 
 fn is_coco_reply_command(command: &str) -> bool {
-    let summary = match parse_primary_command(command) {
-        Ok(summary) => summary,
-        Err(_) => return false,
-    };
-    if !is_coco_command_name(&summary.name) {
+    if let Ok(summary) = parse_primary_command(command)
+        && is_coco_command_name(&summary.name)
+    {
+        return matches!(summary.args.first(), Some(arg) if arg == "reply");
+    }
+    contains_coco_reply_invocation(command)
+}
+
+fn contains_coco_reply_invocation(command: &str) -> bool {
+    let tokens = command
+        .split_whitespace()
+        .map(normalize_token)
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    if tokens.len() < 2 {
         return false;
     }
-    matches!(summary.args.first(), Some(arg) if arg == "reply")
+    for i in 0..(tokens.len() - 1) {
+        if !is_coco_command_name(tokens[i].as_str()) {
+            continue;
+        }
+        if tokens[i + 1] != "reply" {
+            continue;
+        }
+        if i == 0 {
+            return true;
+        }
+        if tokens[..i]
+            .iter()
+            .all(|token| is_env_assignment_token(token))
+        {
+            return true;
+        }
+        if i >= 2 && is_shell_command_name(tokens[0].as_str()) {
+            let flag_index = (1..i)
+                .rev()
+                .find(|index| matches!(tokens[*index].as_str(), "-c" | "-lc"));
+            if let Some(flag_index) = flag_index
+                && tokens[(flag_index + 1)..i]
+                    .iter()
+                    .all(|token| is_env_assignment_token(token))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn normalize_token(token: &str) -> String {
+    token
+        .trim_matches(|c| matches!(c, '\'' | '"' | ';'))
+        .to_string()
+}
+
+fn is_shell_command_name(token: &str) -> bool {
+    matches!(token.rsplit('/').next(), Some("sh" | "bash" | "zsh"))
+}
+
+fn is_env_assignment_token(token: &str) -> bool {
+    let Some((name, _)) = token.split_once('=') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
 fn is_safe_command(command: &str) -> bool {
@@ -1152,45 +1668,54 @@ async fn handle_offload_combo_reply(
         .append_message(Message::user(Content::Text(directive.to_string())))
         .await;
 
-    let on_event_stream = on_event.clone();
-    let stream_name = combo_name.to_string();
-    let chat_response = agent
-        .chat_stream_with_history(cancel_token.clone(), move |update| match update {
-            ChatStreamUpdate::Reset => {
-                emit_combo_event(
-                    &on_event_stream,
-                    ComboEvent::PromptStreamReset {
-                        name: stream_name.clone(),
-                    },
-                );
-            }
-            ChatStreamUpdate::Plain { index, text } => {
-                emit_combo_event(
-                    &on_event_stream,
-                    ComboEvent::PromptStream {
-                        name: stream_name.clone(),
-                        index,
-                        kind: ComboEventStreamKind::Plain,
-                        text,
-                    },
-                );
-            }
-            ChatStreamUpdate::Thinking { index, text } => {
-                emit_combo_event(
-                    &on_event_stream,
-                    ComboEvent::PromptStream {
-                        name: stream_name.clone(),
-                        index,
-                        kind: ComboEventStreamKind::Thinking,
-                        text,
-                    },
-                );
-            }
-        })
-        .await
-        .map_err(|e| ComboReplyError::ChatFailed {
-            message: e.to_string(),
-        })?;
+    let chat_response = if agent.disable_stream_for_current_model() {
+        agent
+            .chat_with_history()
+            .await
+            .map_err(|e| ComboReplyError::ChatFailed {
+                message: e.to_string(),
+            })?
+    } else {
+        let on_event_stream = on_event.clone();
+        let stream_name = combo_name.to_string();
+        agent
+            .chat_stream_with_history(cancel_token.clone(), move |update| match update {
+                ChatStreamUpdate::Reset => {
+                    emit_combo_event(
+                        &on_event_stream,
+                        ComboEvent::PromptStreamReset {
+                            name: stream_name.clone(),
+                        },
+                    );
+                }
+                ChatStreamUpdate::Plain { index, text } => {
+                    emit_combo_event(
+                        &on_event_stream,
+                        ComboEvent::PromptStream {
+                            name: stream_name.clone(),
+                            index,
+                            kind: ComboEventStreamKind::Plain,
+                            text,
+                        },
+                    );
+                }
+                ChatStreamUpdate::Thinking { index, text } => {
+                    emit_combo_event(
+                        &on_event_stream,
+                        ComboEvent::PromptStream {
+                            name: stream_name.clone(),
+                            index,
+                            kind: ComboEventStreamKind::Thinking,
+                            text,
+                        },
+                    );
+                }
+            })
+            .await
+            .map_err(|e| ComboReplyError::ChatFailed {
+                message: e.to_string(),
+            })?
+    };
 
     let blocks = match &chat_response.message.content {
         Content::Multiple(blocks) => blocks.as_slice(),
@@ -1226,6 +1751,7 @@ async fn handle_offload_combo_reply(
             tool_use: bash_tool_use.clone(),
             thinking: Vec::new(),
             offload: true,
+            requires_confirmation: false,
         },
     );
 
@@ -1418,6 +1944,19 @@ fn display_combo_arg(value: &str) -> String {
 mod tests {
     use super::*;
 
+    fn prompt_schemas() -> Vec<PromptSchema> {
+        vec![
+            PromptSchema {
+                name: "message".to_string(),
+                description: "Final answer".to_string(),
+            },
+            PromptSchema {
+                name: "status".to_string(),
+                description: "Execution status".to_string(),
+            },
+        ]
+    }
+
     #[test]
     fn serialize_run_combo_output() {
         let output = RunComboOutput {
@@ -1432,5 +1971,79 @@ mod tests {
         assert_eq!(json["success"], true);
         assert_eq!(json["tool_calls"], 3);
         assert!(json.get("error").is_none() || json["error"].is_null());
+    }
+
+    #[test]
+    fn interactive_offload_directive_contains_required_fields() {
+        let directive = build_interactive_offload_reply_directive(&prompt_schemas());
+        assert!(directive.contains("interact in multiple rounds"));
+        assert!(directive.contains("coco reply --message=<value> --status=<value>"));
+        assert!(directive.contains("- --message=<value>: Final answer"));
+        assert!(directive.contains("- --status=<value>: Execution status"));
+    }
+
+    #[test]
+    fn interactive_offload_reminder_contains_reply_command() {
+        let reminder = build_interactive_offload_reply_reminder(&prompt_schemas());
+        assert!(reminder.contains("Continue if needed"));
+        assert!(reminder.contains("coco reply --message=... --status=..."));
+    }
+
+    #[test]
+    fn is_coco_reply_command_accepts_expected_forms() {
+        assert!(is_coco_reply_command("coco reply --message='hello world'"));
+        assert!(is_coco_reply_command(
+            "/usr/local/bin/coco reply --message='hello world'"
+        ));
+        assert!(is_coco_reply_command(
+            "COCO_SESSION_SOCK='/tmp/coco.sock' coco reply --message='hello world'"
+        ));
+        assert!(is_coco_reply_command(
+            "/run/current-system/sw/bin/zsh -lc \"coco reply --message='hello world'\""
+        ));
+        assert!(is_coco_reply_command(
+            "bash -lc \"COCO_SESSION_SOCK=/tmp/coco.sock coco reply --message='hello world'\""
+        ));
+        assert!(!is_coco_reply_command("coco ask hello"));
+        assert!(!is_coco_reply_command("echo coco reply --message=hello"));
+        assert!(!is_coco_reply_command(
+            "/run/current-system/sw/bin/zsh -lc \"echo coco reply --message=hello\""
+        ));
+    }
+
+    #[test]
+    fn classify_offload_command_distinguishes_coco_safe_and_unsafe() {
+        assert!(matches!(
+            classify_offload_command("coco reply --message=done --status=ok"),
+            OffloadCommandKind::Coco
+        ));
+        assert!(matches!(
+            classify_offload_command(
+                "/run/current-system/sw/bin/zsh -lc \"coco reply --message=done --status=ok\""
+            ),
+            OffloadCommandKind::Coco
+        ));
+        assert!(matches!(
+            classify_offload_command("ls -la"),
+            OffloadCommandKind::Safe
+        ));
+        assert!(matches!(
+            classify_offload_command("rm -rf /"),
+            OffloadCommandKind::Unsafe
+        ));
+    }
+
+    #[test]
+    fn offload_reply_guidance_reflects_command_status() {
+        let blocked = build_offload_reply_guidance(&prompt_schemas(), "rm -rf /", false);
+        assert!(blocked.contains("previous tool call was blocked"));
+        assert!(blocked.contains("command: rm -rf /"));
+        assert!(blocked.contains("- message: Final answer"));
+        assert!(blocked.contains("- status: Execution status"));
+
+        let executed = build_offload_reply_guidance(&prompt_schemas(), "ls -la", true);
+        assert!(executed.contains("previous tool call was executed"));
+        assert!(executed.contains("command: ls -la"));
+        assert!(executed.contains("coco reply --message=... --status=..."));
     }
 }

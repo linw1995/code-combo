@@ -8,7 +8,6 @@ use serde_json::Value;
 use snafu::prelude::*;
 use tokio_util::sync::CancellationToken;
 
-use super::bash_executor;
 use crate::{
     AppliedTextEdit, ComboEvent, OutputChunk, TextEdit, error,
     tools::{
@@ -272,29 +271,12 @@ impl Executor {
             if let Some(_pcl) = self.tools_pcl.get(name) {
                 // TODO: Implement permission control list validation logic
                 unimplemented!("Permission control list validation not yet implemented")
-            } else {
-                // Some tools can execute without explicit permission
-                let bypass_permission = match (&input, name) {
-                    (Input::Starter(value), BASH_TOOL_NAME) => {
-                        serde_json::from_value::<BashInput>(value.clone())
-                            .ok()
-                            .map(|input| bash_executor::should_bypass_permission(&input))
-                            .unwrap_or(false)
-                    }
-                    _ => false,
-                };
-                if !bypass_permission
-                    && !matches!(
-                        name,
-                        STR_REPLACE_TOOL_NAME
-                            | READ_TOOL_NAME
-                            | LIST_TOOL_NAME
-                            | RUN_TASK_TOOL_NAME
-                    )
-                {
-                    on_output(Output::AskPermission);
-                    return Ok(ExecuteStatus::Completed);
-                }
+            } else if !matches!(
+                name,
+                STR_REPLACE_TOOL_NAME | READ_TOOL_NAME | LIST_TOOL_NAME | RUN_TASK_TOOL_NAME
+            ) {
+                on_output(Output::AskPermission);
+                return Ok(ExecuteStatus::Completed);
             };
         }
 
@@ -486,13 +468,14 @@ impl Executor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::StrReplaceInput;
+    use crate::tools::{BashOutput, StrReplaceInput};
     use std::collections::HashSet;
 
     fn bash_input_value(command: &str) -> serde_json::Value {
         serde_json::to_value(BashInput {
             command: command.to_string(),
             timeout: 1_000,
+            env: std::collections::BTreeMap::new(),
         })
         .expect("serialize BashInput")
     }
@@ -575,6 +558,28 @@ mod tests {
             .await
             .expect("read updated file");
         assert_eq!(updated, "world\n");
+    }
+
+    #[tokio::test]
+    async fn bash_execution_receives_session_socket_env() {
+        let mut executor = Executor::default();
+        executor.set_bash_env("COCO_SESSION_SOCK", "/tmp/coco-executor.sock");
+        let input_value = bash_input_value(r#"printf "%s" "$COCO_SESSION_SOCK""#);
+        executor.update_pcl(
+            BASH_TOOL_NAME,
+            PermissionControl::Once("inject-test".to_string()),
+        );
+        let output = executor
+            .execute("inject-test", BASH_TOOL_NAME, Input::Starter(input_value))
+            .await
+            .expect("execute bash with injected env");
+
+        let Output::Success(Final::Json(value)) = output else {
+            panic!("expected successful bash output");
+        };
+        let output: BashOutput =
+            serde_json::from_value(value).expect("deserialize bash output json");
+        assert_eq!(output.stdout, "/tmp/coco-executor.sock\n");
     }
 
     #[test]

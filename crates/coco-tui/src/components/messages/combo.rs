@@ -319,9 +319,26 @@ impl Combo {
         true
     }
 
-    fn push_offload_bash_tool_use(&mut self, tool_use: ToolUse) {
-        self.state.write().view = ComboView::Messages;
+    fn push_offload_bash_tool_use(&mut self, tool_use: ToolUse, requires_confirmation: bool) {
+        {
+            let mut state = self.state.write();
+            state.view = ComboView::Messages;
+            state.bash_tool_use = if requires_confirmation {
+                Some(tool_use.clone())
+            } else {
+                None
+            };
+        }
+        let tool_use_id = tool_use.id.clone();
         self.messages.push(Message::bot(Tool::new(tool_use).into()));
+        if requires_confirmation {
+            self.state.write().starter_state = StarterState::AwaitingPermission;
+            let ask = Event::Ask(AskEvent::ToolUsePermission(tool_use_id));
+            let _ = self.messages.on_tool_event(&ask);
+            if self.messages.select_first_actionable() {
+                self.is_child_focused = true;
+            }
+        }
     }
 
     fn forward_output_to_child(&mut self, tool_use_id: &str, chunk: &OutputChunk) -> bool {
@@ -513,6 +530,7 @@ impl Combo {
                 tool_use,
                 thinking,
                 offload,
+                requires_confirmation,
                 ..
             } => {
                 if self.matches_id(id) {
@@ -522,7 +540,7 @@ impl Combo {
                         self.push_prompt_thinking(block);
                     }
                     if *offload {
-                        self.push_offload_bash_tool_use(tool_use.clone());
+                        self.push_offload_bash_tool_use(tool_use.clone(), *requires_confirmation);
                     } else {
                         self.push_prompt_reply(tool_use);
                     }
@@ -537,6 +555,7 @@ impl Combo {
             } => {
                 if self.matches_id(id) {
                     self.forward_result_to_child(tool_use_id, *is_error, output.clone());
+                    self.state.write().bash_tool_use = None;
                 }
             }
             ComboEvent::Executing {
@@ -586,6 +605,7 @@ impl Combo {
                         }
                     };
                     state.starter_state = StarterState::Finalized;
+                    state.bash_tool_use = None;
                     state.display_state.expand();
                     drop(state);
                     if let Some(message) = error_message {
@@ -610,6 +630,7 @@ impl Combo {
                     {
                         let mut state = self.state.write();
                         state.starter_state = StarterState::Cancelled;
+                        state.bash_tool_use = None;
                         state.display_state.expand();
                     }
                 }
@@ -1120,7 +1141,9 @@ impl Component for Combo {
                             .unwrap();
                     }
                     (KeyModifiers::NONE, KeyCode::Esc) => {
-                        self.state.write().starter_state = StarterState::Cancelled;
+                        // Reject only current reply tool use; combo should stay alive for feedback.
+                        self.state.write().starter_state = StarterState::Executing;
+                        self.state.write().bash_tool_use = None;
                         global::action_tx()
                             .send(ToolAction::Cancel(tool_use).into())
                             .unwrap();
@@ -1133,7 +1156,7 @@ impl Component for Combo {
 
         if self.is_child_focused {
             match (key.modifiers, key.code) {
-                (KeyModifiers::NONE, KeyCode::Esc) => self.clear_child_focus(),
+                (KeyModifiers::NONE, KeyCode::Esc | KeyCode::Backspace) => self.clear_child_focus(),
                 (KeyModifiers::NONE, KeyCode::Char('r')) => {
                     self.messages.toggle_thinking_for_focus();
                 }
@@ -1351,8 +1374,8 @@ mod tests {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
     }
 
-    fn test_key_esc() -> KeyEvent {
-        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+    fn test_key_backspace() -> KeyEvent {
+        KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)
     }
 
     fn make_starter(name: &str) -> code_combo::Starter {
@@ -1384,6 +1407,7 @@ mod tests {
             name: TEST_NAME.to_string(),
             prompt: "line1".to_string(),
             thinking: None,
+            session_sock: None,
         }));
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
             id: TEST_ID.to_string(),
@@ -1432,6 +1456,7 @@ mod tests {
             name: TEST_NAME.to_string(),
             prompt: "line1".to_string(),
             thinking: None,
+            session_sock: None,
         }));
         combo.handle_event(&Event::Combo(ComboEvent::Executed {
             id: TEST_ID.to_string(),
@@ -1462,7 +1487,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn combo_enters_and_exits_actionable_messages_with_enter_and_esc() {
+    async fn combo_enters_and_exits_actionable_messages_with_enter_and_backspace() {
         let mut combo = Combo::new(TEST_ID, TEST_NAME);
         combo.handle_event(&Event::Combo(ComboEvent::Executing {
             id: TEST_ID.to_string(),
@@ -1507,7 +1532,7 @@ mod tests {
         assert!(combo.is_child_focused);
         assert_eq!(combo.messages.selected_idx(), Some(0));
 
-        combo.handle_key_event(&test_key_esc());
+        combo.handle_key_event(&test_key_backspace());
         assert!(!combo.is_child_focused);
         assert_eq!(combo.messages.selected_idx(), None);
     }

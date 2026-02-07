@@ -132,6 +132,7 @@ pub enum ComboEvent {
         name: String,
         prompt: String,
         thinking: Option<ThinkingConfig>,
+        session_sock: Option<String>,
     },
     PromptStream {
         id: String,
@@ -169,6 +170,8 @@ pub enum ComboEvent {
         thinking: Vec<String>,
         /// Whether this is an offload reply (executed via bash)
         offload: bool,
+        /// Whether this offload tool use requires explicit user confirmation.
+        requires_confirmation: bool,
     },
     /// Result of offload reply bash execution
     ReplyToolResult {

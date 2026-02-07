@@ -8,6 +8,8 @@ pub mod session;
 pub mod widgets;
 #[macro_use]
 pub mod components;
+#[cfg(test)]
+mod e2e_tests;
 pub mod events;
 mod idle_tracker;
 pub mod logging;

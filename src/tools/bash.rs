@@ -1,4 +1,4 @@
-use std::{sync::OnceLock, time::Duration};
+use std::{collections::BTreeMap, sync::OnceLock, time::Duration};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -23,6 +23,8 @@ pub struct BashInput {
     pub command: String,
     #[serde(default = "default_timeout_ms")]
     pub timeout: u64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 impl BashInput {
@@ -30,6 +32,7 @@ impl BashInput {
         Self {
             command,
             timeout: default_timeout_ms(),
+            env: BTreeMap::new(),
         }
     }
 }
@@ -58,7 +61,21 @@ pub(crate) fn extra_envs_for_bash_input(input: &Input<'_>) -> Vec<(String, Strin
     let Ok(parsed) = serde_json::from_value::<BashInput>(input.clone()) else {
         return Vec::new();
     };
-    extra_envs_for_command(&parsed.command)
+    let mut envs = extra_envs_for_command(&parsed.command);
+    for (key, value) in parsed.env {
+        if value.is_empty() {
+            continue;
+        }
+        if !matches!(key.as_str(), "COCO_SESSION_SOCK" | "COCO_TUI_BIN") {
+            continue;
+        }
+        if let Some(existing) = envs.iter_mut().find(|(k, _)| *k == key) {
+            existing.1 = value;
+        } else {
+            envs.push((key, value));
+        }
+    }
+    envs
 }
 
 fn extra_envs_for_command(_command: &str) -> Vec<(String, String)> {
@@ -139,7 +156,9 @@ async fn run_bash_chunked_raw<F>(
 where
     F: FnMut(&OutputChunk) + Send,
 {
-    let BashInput { command, timeout } = input;
+    let BashInput {
+        command, timeout, ..
+    } = input;
 
     let argv = vec!["bash".to_string(), "-c".to_string(), command];
     let envs = match prepare_mcp_envs().await {
@@ -314,11 +333,15 @@ pub async fn prepare_mcp_envs() -> Result<Vec<(String, String)>, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, OnceLock};
+
     use serde_json::json;
 
     use crate::tools::Output;
 
     use super::*;
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bash_output_split_streams() {
@@ -372,5 +395,81 @@ mod tests {
 
         assert_eq!(output.exit_code, 255);
         assert!(output.stderr.contains("Invalid input format"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bash_collects_coco_session_sock_from_env() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("lock env mutex");
+
+        let prev = std::env::var_os("COCO_SESSION_SOCK");
+        // Safety: test-only mutation, serialized by ENV_LOCK and restored before return.
+        unsafe {
+            std::env::set_var("COCO_SESSION_SOCK", "/tmp/coco-test.sock");
+        }
+
+        let input = Input::Starter(json!({
+            "command": "coco reply --result='ok'",
+            "timeout": 60_000,
+        }));
+
+        let envs = extra_envs_for_bash_input(&input);
+
+        // Restore env before assertions to avoid leaking state on panic paths below.
+        // Safety: test-only mutation, serialized by ENV_LOCK.
+        unsafe {
+            if let Some(value) = prev {
+                std::env::set_var("COCO_SESSION_SOCK", value);
+            } else {
+                std::env::remove_var("COCO_SESSION_SOCK");
+            }
+        }
+
+        assert!(
+            envs.iter()
+                .any(|(k, v)| k == "COCO_SESSION_SOCK" && v == "/tmp/coco-test.sock"),
+            "COCO_SESSION_SOCK is missing from bash extra envs: {envs:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bash_input_env_overrides_process_session_sock() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("lock env mutex");
+
+        let prev = std::env::var_os("COCO_SESSION_SOCK");
+        // Safety: test-only mutation, serialized by ENV_LOCK and restored before return.
+        unsafe {
+            std::env::set_var("COCO_SESSION_SOCK", "/tmp/coco-process.sock");
+        }
+
+        let input = Input::Starter(json!({
+            "command": "coco reply --result='ok'",
+            "timeout": 60_000,
+            "env": {
+                "COCO_SESSION_SOCK": "/tmp/coco-tool.sock"
+            }
+        }));
+
+        let envs = extra_envs_for_bash_input(&input);
+
+        // Safety: test-only mutation, serialized by ENV_LOCK.
+        unsafe {
+            if let Some(value) = prev {
+                std::env::set_var("COCO_SESSION_SOCK", value);
+            } else {
+                std::env::remove_var("COCO_SESSION_SOCK");
+            }
+        }
+
+        assert!(
+            envs.iter()
+                .any(|(k, v)| k == "COCO_SESSION_SOCK" && v == "/tmp/coco-tool.sock"),
+            "expected tool-level COCO_SESSION_SOCK override in envs: {envs:?}"
+        );
     }
 }

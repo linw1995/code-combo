@@ -30,6 +30,9 @@ enum Commands {
         /// defaults to a message field and prints the message string.
         #[arg(long, value_name = "field:description")]
         schemas: Vec<String>,
+        /// Enable interactive ask loop until `coco reply` is called
+        #[arg(short = 'i', long)]
+        interactive: bool,
         /// Prompt text to send via session socket (or read from stdin when omitted)
         #[arg(trailing_var_arg = true)]
         prompt: Vec<String>,
@@ -77,7 +80,15 @@ async fn main() -> code_combo::Result<()> {
     let args = Args::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
     let command = match args.command {
         Commands::Metadata { fields } => ClientCommand::Metadata { fields },
-        Commands::Ask { prompt, schemas } => ClientCommand::Ask { prompt, schemas },
+        Commands::Ask {
+            prompt,
+            schemas,
+            interactive,
+        } => ClientCommand::Ask {
+            prompt,
+            schemas,
+            interactive,
+        },
         Commands::Tell { prompt } => ClientCommand::Tell { prompt },
         Commands::Record {
             wrap_result,

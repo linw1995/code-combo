@@ -74,6 +74,8 @@ pub enum ComboEvent {
         prompt: String,
         /// Optional thinking config.
         thinking: Option<ThinkingConfig>,
+        /// Session socket path for interactive reply handoff.
+        session_sock: Option<String>,
     },
     /// Prompt stream update for combo reply.
     PromptStream {
@@ -126,6 +128,8 @@ pub enum ComboEvent {
         thinking: Vec<String>,
         /// Whether this is an offload reply (executed via bash).
         offload: bool,
+        /// Whether this tool use requires explicit user confirmation in UI.
+        requires_confirmation: bool,
     },
     /// Reply tool result for offload.
     ReplyToolResult {

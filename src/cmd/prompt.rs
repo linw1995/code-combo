@@ -5,7 +5,7 @@ use tracing::info;
 
 use crate::{PromptPayload, PromptSchema, ReplyPayload, SessionSocketClient, error::Result};
 
-pub async fn handle_ask(prompt: String, schemas: Vec<String>) -> Result<()> {
+pub async fn handle_ask(prompt: String, schemas: Vec<String>, interactive: bool) -> Result<()> {
     let prompt = resolve_prompt(prompt).await?;
     let explicit_schemas = !schemas.is_empty();
     let mut schemas = parse_prompt_schemas(&schemas)?;
@@ -19,6 +19,7 @@ pub async fn handle_ask(prompt: String, schemas: Vec<String>) -> Result<()> {
         prompt,
         reply: true,
         schemas,
+        interactive,
         thinking: None,
     };
     let response = client

@@ -9,13 +9,10 @@ use lazy_static::lazy_static;
 use tracing::warn;
 use tree_sitter::{Node, Parser};
 
-use crate::{
-    config::{
-        ArgPolicy, BashConfig, BashConfigLayers, FlagPolicy, FlagValuePolicy, FlagValueType,
-        SafeCommandRule, SafeCommandsMode, build_safe_command_rules_from_entries,
-        load_safe_command_rules_from_path, parse_safe_command_rules,
-    },
-    tools::BashInput,
+use crate::config::{
+    ArgPolicy, BashConfig, BashConfigLayers, FlagPolicy, FlagValuePolicy, FlagValueType,
+    SafeCommandRule, SafeCommandsMode, build_safe_command_rules_from_entries,
+    load_safe_command_rules_from_path, parse_safe_command_rules,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,10 +61,6 @@ static SAFE_COMMAND_RULES: OnceLock<RwLock<Vec<SafeCommandRule>>> = OnceLock::ne
 
 fn safe_command_rules() -> &'static RwLock<Vec<SafeCommandRule>> {
     SAFE_COMMAND_RULES.get_or_init(|| RwLock::new(BUILTIN_SAFE_COMMAND_RULES.clone()))
-}
-
-pub fn should_bypass_permission(input: &BashInput) -> bool {
-    is_safe_command(&input.command)
 }
 
 pub fn parse_primary_command(command: &str) -> Result<ParsedCommandSummary, String> {
@@ -253,11 +246,13 @@ pub(super) fn configure_safe_commands(
     *guard = rules;
 }
 
+#[cfg(test)]
 fn is_safe_command(command: &str) -> bool {
     let rules = safe_command_rules().read().expect("safe command lock");
     is_safe_command_with_rules(command, &rules)
 }
 
+#[cfg(test)]
 fn is_safe_command_with_rules(command: &str, rules: &[SafeCommandRule]) -> bool {
     let trimmed = command.trim();
     if trimmed.is_empty() {
@@ -337,6 +332,7 @@ fn apply_agent_safe_commands_layer(
     Ok(())
 }
 
+#[cfg(test)]
 fn is_safe_args(args: &[ParsedArg], policy: &ArgPolicy) -> bool {
     match policy {
         ArgPolicy::Any {
@@ -502,6 +498,7 @@ fn unsafe_args_with_mode(
     Vec::new()
 }
 
+#[cfg(test)]
 fn is_safe_args_with_mode(
     args: &[ParsedArg],
     flags: &HashMap<String, FlagPolicy>,
@@ -709,6 +706,7 @@ fn command_chain_token_matches(arg: &str, token: &str) -> bool {
     token == ".*" || arg == token
 }
 
+#[cfg(test)]
 fn consume_long_option(
     token: &ParsedArg,
     index: usize,
@@ -736,6 +734,7 @@ fn check_long_option(
     check_option_with_name(name, attached_value, token, index, args, flags, mode)
 }
 
+#[cfg(test)]
 fn consume_single_dash_long_option(
     token: &ParsedArg,
     index: usize,
@@ -766,6 +765,7 @@ fn check_single_dash_long_option(
     ))
 }
 
+#[cfg(test)]
 fn consume_option_with_name(
     name: &str,
     attached_value: Option<&str>,
@@ -960,6 +960,7 @@ fn check_option_with_name(
     }
 }
 
+#[cfg(test)]
 fn parse_short_options(
     token: &ParsedArg,
     index: usize,

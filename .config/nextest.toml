@@ -1,5 +1,8 @@
 [profile.default]
-default-filter = 'not test(tests::networking::)'
+default-filter = 'not test(tests::networking::) and not test(e2e_tests::)'
 
 [profile.networking]
 default-filter = 'test(tests::networking::)'
+
+[profile.e2e]
+default-filter = 'test(e2e_tests::)'
