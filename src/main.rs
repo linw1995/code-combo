@@ -9,9 +9,6 @@ use snafu::prelude::*;
 #[derive(Debug, Parser)]
 #[command(name = "coco", version, long_version = version::long_version(), about)]
 struct Args {
-    /// Ignore workspace combo scripts under .coco/combos
-    #[arg(long)]
-    ignore_workspace_scripts: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -103,7 +100,6 @@ async fn main() -> code_combo::Result<()> {
         }) => ClientCommand::ComboRun {
             name,
             args: combo_args,
-            ignore_workspace_scripts: args.ignore_workspace_scripts,
         },
         Commands::Mcp { args } => ClientCommand::Mcp { args },
     };

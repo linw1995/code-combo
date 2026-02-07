@@ -676,9 +676,6 @@ fn resolve_coco_bin_from_env() -> Option<PathBuf> {
     if let Ok(path) = env::var("COCO_TEST_BIN") {
         return Some(PathBuf::from(path));
     }
-    if let Ok(path) = env::var("COCO_TUI_BIN") {
-        return Some(PathBuf::from(path));
-    }
     if let Ok(path) = env::var("CARGO_BIN_EXE_coco") {
         return Some(PathBuf::from(path));
     }
@@ -703,7 +700,7 @@ pub(crate) fn coco_binary() -> PathBuf {
     let path = resolve_coco_bin_from_env().unwrap_or_else(resolve_coco_bin_from_target);
     assert!(
         path.exists(),
-        "coco binary not found at {:?}; build `cargo build -p coco-tui --bin coco` or set COCO_TUI_BIN/COCO_TEST_BIN",
+        "coco binary not found at {:?}; build `cargo build -p coco-tui --bin coco` or set COCO_TEST_BIN",
         path
     );
     path
