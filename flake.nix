@@ -168,7 +168,7 @@
               (add-pkg-deps devPackages)
             ]
           ));
-          packages = commonPackages ++ devPackages ++ [jailed-codex];
+          packages = commonPackages ++ devPackages ++ lib.optionals pkgs.stdenv.isLinux [jailed-codex];
           shellHook = ''
             # Unset SOURCE_DATE_EPOCH to prevent reproducible build timestamps during development.
             # This allows timestamps to reflect the current time, which is useful for development workflows.
