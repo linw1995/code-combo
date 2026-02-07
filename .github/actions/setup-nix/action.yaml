@@ -29,6 +29,6 @@ runs:
     - name: Setup nix develop env
       shell: bash
       run: |
-        echo 'use flake' >.envrc
+        echo 'use flake .#ci' >.envrc
     - uses: HatsuneMiku3939/direnv-action@v1
     # and avoid develop env being gc

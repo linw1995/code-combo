@@ -169,17 +169,23 @@
             ]
           ));
           packages = commonPackages ++ devPackages ++ [jailed-codex];
+          shellHook = ''
+            # Unset SOURCE_DATE_EPOCH to prevent reproducible build timestamps during development.
+            # This allows timestamps to reflect the current time, which is useful for development workflows.
+            unset SOURCE_DATE_EPOCH
+          '';
         in rec {
           default = stable;
+          ci = pkgs.mkShell {
+            inherit nativeBuildInputs;
+            inherit shellHook;
+
+            packages = devPackages;
+          };
           stable = pkgs.mkShell {
             inherit nativeBuildInputs;
             inherit packages;
-
-            shellHook = ''
-              # Unset SOURCE_DATE_EPOCH to prevent reproducible build timestamps during development.
-              # This allows timestamps to reflect the current time, which is useful for development workflows.
-              unset SOURCE_DATE_EPOCH
-            '';
+            inherit shellHook;
           };
         };
       }
