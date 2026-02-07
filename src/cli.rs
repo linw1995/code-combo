@@ -22,7 +22,6 @@ pub enum ClientCommand {
     ComboRun {
         name: String,
         args: Vec<String>,
-        ignore_workspace_scripts: bool,
     },
     Record {
         wrap_result: bool,
@@ -69,11 +68,7 @@ pub async fn handle_client_command(
         ClientCommand::Reply { fields } => crate::cmd::handle_reply(fields)
             .await
             .whatever_context("failed to handle reply"),
-        ClientCommand::ComboRun {
-            name,
-            args,
-            ignore_workspace_scripts,
-        } => crate::cmd::handle_combo_run(name, args, ignore_workspace_scripts)
+        ClientCommand::ComboRun { name, args } => crate::cmd::handle_combo_run(name, args)
             .await
             .whatever_context("failed to handle combo run"),
         ClientCommand::Record {

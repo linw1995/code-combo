@@ -4,12 +4,17 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     fenix.url = "github:nix-community/fenix";
     fenix.inputs.nixpkgs.follows = "nixpkgs";
+
+    jail-nix.url = "sourcehut:~alexdavid/jail.nix";
+    llm-agents.url = "github:numtide/llm-agents.nix";
   };
 
   outputs = {
     self,
     nixpkgs,
     utils,
+    jail-nix,
+    llm-agents,
     ...
   } @ inputs:
     utils.lib.eachDefaultSystem
@@ -104,18 +109,26 @@
           };
         };
         devShells = let
-          components = [
-            "cargo"
-            "clippy"
-            "rust-src"
-            "rustc"
-            "rustfmt"
-            "llvm-tools"
-            "rust-analyzer"
+          jail = jail-nix.lib.init pkgs;
+          commonPackages = with pkgs; [
+            bashInteractive
+            curl
+            wget
+            jq
+            git
+            which
+            ripgrep
+            gnugrep
+            gawkInteractive
+            ps
+            findutils
+            gzip
+            unzip
+            gnutar
+            diffutils
           ];
-          packages = with pkgs;
+          devPackages = with pkgs;
             [
-              # Development
               grcov
               prek
 
@@ -126,21 +139,53 @@
               run-test
               run-cov
             ]);
+          nativeBuildInputs = with pkgs; ([
+              (fenix.stable.withComponents [
+                "cargo"
+                "clippy"
+                "rust-src"
+                "rustc"
+                "rustfmt"
+                "llvm-tools"
+                "rust-analyzer"
+              ])
+            ]
+            ++ lib.optionals stdenv.isLinux [pkg-config]);
+          commonJailOptions = with jail.combinators; [
+            network
+            time-zone
+            no-new-session
+            mount-cwd
+          ];
+          codex = llm-agents.packages.${system}.codex;
+          jailed-codex = jail "jailed-codex" codex (with jail.combinators; (
+            commonJailOptions
+            ++ [
+              (readwrite (noescape "~/.codex"))
+              (add-pkg-deps [pkgs.stdenv.cc])
+              (add-pkg-deps commonPackages)
+              (add-pkg-deps nativeBuildInputs)
+              (add-pkg-deps devPackages)
+            ]
+          ));
+          packages = commonPackages ++ devPackages ++ lib.optionals pkgs.stdenv.isLinux [jailed-codex];
+          shellHook = ''
+            # Unset SOURCE_DATE_EPOCH to prevent reproducible build timestamps during development.
+            # This allows timestamps to reflect the current time, which is useful for development workflows.
+            unset SOURCE_DATE_EPOCH
+          '';
         in rec {
           default = stable;
+          ci = pkgs.mkShell {
+            inherit nativeBuildInputs;
+            inherit shellHook;
+
+            packages = devPackages;
+          };
           stable = pkgs.mkShell {
-            nativeBuildInputs = with pkgs; ([
-                (fenix.stable.withComponents components)
-              ]
-              ++ lib.optionals stdenv.isLinux [pkg-config]);
-
+            inherit nativeBuildInputs;
             inherit packages;
-
-            shellHook = ''
-              # Unset SOURCE_DATE_EPOCH to prevent reproducible build timestamps during development.
-              # This allows timestamps to reflect the current time, which is useful for development workflows.
-              unset SOURCE_DATE_EPOCH
-            '';
+            inherit shellHook;
           };
         };
       }

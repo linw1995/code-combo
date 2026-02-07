@@ -58,38 +58,19 @@ pub(crate) fn extra_envs_for_bash_input(input: &Input<'_>) -> Vec<(String, Strin
     let Input::Starter(input) = input else {
         return Vec::new();
     };
-    let Ok(parsed) = serde_json::from_value::<BashInput>(input.clone()) else {
+    if serde_json::from_value::<BashInput>(input.clone()).is_err() {
         return Vec::new();
-    };
-    let mut envs = extra_envs_for_command(&parsed.command);
-    for (key, value) in parsed.env {
-        if value.is_empty() {
-            continue;
-        }
-        if !matches!(key.as_str(), "COCO_TUI_BIN") {
-            continue;
-        }
-        if let Some(existing) = envs.iter_mut().find(|(k, _)| *k == key) {
-            existing.1 = value;
-        } else {
-            envs.push((key, value));
-        }
     }
-    envs
+    extra_envs_for_command()
 }
 
-fn extra_envs_for_command(_command: &str) -> Vec<(String, String)> {
+fn extra_envs_for_command() -> Vec<(String, String)> {
     let mut envs = Vec::new();
     if let Some(path) = crate::global::session_socket_path() {
         let value = path.to_string_lossy().to_string();
         if !value.is_empty() {
             envs.push((SESSION_SOCKET_ENV.to_string(), value));
         }
-    }
-    if let Ok(value) = std::env::var("COCO_TUI_BIN")
-        && !value.is_empty()
-    {
-        envs.push(("COCO_TUI_BIN".to_string(), value));
     }
     envs
 }

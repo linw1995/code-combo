@@ -134,11 +134,9 @@ impl TryFrom<Commands> for ClientCommand {
                 command,
             },
             Commands::Mcp { args } => ClientCommand::Mcp { args },
-            Commands::Combo(ComboCommands::Run { name, args }) => ClientCommand::ComboRun {
-                name,
-                args,
-                ignore_workspace_scripts: false,
-            },
+            Commands::Combo(ComboCommands::Run { name, args }) => {
+                ClientCommand::ComboRun { name, args }
+            }
         };
         Ok(command)
     }
@@ -175,14 +173,7 @@ async fn main() -> Result<()> {
 
         if should_handle_client {
             match ClientCommand::try_from(command) {
-                Ok(mut command) => {
-                    if let ClientCommand::ComboRun {
-                        ignore_workspace_scripts,
-                        ..
-                    } = &mut command
-                    {
-                        *ignore_workspace_scripts = args.ignore_workspace_scripts;
-                    }
+                Ok(command) => {
                     init_client_logging(&program, &command);
                     return handle_client_command(&program, &command_name, command)
                         .await
