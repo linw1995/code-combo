@@ -5,7 +5,8 @@ use tokio::{process::Command, time::Instant};
 use tracing::{debug, info, warn};
 
 use crate::{
-    ComboRunPayload, ComboRunResult, RunComboOutput, SessionEnv, SessionSocketClient, error::Result,
+    ComboRunPayload, ComboRunResult, RunComboOutput, SESSION_SOCKET_ENV, SessionEnv,
+    SessionSocketClient, error::Result,
 };
 
 pub async fn handle_combo_run(
@@ -22,7 +23,7 @@ pub async fn handle_combo_run(
 
     let client = SessionSocketClient::from_env()
         .await
-        .whatever_context("failed to read COCO_SESSION_SOCK")?;
+        .whatever_context(format!("failed to read {SESSION_SOCKET_ENV}"))?;
 
     match client {
         Some(client) => {

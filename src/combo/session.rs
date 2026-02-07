@@ -10,8 +10,8 @@ use tokio::{
 use tracing::{debug, warn};
 
 use crate::{
-    MCP_SOCKET_ENV, McpRequest, McpResponse, Message, OutputChunk, Starter, ToolUse,
-    exec::StreamKind, tools::Final,
+    MCP_SOCKET_ENV, McpRequest, McpResponse, Message, OutputChunk, SESSION_SOCKET_ENV, Starter,
+    ToolUse, exec::StreamKind, tools::Final,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -352,7 +352,7 @@ impl SessionSocketClient {
     }
 
     pub async fn from_env() -> ClientResult<Option<Self>> {
-        Self::from_env_key("COCO_SESSION_SOCK").await
+        Self::from_env_key(SESSION_SOCKET_ENV).await
     }
 
     pub async fn from_mcp_env() -> ClientResult<Option<Self>> {
@@ -367,9 +367,9 @@ impl SessionSocketClient {
         use snafu::prelude::*;
         let Some(client) = Self::from_env()
             .await
-            .whatever_context("failed to connect to COCO_SESSION_SOCK")?
+            .whatever_context(format!("failed to connect to {SESSION_SOCKET_ENV}"))?
         else {
-            whatever!("env COCO_SESSION_SOCK is not set");
+            whatever!("env {SESSION_SOCKET_ENV} is not set");
         };
         Ok(client)
     }

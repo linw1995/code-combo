@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use code_combo::{
-    ClientMessage, ComboRunMessage, ComboRunPayload, ComboRunResult, ServerConnection,
-    ServerMessage, SessionEnv, SessionSocketServer,
+    ClientMessage, ComboRunMessage, ComboRunPayload, ComboRunResult, SESSION_SOCKET_ENV,
+    ServerConnection, ServerMessage, SessionEnv, SessionSocketServer,
 };
 use snafu::prelude::*;
 use tokio::{net::UnixStream, sync::mpsc, task::JoinHandle};
@@ -40,10 +40,7 @@ impl ComboRunSessionServer {
         let server = SessionSocketServer::bind(&socket_path)
             .await
             .whatever_context("failed to bind session socket")?;
-        // Safety: set once during startup before spawning any tasks.
-        unsafe {
-            std::env::set_var("COCO_SESSION_SOCK", &socket_path);
-        }
+        code_combo::global::set_session_socket_path(socket_path.clone());
 
         let shutdown = CancellationToken::new();
         let shutdown_task = shutdown.clone();
@@ -83,12 +80,13 @@ impl ComboRunSessionServer {
     pub async fn shutdown(self) {
         self.shutdown.cancel();
         let _ = self.join_handle.await;
+        code_combo::global::clear_session_socket_path();
         let _ = std::fs::remove_file(&self.socket_path);
     }
 }
 
 async fn resolve_socket_path() -> Result<(PathBuf, Option<SessionEnv>)> {
-    if let Ok(path) = std::env::var("COCO_SESSION_SOCK") {
+    if let Ok(path) = std::env::var(SESSION_SOCKET_ENV) {
         let socket_path = PathBuf::from(path);
         let parent_exists = socket_path
             .parent()
@@ -99,7 +97,8 @@ async fn resolve_socket_path() -> Result<(PathBuf, Option<SessionEnv>)> {
         }
         warn!(
             socket_path = %socket_path.display(),
-            "COCO_SESSION_SOCK parent dir missing; creating new session env"
+            env = SESSION_SOCKET_ENV,
+            "session socket env parent dir missing; creating new session env"
         );
     }
     let env = SessionEnv::builder()

@@ -31,9 +31,9 @@ pub type ExecuteResult = Result<Output, Final>;
 
 use crate::{
     Agent, Block, ChatStreamUpdate, Config, Content, Message, OutputChunk, PromptResponseSender,
-    PromptSchema, SessionEnv, Starter, StarterCommand, StarterError, StarterEvent, ToolUse,
-    bash_unsafe_ranges, bash_unsafe_reason, discover_starters, exec::StreamKind,
-    parse_primary_command, workspace_dir,
+    PromptSchema, SESSION_SOCKET_ENV, SessionEnv, Starter, StarterCommand, StarterError,
+    StarterEvent, ToolUse, bash_unsafe_ranges, bash_unsafe_reason, discover_starters,
+    exec::StreamKind, parse_primary_command, workspace_dir,
 };
 
 // Import types from combo module
@@ -44,6 +44,28 @@ use crate::combo::{
 pub const RUN_COMBO_TOOL_NAME: &str = "run_combo";
 
 type ComboEventCallback = Arc<std::sync::Mutex<Box<dyn FnMut(&ComboEvent) + Send>>>;
+
+struct SessionSocketPathGuard {
+    previous: Option<PathBuf>,
+}
+
+impl SessionSocketPathGuard {
+    fn install(path: PathBuf) -> Self {
+        let previous = crate::global::session_socket_path();
+        crate::global::set_session_socket_path(path);
+        Self { previous }
+    }
+}
+
+impl Drop for SessionSocketPathGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.previous.take() {
+            crate::global::set_session_socket_path(path);
+        } else {
+            crate::global::clear_session_socket_path();
+        }
+    }
+}
 
 /// Execute combo logic with event callback support.
 pub async fn run_combo<F>(
@@ -216,6 +238,7 @@ async fn execute_combo(
         .build()
         .map_err(|e| format!("Failed to create session env: {}", e))?;
     let session_socket_path = session_env.socket_path().to_path_buf();
+    let _session_socket_guard = SessionSocketPathGuard::install(session_socket_path.clone());
     let mut exec_envs = match prepare_mcp_envs().await {
         Ok(envs) => envs,
         Err(err) => {
@@ -428,7 +451,6 @@ async fn execute_combo(
                                 &schemas,
                                 &combo_name,
                                 cancel_token.clone(),
-                                session_socket_path.clone(),
                                 &on_event_for_emit,
                             )
                             .await;
@@ -1274,7 +1296,7 @@ async fn handle_interactive_combo_reply(
                 if matches!(command_kind, OffloadCommandKind::Coco) {
                     let mut bash_input_for_emit = bash_input.clone();
                     bash_input_for_emit.env.insert(
-                        "COCO_SESSION_SOCK".to_string(),
+                        SESSION_SOCKET_ENV.to_string(),
                         session_socket_path.to_string_lossy().to_string(),
                     );
                     emitted_tool_use.input =
@@ -1321,13 +1343,9 @@ async fn handle_interactive_combo_reply(
                                     message: err.to_string(),
                                 }
                             })?;
-                        let extra_envs = vec![(
-                            "COCO_SESSION_SOCK".to_string(),
-                            session_socket_path.to_string_lossy().to_string(),
-                        )];
                         let output = run_bash_chunked(
                             Input::Starter(bash_input_value),
-                            &extra_envs,
+                            &[],
                             cancel_token.clone(),
                             |_| {},
                         )
@@ -1615,7 +1633,6 @@ async fn handle_offload_combo_reply_with_retry(
     schemas: &[PromptSchema],
     combo_name: &str,
     cancel_token: CancellationToken,
-    session_socket_path: PathBuf,
     on_event: &ComboEventCallback,
 ) -> Result<(), ComboReplyError> {
     let max_retries = agent.combo_reply_retries();
@@ -1634,7 +1651,6 @@ async fn handle_offload_combo_reply_with_retry(
             schemas,
             combo_name,
             cancel_token.clone(),
-            session_socket_path.clone(),
             on_event,
             &directive,
         )
@@ -1656,7 +1672,6 @@ async fn handle_offload_combo_reply(
     schemas: &[PromptSchema],
     combo_name: &str,
     cancel_token: CancellationToken,
-    session_socket_path: PathBuf,
     on_event: &ComboEventCallback,
     directive: &str,
 ) -> Result<(), ComboReplyError> {
@@ -1787,13 +1802,9 @@ async fn handle_offload_combo_reply(
             message: err.to_string(),
         })?;
 
-    let extra_envs = vec![(
-        "COCO_SESSION_SOCK".to_string(),
-        session_socket_path.to_string_lossy().to_string(),
-    )];
     let output = run_bash_chunked(
         Input::Starter(bash_input_value),
-        &extra_envs,
+        &[],
         cancel_token.clone(),
         |_| {},
     )
@@ -1995,15 +2006,15 @@ mod tests {
         assert!(is_coco_reply_command(
             "/usr/local/bin/coco reply --message='hello world'"
         ));
-        assert!(is_coco_reply_command(
-            "COCO_SESSION_SOCK='/tmp/coco.sock' coco reply --message='hello world'"
-        ));
+        assert!(is_coco_reply_command(&format!(
+            "{SESSION_SOCKET_ENV}='/tmp/coco.sock' coco reply --message='hello world'"
+        )));
         assert!(is_coco_reply_command(
             "/run/current-system/sw/bin/zsh -lc \"coco reply --message='hello world'\""
         ));
-        assert!(is_coco_reply_command(
-            "bash -lc \"COCO_SESSION_SOCK=/tmp/coco.sock coco reply --message='hello world'\""
-        ));
+        assert!(is_coco_reply_command(&format!(
+            "bash -lc \"{SESSION_SOCKET_ENV}=/tmp/coco.sock coco reply --message='hello world'\""
+        )));
         assert!(!is_coco_reply_command("coco ask hello"));
         assert!(!is_coco_reply_command("echo coco reply --message=hello"));
         assert!(!is_coco_reply_command(

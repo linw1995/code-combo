@@ -7,6 +7,8 @@ use std::{
 use snafu::prelude::*;
 use tempfile::{Builder, TempDir};
 
+pub const SESSION_SOCKET_ENV: &str = "COCO_SESSION_SOCK";
+
 #[derive(Debug, Snafu)]
 pub enum SessionEnvError {
     #[snafu(display("failed to locate coco executable"))]
@@ -57,7 +59,7 @@ impl Default for SessionEnvBuilder {
             binary_path: None,
             command_name: "coco".to_string(),
             socket_name: "coco.sock".to_string(),
-            socket_env_name: "COCO_SESSION_SOCK".to_string(),
+            socket_env_name: SESSION_SOCKET_ENV.to_string(),
         }
     }
 }
@@ -207,5 +209,10 @@ mod tests {
             .clone();
         assert_eq!(socket_path, env.socket_path().as_os_str());
         Ok(())
+    }
+
+    #[test]
+    fn session_socket_env_differs_from_mcp_socket_env() {
+        assert_ne!(SESSION_SOCKET_ENV, crate::MCP_SOCKET_ENV);
     }
 }
