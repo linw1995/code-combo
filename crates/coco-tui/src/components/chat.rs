@@ -8,8 +8,9 @@ use code_combo::{
     Agent, Block as ChatBlock, ChatResponse, ChatStreamUpdate, ComboRunEvent, ComboRunResult,
     ComboStreamKind as ComboRunStreamKind, Config, Content as ChatContent, Message as ChatMessage,
     NotificationRule, NotificationWhen, Output, PromptPayload, RetryAttempt, RetryNotifier,
-    RetryUpdate, RuntimeOverrides, SessionSocketClient, Starter, StopReason, TextEdit, ToolUse,
-    UsageStats, discover_starters, load_runtime_overrides, save_runtime_overrides,
+    RetryUpdate, RuntimeOverrides, SESSION_SOCKET_ENV, SessionSocketClient, Starter, StopReason,
+    TextEdit, ToolUse, UsageStats, discover_starters, load_runtime_overrides,
+    save_runtime_overrides,
 };
 
 /// Holds information about a collected tool result from concurrent execution.
@@ -2161,7 +2162,7 @@ impl Chat<'static> {
         }
         if let Some(session_sock) = bash_input
             .env
-            .get("COCO_SESSION_SOCK")
+            .get(SESSION_SOCKET_ENV)
             .filter(|session_sock| !session_sock.is_empty())
         {
             let combo_id = self.pending_combo_id_for_session_sock(session_sock)?;
@@ -3445,7 +3446,7 @@ fn session_sock_from_tool_use(tool_use: &ToolUse) -> Option<String> {
     let input = serde_json::from_value::<BashInput>(tool_use.input.clone()).ok()?;
     input
         .env
-        .get("COCO_SESSION_SOCK")
+        .get(SESSION_SOCKET_ENV)
         .filter(|value| !value.is_empty())
         .cloned()
 }

@@ -31,9 +31,9 @@ pub type ExecuteResult = Result<Output, Final>;
 
 use crate::{
     Agent, Block, ChatStreamUpdate, Config, Content, Message, OutputChunk, PromptResponseSender,
-    PromptSchema, SessionEnv, Starter, StarterCommand, StarterError, StarterEvent, ToolUse,
-    bash_unsafe_ranges, bash_unsafe_reason, discover_starters, exec::StreamKind,
-    parse_primary_command, workspace_dir,
+    PromptSchema, SESSION_SOCKET_ENV, SessionEnv, Starter, StarterCommand, StarterError,
+    StarterEvent, ToolUse, bash_unsafe_ranges, bash_unsafe_reason, discover_starters,
+    exec::StreamKind, parse_primary_command, workspace_dir,
 };
 
 // Import types from combo module
@@ -1274,7 +1274,7 @@ async fn handle_interactive_combo_reply(
                 if matches!(command_kind, OffloadCommandKind::Coco) {
                     let mut bash_input_for_emit = bash_input.clone();
                     bash_input_for_emit.env.insert(
-                        "COCO_SESSION_SOCK".to_string(),
+                        SESSION_SOCKET_ENV.to_string(),
                         session_socket_path.to_string_lossy().to_string(),
                     );
                     emitted_tool_use.input =
@@ -1322,7 +1322,7 @@ async fn handle_interactive_combo_reply(
                                 }
                             })?;
                         let extra_envs = vec![(
-                            "COCO_SESSION_SOCK".to_string(),
+                            SESSION_SOCKET_ENV.to_string(),
                             session_socket_path.to_string_lossy().to_string(),
                         )];
                         let output = run_bash_chunked(
@@ -1788,7 +1788,7 @@ async fn handle_offload_combo_reply(
         })?;
 
     let extra_envs = vec![(
-        "COCO_SESSION_SOCK".to_string(),
+        SESSION_SOCKET_ENV.to_string(),
         session_socket_path.to_string_lossy().to_string(),
     )];
     let output = run_bash_chunked(
@@ -1995,15 +1995,15 @@ mod tests {
         assert!(is_coco_reply_command(
             "/usr/local/bin/coco reply --message='hello world'"
         ));
-        assert!(is_coco_reply_command(
-            "COCO_SESSION_SOCK='/tmp/coco.sock' coco reply --message='hello world'"
-        ));
+        assert!(is_coco_reply_command(&format!(
+            "{SESSION_SOCKET_ENV}='/tmp/coco.sock' coco reply --message='hello world'"
+        )));
         assert!(is_coco_reply_command(
             "/run/current-system/sw/bin/zsh -lc \"coco reply --message='hello world'\""
         ));
-        assert!(is_coco_reply_command(
-            "bash -lc \"COCO_SESSION_SOCK=/tmp/coco.sock coco reply --message='hello world'\""
-        ));
+        assert!(is_coco_reply_command(&format!(
+            "bash -lc \"{SESSION_SOCKET_ENV}=/tmp/coco.sock coco reply --message='hello world'\""
+        )));
         assert!(!is_coco_reply_command("coco ask hello"));
         assert!(!is_coco_reply_command("echo coco reply --message=hello"));
         assert!(!is_coco_reply_command(

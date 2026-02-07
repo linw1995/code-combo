@@ -30,7 +30,7 @@ pub use session::{
     ServerMessage, SessionClientError, SessionServerError, SessionSocketClient,
     SessionSocketServer, ThinkingConfig,
 };
-pub use session_env::{SessionEnv, SessionEnvBuilder, SessionEnvError};
+pub use session_env::{SESSION_SOCKET_ENV, SessionEnv, SessionEnvBuilder, SessionEnvError};
 pub use starter::PromptResponseSender;
 pub use starter::{Starter, StarterCommand, StarterError, StarterEvent, StarterExecution};
 pub use types::{

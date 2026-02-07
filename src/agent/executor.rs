@@ -563,8 +563,9 @@ mod tests {
     #[tokio::test]
     async fn bash_execution_receives_session_socket_env() {
         let mut executor = Executor::default();
-        executor.set_bash_env("COCO_SESSION_SOCK", "/tmp/coco-executor.sock");
-        let input_value = bash_input_value(r#"printf "%s" "$COCO_SESSION_SOCK""#);
+        executor.set_bash_env(crate::SESSION_SOCKET_ENV, "/tmp/coco-executor.sock");
+        let input_value =
+            bash_input_value(format!(r#"printf "%s" "${}""#, crate::SESSION_SOCKET_ENV).as_str());
         executor.update_pcl(
             BASH_TOOL_NAME,
             PermissionControl::Once("inject-test".to_string()),

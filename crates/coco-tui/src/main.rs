@@ -5,7 +5,7 @@ use std::{
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use code_combo::{
-    RuntimeOverrides,
+    RuntimeOverrides, SESSION_SOCKET_ENV,
     cli::{ClientCommand, handle_client_command, init_client_logging},
     default_config_dir, load_config_with_overrides, load_runtime_overrides, workspace_config_path,
 };
@@ -270,7 +270,7 @@ async fn main() -> Result<()> {
 }
 
 fn has_session_socket() -> bool {
-    let Some(path) = std::env::var_os("COCO_SESSION_SOCK") else {
+    let Some(path) = std::env::var_os(SESSION_SOCKET_ENV) else {
         return false;
     };
     let path = PathBuf::from(path);

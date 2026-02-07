@@ -10,7 +10,7 @@ use tracing::warn;
 
 use super::{ExecuteResult, Final, Input, Tool};
 use crate::{
-    MCP_SOCKET_ENV, McpSocketServer, SessionEnv, default_config_dir,
+    MCP_SOCKET_ENV, McpSocketServer, SESSION_SOCKET_ENV, SessionEnv, default_config_dir,
     exec::{ChunkConfig, ExecCommand, OutputChunk, ProcessEvent, StreamKind},
     load_config_with_overrides, workspace_config_path,
 };
@@ -66,7 +66,7 @@ pub(crate) fn extra_envs_for_bash_input(input: &Input<'_>) -> Vec<(String, Strin
         if value.is_empty() {
             continue;
         }
-        if !matches!(key.as_str(), "COCO_SESSION_SOCK" | "COCO_TUI_BIN") {
+        if !matches!(key.as_str(), SESSION_SOCKET_ENV | "COCO_TUI_BIN") {
             continue;
         }
         if let Some(existing) = envs.iter_mut().find(|(k, _)| *k == key) {
@@ -80,10 +80,10 @@ pub(crate) fn extra_envs_for_bash_input(input: &Input<'_>) -> Vec<(String, Strin
 
 fn extra_envs_for_command(_command: &str) -> Vec<(String, String)> {
     let mut envs = Vec::new();
-    if let Ok(value) = std::env::var("COCO_SESSION_SOCK")
+    if let Ok(value) = std::env::var(SESSION_SOCKET_ENV)
         && !value.is_empty()
     {
-        envs.push(("COCO_SESSION_SOCK".to_string(), value));
+        envs.push((SESSION_SOCKET_ENV.to_string(), value));
     }
     if let Ok(value) = std::env::var("COCO_TUI_BIN")
         && !value.is_empty()
@@ -404,10 +404,10 @@ mod tests {
             .lock()
             .expect("lock env mutex");
 
-        let prev = std::env::var_os("COCO_SESSION_SOCK");
+        let prev = std::env::var_os(SESSION_SOCKET_ENV);
         // Safety: test-only mutation, serialized by ENV_LOCK and restored before return.
         unsafe {
-            std::env::set_var("COCO_SESSION_SOCK", "/tmp/coco-test.sock");
+            std::env::set_var(SESSION_SOCKET_ENV, "/tmp/coco-test.sock");
         }
 
         let input = Input::Starter(json!({
@@ -421,16 +421,16 @@ mod tests {
         // Safety: test-only mutation, serialized by ENV_LOCK.
         unsafe {
             if let Some(value) = prev {
-                std::env::set_var("COCO_SESSION_SOCK", value);
+                std::env::set_var(SESSION_SOCKET_ENV, value);
             } else {
-                std::env::remove_var("COCO_SESSION_SOCK");
+                std::env::remove_var(SESSION_SOCKET_ENV);
             }
         }
 
         assert!(
             envs.iter()
-                .any(|(k, v)| k == "COCO_SESSION_SOCK" && v == "/tmp/coco-test.sock"),
-            "COCO_SESSION_SOCK is missing from bash extra envs: {envs:?}"
+                .any(|(k, v)| k == SESSION_SOCKET_ENV && v == "/tmp/coco-test.sock"),
+            "{SESSION_SOCKET_ENV} is missing from bash extra envs: {envs:?}"
         );
     }
 
@@ -441,17 +441,17 @@ mod tests {
             .lock()
             .expect("lock env mutex");
 
-        let prev = std::env::var_os("COCO_SESSION_SOCK");
+        let prev = std::env::var_os(SESSION_SOCKET_ENV);
         // Safety: test-only mutation, serialized by ENV_LOCK and restored before return.
         unsafe {
-            std::env::set_var("COCO_SESSION_SOCK", "/tmp/coco-process.sock");
+            std::env::set_var(SESSION_SOCKET_ENV, "/tmp/coco-process.sock");
         }
 
         let input = Input::Starter(json!({
             "command": "coco reply --result='ok'",
             "timeout": 60_000,
             "env": {
-                "COCO_SESSION_SOCK": "/tmp/coco-tool.sock"
+                (SESSION_SOCKET_ENV): "/tmp/coco-tool.sock"
             }
         }));
 
@@ -460,16 +460,16 @@ mod tests {
         // Safety: test-only mutation, serialized by ENV_LOCK.
         unsafe {
             if let Some(value) = prev {
-                std::env::set_var("COCO_SESSION_SOCK", value);
+                std::env::set_var(SESSION_SOCKET_ENV, value);
             } else {
-                std::env::remove_var("COCO_SESSION_SOCK");
+                std::env::remove_var(SESSION_SOCKET_ENV);
             }
         }
 
         assert!(
             envs.iter()
-                .any(|(k, v)| k == "COCO_SESSION_SOCK" && v == "/tmp/coco-tool.sock"),
-            "expected tool-level COCO_SESSION_SOCK override in envs: {envs:?}"
+                .any(|(k, v)| k == SESSION_SOCKET_ENV && v == "/tmp/coco-tool.sock"),
+            "expected tool-level {SESSION_SOCKET_ENV} override in envs: {envs:?}"
         );
     }
 }
