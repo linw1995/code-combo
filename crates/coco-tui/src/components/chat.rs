@@ -2079,6 +2079,13 @@ impl Chat<'static> {
         false
     }
 
+    fn focus_next_pending_user_action_or_input(&mut self) {
+        if !self.focus_next_pending_user_action() {
+            self.update_focus(Focus::Input);
+            self.messages.blur();
+        }
+    }
+
     fn try_submit_combo_feedback(&mut self, feedback: &str) -> bool {
         let pending_feedback_combo_ids = self
             .pending_user_actions
@@ -2671,11 +2678,8 @@ impl Component for Chat<'static> {
                 if let Some(idx) = self.messages.on_tool_event(event)
                     && !effective_is_error
                     && self.messages.selected_idx() == Some(idx)
-                    && !self.focus_next_pending_user_action()
                 {
-                    // Move focus back to Input if no more pending actions.
-                    self.update_focus(Focus::Input);
-                    self.messages.blur();
+                    self.focus_next_pending_user_action_or_input();
                 }
 
                 if is_manual_combo {
@@ -3116,13 +3120,13 @@ impl Component for Chat<'static> {
                     self.remove_pending_tool_use_action(&tool_use.id);
                     self.agent.grant_once(&tool_use.id, &tool_use.name);
                     self.spawn_tool_use(tool_use);
-                    self.focus_next_pending_user_action();
+                    self.focus_next_pending_user_action_or_input();
                 }
                 ToolAction::GrantSession(tool_use) => {
                     self.remove_pending_tool_use_action(&tool_use.id);
                     self.agent.grant_session(tool_use);
                     self.spawn_tool_use(tool_use);
-                    self.focus_next_pending_user_action();
+                    self.focus_next_pending_user_action_or_input();
                 }
                 ToolAction::Cancel(tool_use) => {
                     let pending_combo_id =
@@ -4211,6 +4215,56 @@ mod tests {
         assert!(chat.focus_next_pending_user_action());
         assert_eq!(chat.state.focus, Focus::Messages);
         assert_eq!(chat.messages.selected_idx(), Some(idx));
+    }
+
+    #[test]
+    fn focus_next_pending_user_action_or_input_returns_to_input_when_no_next_action() {
+        let mut chat = Chat::new(Config::default());
+        let tool = mock_tool_use("tool_a");
+        chat.messages
+            .push(Message::bot(Tool::new(tool.clone()).into()));
+
+        let event = Event::Ask(AskEvent::ToolUsePermission(tool.id.clone()));
+        let idx = chat
+            .messages
+            .on_tool_event(&event)
+            .expect("tool should be found");
+        chat.pending_user_actions.clear();
+        chat.update_focus(Focus::Messages);
+        assert!(chat.messages.focus(idx));
+
+        chat.focus_next_pending_user_action_or_input();
+        assert_eq!(chat.state.focus, Focus::Input);
+        assert_eq!(chat.messages.selected_idx(), None);
+    }
+
+    #[test]
+    fn focus_next_pending_user_action_or_input_keeps_messages_when_next_action_exists() {
+        let mut chat = Chat::new(Config::default());
+        let tool_a = mock_tool_use("tool_a");
+        let tool_b = mock_tool_use("tool_b");
+        chat.messages
+            .push(Message::bot(Tool::new(tool_a.clone()).into()));
+        chat.messages
+            .push(Message::bot(Tool::new(tool_b.clone()).into()));
+
+        let event_a = Event::Ask(AskEvent::ToolUsePermission(tool_a.id.clone()));
+        let event_b = Event::Ask(AskEvent::ToolUsePermission(tool_b.id.clone()));
+        let idx_a = chat
+            .messages
+            .on_tool_event(&event_a)
+            .expect("first tool should be found");
+        let idx_b = chat
+            .messages
+            .on_tool_event(&event_b)
+            .expect("second tool should be found");
+        chat.pending_user_actions.clear();
+        chat.update_focus(Focus::Messages);
+        assert!(chat.messages.focus(idx_a));
+
+        chat.focus_next_pending_user_action_or_input();
+        assert_eq!(chat.state.focus, Focus::Messages);
+        assert_eq!(chat.messages.selected_idx(), Some(idx_b));
     }
 
     #[test]
