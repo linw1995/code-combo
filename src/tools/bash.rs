@@ -453,7 +453,7 @@ mod tests {
         guard.clear_env();
 
         let input = Input::Starter(json!({
-            "command": "printf \"%s\" \"$COCO_SESSION_SOCK\"",
+            "command": "printf \"%s\\n\" \"$COCO_SESSION_SOCK\"",
             "timeout": 60_000,
         }));
         let extra_envs = vec![(
