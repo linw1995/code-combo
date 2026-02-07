@@ -40,10 +40,7 @@ impl ComboRunSessionServer {
         let server = SessionSocketServer::bind(&socket_path)
             .await
             .whatever_context("failed to bind session socket")?;
-        // Safety: set once during startup before spawning any tasks.
-        unsafe {
-            std::env::set_var(SESSION_SOCKET_ENV, &socket_path);
-        }
+        code_combo::global::set_session_socket_path(socket_path.clone());
 
         let shutdown = CancellationToken::new();
         let shutdown_task = shutdown.clone();
@@ -83,6 +80,7 @@ impl ComboRunSessionServer {
     pub async fn shutdown(self) {
         self.shutdown.cancel();
         let _ = self.join_handle.await;
+        code_combo::global::clear_session_socket_path();
         let _ = std::fs::remove_file(&self.socket_path);
     }
 }

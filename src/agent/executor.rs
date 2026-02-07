@@ -561,11 +561,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bash_execution_receives_session_socket_env() {
+    async fn bash_execution_ignores_session_socket_env_injection() {
         let mut executor = Executor::default();
         executor.set_bash_env(crate::SESSION_SOCKET_ENV, "/tmp/coco-executor.sock");
-        let input_value =
-            bash_input_value(format!(r#"printf "%s" "${}""#, crate::SESSION_SOCKET_ENV).as_str());
+        let input_value = bash_input_value(
+            format!(
+                r#"if [ -n "${}" ]; then printf "set\n"; else printf "empty\n"; fi"#,
+                crate::SESSION_SOCKET_ENV
+            )
+            .as_str(),
+        );
         executor.update_pcl(
             BASH_TOOL_NAME,
             PermissionControl::Once("inject-test".to_string()),
@@ -580,7 +585,7 @@ mod tests {
         };
         let output: BashOutput =
             serde_json::from_value(value).expect("deserialize bash output json");
-        assert_eq!(output.stdout, "/tmp/coco-executor.sock\n");
+        assert_eq!(output.stdout, "empty\n");
     }
 
     #[test]
