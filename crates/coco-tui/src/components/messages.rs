@@ -512,6 +512,33 @@ impl Messages {
         self.focus(idx)
     }
 
+    pub fn focus_next_waiting_permission(&mut self) -> bool {
+        let current = self.focus.get();
+        let start = current.map_or(0, |idx| idx.saturating_add(1));
+        let idx = {
+            let messages = self.messages.read();
+            messages
+                .iter()
+                .enumerate()
+                .skip(start)
+                .find(|(_, message)| message.is_waiting_permission())
+                .map(|(idx, _)| idx)
+                .or_else(|| {
+                    let wrap_end = current.unwrap_or(0);
+                    messages
+                        .iter()
+                        .enumerate()
+                        .take(wrap_end)
+                        .find(|(_, message)| message.is_waiting_permission())
+                        .map(|(idx, _)| idx)
+                })
+        };
+        let Some(idx) = idx else {
+            return false;
+        };
+        self.focus(idx)
+    }
+
     pub fn has_actionable(&self) -> bool {
         self.messages
             .read()
