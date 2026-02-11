@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-use super::{ExecuteResult, Final, Input, Tool};
+use super::{ExecuteResult, Final, Input, Tool, parse_relative_path};
 
 #[derive(Default)]
 pub struct ReadTool {}
@@ -91,13 +91,7 @@ impl Tool for ReadTool {
             return err_msg!("Exceeded maximum line limit for reading file");
         }
 
-        // Check if the path is absolute
-        let path = path
-            .parse::<std::path::PathBuf>()
-            .map_err(|err| format!("Invalid path format: {err}"))?;
-        if path.is_absolute() {
-            return err_msg!("Path must be relative to the working directory, not absolute");
-        }
+        let path = parse_relative_path(path)?;
 
         let fh = tokio::fs::File::open(path)
             .await

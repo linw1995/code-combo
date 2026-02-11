@@ -23,7 +23,7 @@ use crate::{
     Config, SessionSocketServer,
     combo::{ClientMessage, ServerMessage},
     config::McpConfig,
-    logging::logs_dir,
+    logging::{logs_dir, sanitize_log_stem},
 };
 
 pub const MCP_SOCKET_ENV: &str = "COCO_MCP_SOCK";
@@ -150,6 +150,40 @@ pub enum McpManagerError {
 
 type ManagerResult<T, E = McpManagerError> = std::result::Result<T, E>;
 
+#[allow(clippy::result_large_err)]
+fn serialize_to_json_value<T: Serialize>(value: T, label: &str) -> ManagerResult<Value> {
+    serde_json::to_value(value).map_err(|err| McpManagerError::InvalidArguments {
+        reason: format!("failed to serialize {label}: {err}"),
+    })
+}
+
+#[allow(clippy::result_large_err)]
+fn parse_call_tool_payload(payload: Option<Value>) -> ManagerResult<McpCallToolPayload> {
+    match payload {
+        Some(value) => serde_json::from_value::<McpCallToolPayload>(value).map_err(|err| {
+            McpManagerError::InvalidArguments {
+                reason: format!("invalid call_tool payload: {err}"),
+            }
+        }),
+        None => Err(McpManagerError::InvalidArguments {
+            reason: "missing call_tool payload".to_string(),
+        }),
+    }
+}
+
+fn require_server_for_action<'a>(
+    request_id: &str,
+    action_name: &str,
+    server: Option<&'a str>,
+) -> Result<&'a str, McpResponse> {
+    server.ok_or_else(|| {
+        McpResponse::err(
+            request_id.to_string(),
+            format!("server is required for {action_name}"),
+        )
+    })
+}
+
 struct McpClientEntry {
     service: RunningService<RoleClient, ()>,
     peer: Peer<RoleClient>,
@@ -218,10 +252,7 @@ impl McpManager {
                 }),
             )
             .await?;
-        let value =
-            serde_json::to_value(result).map_err(|err| McpManagerError::InvalidArguments {
-                reason: format!("failed to serialize tool result: {err}"),
-            })?;
+        let value = serialize_to_json_value(result, "tool result")?;
         Ok(value)
     }
 
@@ -390,23 +421,6 @@ impl McpManager {
     }
 }
 
-fn sanitize_log_stem(stem: &str) -> String {
-    let trimmed = stem.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-
-    let mut out = String::with_capacity(trimmed.len());
-    for ch in trimmed.chars() {
-        match ch {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => out.push(ch),
-            _ => out.push('_'),
-        }
-    }
-
-    out.trim_matches(['.', '-', '_']).to_string()
-}
-
 fn tool_to_info(tool: Tool) -> McpToolInfo {
     let input_schema = Value::Object((*tool.input_schema).clone());
     McpToolInfo {
@@ -524,46 +538,41 @@ async fn handle_connection(
 }
 
 async fn handle_request(manager: std::sync::Arc<McpManager>, request: McpRequest) -> McpResponse {
-    let request_id = request.request_id.clone();
-    let result = match request.action {
+    let McpRequest {
+        request_id,
+        server,
+        action,
+        payload,
+        timeout_ms,
+    } = request;
+    let result = match action {
         McpAction::ListServers => {
             let list = manager.list_servers();
-            serde_json::to_value(list).map_err(|err| McpManagerError::InvalidArguments {
-                reason: format!("failed to serialize servers: {err}"),
-            })
+            serialize_to_json_value(list, "servers")
         }
         McpAction::ListTools => {
-            let Some(server) = request.server.as_deref() else {
-                return McpResponse::err(request_id, "server is required for list_tools");
-            };
+            let server =
+                match require_server_for_action(&request_id, "list_tools", server.as_deref()) {
+                    Ok(server) => server,
+                    Err(response) => return response,
+                };
             manager
-                .list_tools(server, request.timeout_ms)
+                .list_tools(server, timeout_ms)
                 .await
-                .and_then(|tools| {
-                    serde_json::to_value(tools).map_err(|err| McpManagerError::InvalidArguments {
-                        reason: format!("failed to serialize tools: {err}"),
-                    })
-                })
+                .and_then(|tools| serialize_to_json_value(tools, "tools"))
         }
         McpAction::CallTool => {
-            let Some(server) = request.server.as_deref() else {
-                return McpResponse::err(request_id, "server is required for call_tool");
-            };
-            let payload = match request.payload {
-                Some(value) => serde_json::from_value::<McpCallToolPayload>(value).map_err(|err| {
-                    McpManagerError::InvalidArguments {
-                        reason: format!("invalid call_tool payload: {err}"),
-                    }
-                }),
-                None => Err(McpManagerError::InvalidArguments {
-                    reason: "missing call_tool payload".to_string(),
-                }),
-            };
+            let server =
+                match require_server_for_action(&request_id, "call_tool", server.as_deref()) {
+                    Ok(server) => server,
+                    Err(response) => return response,
+                };
+            let payload = parse_call_tool_payload(payload);
             let payload = match payload {
                 Ok(payload) => payload,
-                Err(err) => return McpResponse::err(request_id, err.to_string()),
+                Err(err) => return McpResponse::err(request_id.clone(), err.to_string()),
             };
-            manager.call_tool(server, payload, request.timeout_ms).await
+            manager.call_tool(server, payload, timeout_ms).await
         }
     };
 

@@ -170,6 +170,34 @@ pub fn substitute_template(template: &str, args: &HashMap<String, String>) -> St
     result
 }
 
+fn append_prompt_content(current_prompt: &mut String, content: &str) {
+    if content.trim().is_empty() {
+        return;
+    }
+    if !current_prompt.trim().is_empty() {
+        current_prompt.push_str("\n\n");
+    }
+    current_prompt.push_str(content);
+}
+
+fn append_prompt_file_if_exists(current_prompt: &mut String, path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    if let Ok(content) = std::fs::read_to_string(path) {
+        append_prompt_content(current_prompt, &content);
+    }
+}
+
+async fn append_prompt_file_if_exists_async(current_prompt: &mut String, path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    if let Ok(content) = tokio::fs::read_to_string(path).await {
+        append_prompt_content(current_prompt, &content);
+    }
+}
+
 /// Build system prompt from SystemPromptConfig.
 ///
 /// Combines agent.toml system_prompt with AGENTS.md files from multiple layers:
@@ -201,27 +229,11 @@ pub fn build_system_prompt_from_config(
 
     // 2. Append: global AGENTS.md
     let global_agents_md = config_dir.join("AGENTS.md");
-    if global_agents_md.exists()
-        && let Ok(content) = std::fs::read_to_string(&global_agents_md)
-        && !content.trim().is_empty()
-    {
-        if !current_prompt.trim().is_empty() {
-            current_prompt.push_str("\n\n");
-        }
-        current_prompt.push_str(&content);
-    }
+    append_prompt_file_if_exists(&mut current_prompt, &global_agents_md);
 
     // 3. Append: workspace AGENTS.md
     let workspace_agents_md = workspace_dir.join("AGENTS.md");
-    if workspace_agents_md.exists()
-        && let Ok(content) = std::fs::read_to_string(&workspace_agents_md)
-        && !content.trim().is_empty()
-    {
-        if !current_prompt.trim().is_empty() {
-            current_prompt.push_str("\n\n");
-        }
-        current_prompt.push_str(&content);
-    }
+    append_prompt_file_if_exists(&mut current_prompt, &workspace_agents_md);
 
     current_prompt
 }
@@ -259,27 +271,11 @@ pub async fn build_system_prompt_from_config_async(
 
     // 2. Append: global AGENTS.md
     let global_agents_md = config_dir.join("AGENTS.md");
-    if global_agents_md.exists()
-        && let Ok(content) = tokio::fs::read_to_string(&global_agents_md).await
-        && !content.trim().is_empty()
-    {
-        if !current_prompt.trim().is_empty() {
-            current_prompt.push_str("\n\n");
-        }
-        current_prompt.push_str(&content);
-    }
+    append_prompt_file_if_exists_async(&mut current_prompt, &global_agents_md).await;
 
     // 3. Append: workspace AGENTS.md
     let workspace_agents_md = workspace_dir.join("AGENTS.md");
-    if workspace_agents_md.exists()
-        && let Ok(content) = tokio::fs::read_to_string(&workspace_agents_md).await
-        && !content.trim().is_empty()
-    {
-        if !current_prompt.trim().is_empty() {
-            current_prompt.push_str("\n\n");
-        }
-        current_prompt.push_str(&content);
-    }
+    append_prompt_file_if_exists_async(&mut current_prompt, &workspace_agents_md).await;
 
     current_prompt
 }

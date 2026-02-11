@@ -30,9 +30,9 @@ use crate::tools::{
 pub type ExecuteResult = Result<Output, Final>;
 
 use crate::{
-    Agent, Block, ChatStreamUpdate, Config, Content, Message, OutputChunk, PromptResponseSender,
-    PromptSchema, SESSION_SOCKET_ENV, SessionEnv, Starter, StarterCommand, StarterError,
-    StarterEvent, ToolUse, bash_unsafe_ranges, bash_unsafe_reason, discover_starters,
+    Agent, Block, ChatResponse, ChatStreamUpdate, Config, Content, Message, OutputChunk,
+    PromptResponseSender, PromptSchema, SESSION_SOCKET_ENV, SessionEnv, Starter, StarterCommand,
+    StarterError, StarterEvent, ToolUse, bash_unsafe_ranges, bash_unsafe_reason, discover_starters,
     exec::StreamKind, parse_primary_command, workspace_dir,
 };
 
@@ -493,46 +493,24 @@ async fn execute_combo(
                                         thinking.clone(),
                                         cancel_token.clone(),
                                         move |update| {
-                                            match update {
-                                                ChatStreamUpdate::Reset => {
-                                                    thinking_seen_stream.store(
-                                                        false,
-                                                        std::sync::atomic::Ordering::Relaxed,
-                                                    );
-                                                    emit_combo_event(
-                                                        &on_event_stream,
-                                                        ComboEvent::PromptStreamReset {
-                                                            name: stream_name.clone(),
-                                                        },
-                                                    );
-                                                }
-                                                ChatStreamUpdate::Plain { index, text } => {
-                                                    emit_combo_event(
-                                                        &on_event_stream,
-                                                        ComboEvent::PromptStream {
-                                                            name: stream_name.clone(),
-                                                            index,
-                                                            kind: ComboEventStreamKind::Plain,
-                                                            text,
-                                                        },
-                                                    );
-                                                }
-                                                ChatStreamUpdate::Thinking { index, text } => {
-                                                    thinking_seen_stream.store(
-                                                        true,
-                                                        std::sync::atomic::Ordering::Relaxed,
-                                                    );
-                                                    emit_combo_event(
-                                                        &on_event_stream,
-                                                        ComboEvent::PromptStream {
-                                                            name: stream_name.clone(),
-                                                            index,
-                                                            kind: ComboEventStreamKind::Thinking,
-                                                            text,
-                                                        },
-                                                    );
-                                                }
+                                            if matches!(&update, ChatStreamUpdate::Thinking { .. })
+                                            {
+                                                thinking_seen_stream.store(
+                                                    true,
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                );
                                             }
+                                            if matches!(&update, ChatStreamUpdate::Reset) {
+                                                thinking_seen_stream.store(
+                                                    false,
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                );
+                                            }
+                                            emit_prompt_stream_update(
+                                                &on_event_stream,
+                                                &stream_name,
+                                                update,
+                                            );
                                         },
                                     )
                                     .await
@@ -735,6 +713,69 @@ fn emit_combo_event(on_event: &ComboEventCallback, event: ComboEvent) {
     if let Ok(mut f) = on_event.lock() {
         (*f)(&event);
     }
+}
+
+fn emit_prompt_stream_update(
+    on_event: &ComboEventCallback,
+    combo_name: &str,
+    update: ChatStreamUpdate,
+) {
+    match update {
+        ChatStreamUpdate::Reset => emit_combo_event(
+            on_event,
+            ComboEvent::PromptStreamReset {
+                name: combo_name.to_string(),
+            },
+        ),
+        ChatStreamUpdate::Plain { index, text } => emit_combo_event(
+            on_event,
+            ComboEvent::PromptStream {
+                name: combo_name.to_string(),
+                index,
+                kind: ComboEventStreamKind::Plain,
+                text,
+            },
+        ),
+        ChatStreamUpdate::Thinking { index, text } => emit_combo_event(
+            on_event,
+            ComboEvent::PromptStream {
+                name: combo_name.to_string(),
+                index,
+                kind: ComboEventStreamKind::Thinking,
+                text,
+            },
+        ),
+    }
+}
+
+async fn chat_with_history_for_combo(
+    agent: &mut Agent,
+    combo_name: &str,
+    cancel_token: CancellationToken,
+    on_event: &ComboEventCallback,
+) -> Result<(ChatResponse, bool), ComboReplyError> {
+    if agent.disable_stream_for_current_model() {
+        let response =
+            agent
+                .chat_with_history()
+                .await
+                .map_err(|e| ComboReplyError::ChatFailed {
+                    message: e.to_string(),
+                })?;
+        return Ok((response, false));
+    }
+
+    let on_event_stream = on_event.clone();
+    let stream_name = combo_name.to_string();
+    let response = agent
+        .chat_stream_with_history(cancel_token, move |update| {
+            emit_prompt_stream_update(&on_event_stream, &stream_name, update);
+        })
+        .await
+        .map_err(|e| ComboReplyError::ChatFailed {
+            message: e.to_string(),
+        })?;
+    Ok((response, true))
 }
 
 async fn emit_combo_transcript(on_event: &ComboEventCallback, name: &str, agent: &Agent) {
@@ -1200,62 +1241,15 @@ async fn handle_interactive_combo_reply(
         if cancel_token.is_cancelled() {
             return Err(ComboReplyError::Cancelled);
         }
-        let disable_stream = agent.disable_stream_for_current_model();
-        let response = if disable_stream {
-            agent
-                .chat_with_history()
-                .await
-                .map_err(|e| ComboReplyError::ChatFailed {
-                    message: e.to_string(),
-                })?
-        } else {
-            let on_event_stream = on_event.clone();
-            let stream_name = combo_name.to_string();
-            agent
-                .chat_stream_with_history(cancel_token.clone(), move |update| match update {
-                    ChatStreamUpdate::Reset => {
-                        emit_combo_event(
-                            &on_event_stream,
-                            ComboEvent::PromptStreamReset {
-                                name: stream_name.clone(),
-                            },
-                        );
-                    }
-                    ChatStreamUpdate::Plain { index, text } => {
-                        emit_combo_event(
-                            &on_event_stream,
-                            ComboEvent::PromptStream {
-                                name: stream_name.clone(),
-                                index,
-                                kind: ComboEventStreamKind::Plain,
-                                text,
-                            },
-                        );
-                    }
-                    ChatStreamUpdate::Thinking { index, text } => {
-                        emit_combo_event(
-                            &on_event_stream,
-                            ComboEvent::PromptStream {
-                                name: stream_name.clone(),
-                                index,
-                                kind: ComboEventStreamKind::Thinking,
-                                text,
-                            },
-                        );
-                    }
-                })
-                .await
-                .map_err(|e| ComboReplyError::ChatFailed {
-                    message: e.to_string(),
-                })?
-        };
+        let (response, used_stream) =
+            chat_with_history_for_combo(agent, combo_name, cancel_token.clone(), on_event).await?;
 
         let tool_uses = extract_tool_uses(&response.message);
         if tool_uses.is_empty() {
             empty_tool_use_turns += 1;
             let reminder = build_interactive_offload_reply_reminder(schemas);
             let should_pause_for_feedback = empty_tool_use_turns > AUTO_IMPLICIT_NUDGE_LIMIT;
-            if disable_stream {
+            if !used_stream {
                 let response_text = extract_text_response(&response.message);
                 if should_pause_for_feedback && !response_text.trim().is_empty() {
                     emit_combo_event(
@@ -1683,54 +1677,8 @@ async fn handle_offload_combo_reply(
         .append_message(Message::user(Content::Text(directive.to_string())))
         .await;
 
-    let chat_response = if agent.disable_stream_for_current_model() {
-        agent
-            .chat_with_history()
-            .await
-            .map_err(|e| ComboReplyError::ChatFailed {
-                message: e.to_string(),
-            })?
-    } else {
-        let on_event_stream = on_event.clone();
-        let stream_name = combo_name.to_string();
-        agent
-            .chat_stream_with_history(cancel_token.clone(), move |update| match update {
-                ChatStreamUpdate::Reset => {
-                    emit_combo_event(
-                        &on_event_stream,
-                        ComboEvent::PromptStreamReset {
-                            name: stream_name.clone(),
-                        },
-                    );
-                }
-                ChatStreamUpdate::Plain { index, text } => {
-                    emit_combo_event(
-                        &on_event_stream,
-                        ComboEvent::PromptStream {
-                            name: stream_name.clone(),
-                            index,
-                            kind: ComboEventStreamKind::Plain,
-                            text,
-                        },
-                    );
-                }
-                ChatStreamUpdate::Thinking { index, text } => {
-                    emit_combo_event(
-                        &on_event_stream,
-                        ComboEvent::PromptStream {
-                            name: stream_name.clone(),
-                            index,
-                            kind: ComboEventStreamKind::Thinking,
-                            text,
-                        },
-                    );
-                }
-            })
-            .await
-            .map_err(|e| ComboReplyError::ChatFailed {
-                message: e.to_string(),
-            })?
-    };
+    let (chat_response, _) =
+        chat_with_history_for_combo(agent, combo_name, cancel_token.clone(), on_event).await?;
 
     let blocks = match &chat_response.message.content {
         Content::Multiple(blocks) => blocks.as_slice(),

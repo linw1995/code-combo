@@ -7,7 +7,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufReader},
 };
 
-use super::{ExecuteResult, Final, Input, Output, TextEdit, Tool};
+use super::{ExecuteResult, Final, Input, Output, TextEdit, Tool, parse_relative_path};
 use crate::AppliedTextEdit;
 
 #[derive(Default)]
@@ -94,14 +94,7 @@ impl StrReplaceTool {
             expected_replacements,
         } = serde_json::from_value(input).map_err(|err| format!("Invalid input format: {err}"))?;
 
-        // Check if the path is absolute
-        let path = path
-            .parse::<std::path::PathBuf>()
-            .map_err(|err| format!("Invalid path format: {err}"))?;
-
-        if path.is_absolute() {
-            return Err("Path must be relative to the working directory, not absolute".into());
-        }
+        let path = parse_relative_path(path)?;
 
         if old_str.is_empty() {
             Ok(TextEdit::new(path, String::new(), new_str.to_string()))
