@@ -12,10 +12,10 @@ fn default_logs_dir() -> PathBuf {
     PathBuf::from(".coco").join("logs")
 }
 
-fn sanitize_file_stem(stem: &str) -> String {
+pub(crate) fn sanitize_log_stem(stem: &str) -> String {
     let trimmed = stem.trim();
     if trimmed.is_empty() {
-        return "coco".to_string();
+        return String::new();
     }
 
     let mut out = String::with_capacity(trimmed.len());
@@ -42,7 +42,12 @@ pub fn init_file_logging(log_name: &str) -> Result<PathBuf> {
     fs::create_dir_all(&logs_dir)
         .whatever_context(format!("failed to create logs dir {}", logs_dir.display()))?;
 
-    let file_stem = sanitize_file_stem(log_name);
+    let file_stem = sanitize_log_stem(log_name);
+    let file_stem = if file_stem.is_empty() {
+        "coco".to_string()
+    } else {
+        file_stem
+    };
     let file_name = ensure_log_extension(&file_stem);
     let log_path = logs_dir.join(file_name);
 
@@ -80,4 +85,20 @@ pub fn init_file_logging_best_effort(log_name: &str) -> Option<PathBuf> {
 
 pub fn logs_dir() -> &'static Path {
     Path::new(".coco/logs")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_log_stem;
+
+    #[test]
+    fn sanitize_log_stem_replaces_unsupported_characters() {
+        assert_eq!(sanitize_log_stem(" mcp/server:dev "), "mcp_server_dev");
+    }
+
+    #[test]
+    fn sanitize_log_stem_trims_edge_separators() {
+        assert_eq!(sanitize_log_stem(".__-name-__."), "name");
+        assert_eq!(sanitize_log_stem("   "), "");
+    }
 }

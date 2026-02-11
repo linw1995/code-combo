@@ -102,8 +102,7 @@ impl Config {
 
     pub fn request_options_for_model(&self, model: &str) -> RequestOptions {
         let mut options = RequestOptions::default();
-        let builtin = presets::builtin_model_presets();
-        apply_model_presets(&mut options, &builtin, model);
+        apply_model_presets(&mut options, presets::builtin_model_presets(), model);
         apply_model_presets(&mut options, &self.model_presets, model);
         options
     }

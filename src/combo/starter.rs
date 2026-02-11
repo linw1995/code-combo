@@ -372,12 +372,9 @@ fn build_combo_from_session(
     session_state: Option<SessionState>,
 ) -> Result<Combo, StarterError> {
     if let Some(state) = session_state {
-        let metadata = state.metadata.ok_or_else(|| {
-            InvalidSnafu {
-                reason: "metadata not received from session".to_string(),
-            }
-            .build()
-        })?;
+        let metadata = state
+            .metadata
+            .ok_or_else(|| invalid_error("metadata not received from session"))?;
         return Ok(Combo {
             metadata: ComboMetadata {
                 name: metadata.name,
@@ -387,6 +384,38 @@ fn build_combo_from_session(
     }
 
     Ok(parse_combo(command))
+}
+
+fn invalid_error(reason: impl Into<String>) -> StarterError {
+    InvalidSnafu {
+        reason: reason.into(),
+    }
+    .build()
+}
+
+fn reply_validation_error(error: impl Into<String>) -> ReplyValidation {
+    ReplyValidation {
+        success: false,
+        error: Some(error.into()),
+        response: None,
+    }
+}
+
+fn reply_validation_success(response: String) -> ReplyValidation {
+    ReplyValidation {
+        success: true,
+        error: None,
+        response: Some(response),
+    }
+}
+
+async fn send_reply_validation_best_effort(
+    conn: &mut ServerConnection,
+    validation: ReplyValidation,
+) {
+    let _ = conn
+        .send_server_message(&ServerMessage::ReplyValidation(validation))
+        .await;
 }
 
 /// Helper macro to send a failed event and return early with the error.
@@ -437,10 +466,7 @@ fn execute_command(
                 Err(error) => fail_early!(event_tx, command, error),
             },
             None => {
-                let error = InvalidSnafu {
-                    reason: "session env is required for starter execution".to_string(),
-                }
-                .build();
+                let error = invalid_error("session env is required for starter execution");
                 fail_early!(event_tx, command, error);
             }
         };
@@ -460,10 +486,7 @@ fn execute_command(
             Err(err) => {
                 let error = match err.kind() {
                     ErrorKind::PermissionDenied => NotExcutableSnafu.build(),
-                    _ => InvalidSnafu {
-                        reason: format!("excuting error: {err}"),
-                    }
-                    .build(),
+                    _ => invalid_error(format!("excuting error: {err}")),
                 };
                 fail_early!(event_tx, command, error);
             }
@@ -531,13 +554,10 @@ fn execute_command(
                     if let Some(task) = session_server.take() {
                         task.abort();
                     }
-                    Err(InvalidSnafu {
-                        reason: format!(
-                            "starter exited with status {:?} during discovery",
-                            status.code()
-                        ),
-                    }
-                    .build())
+                    Err(invalid_error(format!(
+                        "starter exited with status {:?} during discovery",
+                        status.code()
+                    )))
                 } else {
                     if discovery {
                         if let Some(task) = session_server.take() {
@@ -555,10 +575,8 @@ fn execute_command(
                             Ok(Ok(state)) => Some(state),
                             Ok(Err(err)) => fail_early!(event_tx, command, err),
                             Err(err) => {
-                                let error = InvalidSnafu {
-                                    reason: format!("session server join error: {err}"),
-                                }
-                                .build();
+                                let error =
+                                    invalid_error(format!("session server join error: {err}"));
                                 fail_early!(event_tx, command, error);
                             }
                         }
@@ -570,10 +588,7 @@ fn execute_command(
                 }
             }
             Err(err) => {
-                let error = InvalidSnafu {
-                    reason: format!("excuting error: {err}"),
-                }
-                .build();
+                let error = invalid_error(format!("excuting error: {err}"));
                 if let Some(task) = session_server.take() {
                     task.abort();
                 }
@@ -699,10 +714,9 @@ async fn handle_session_connection(
                 {
                     break;
                 }
-                return Err(InvalidSnafu {
-                    reason: format!("failed to read session message: {err}"),
-                }
-                .build());
+                return Err(invalid_error(format!(
+                    "failed to read session message: {err}"
+                )));
             }
         };
 
@@ -710,41 +724,33 @@ async fn handle_session_connection(
             ClientMessage::Metadata(payload) => {
                 if !first_message {
                     let _ = conn.interrupt().await;
-                    return Err(InvalidSnafu {
-                        reason: "metadata must be the first and only metadata message".to_string(),
-                    }
-                    .build());
+                    return Err(invalid_error(
+                        "metadata must be the first and only metadata message",
+                    ));
                 }
                 {
                     let mut guard = state.lock().await;
                     if guard.metadata.is_some() {
                         let _ = conn.interrupt().await;
-                        return Err(InvalidSnafu {
-                            reason: "metadata must be the first and only metadata message"
-                                .to_string(),
-                        }
-                        .build());
+                        return Err(invalid_error(
+                            "metadata must be the first and only metadata message",
+                        ));
                     }
                     guard.metadata = Some(payload);
                 }
                 conn.send_server_message(&ServerMessage::Metadata(MetadataResponse { discovery }))
                     .await
                     .map_err(|err| {
-                        InvalidSnafu {
-                            reason: format!("failed to send metadata response: {err}"),
-                        }
-                        .build()
+                        invalid_error(format!("failed to send metadata response: {err}"))
                     })?;
                 first_message = false;
             }
             ClientMessage::RecordStart(payload) => {
                 if discovery {
                     let _ = conn.interrupt().await;
-                    return Err(InvalidSnafu {
-                        reason: "record commands are not allowed in discovery or before metadata"
-                            .to_string(),
-                    }
-                    .build());
+                    return Err(invalid_error(
+                        "record commands are not allowed in discovery or before metadata",
+                    ));
                 }
                 let (record_index, name) = {
                     let mut guard = state.lock().await;
@@ -755,12 +761,9 @@ async fn handle_session_connection(
                     if metadata_name.is_none() {
                         drop(guard);
                         let _ = conn.interrupt().await;
-                        return Err(InvalidSnafu {
-                            reason:
-                                "record commands are not allowed in discovery or before metadata"
-                                    .to_string(),
-                        }
-                        .build());
+                        return Err(invalid_error(
+                            "record commands are not allowed in discovery or before metadata",
+                        ));
                     }
                     let record_index = guard.next_event_index();
                     (record_index, metadata_name.unwrap())
@@ -793,10 +796,9 @@ async fn handle_session_connection(
             ClientMessage::RecordChunk(chunk) => {
                 if discovery {
                     let _ = conn.interrupt().await;
-                    return Err(InvalidSnafu {
-                        reason: "record chunk is not allowed during discovery".to_string(),
-                    }
-                    .build());
+                    return Err(invalid_error(
+                        "record chunk is not allowed during discovery",
+                    ));
                 }
                 let stream = chunk.stream;
                 let lines = chunk.lines;
@@ -829,10 +831,7 @@ async fn handle_session_connection(
             }) => {
                 if discovery {
                     let _ = conn.interrupt().await;
-                    return Err(InvalidSnafu {
-                        reason: "record end is not allowed during discovery".to_string(),
-                    }
-                    .build());
+                    return Err(invalid_error("record end is not allowed during discovery"));
                 }
                 let Some(mut record) = current_record.take() else {
                     continue;
@@ -862,39 +861,26 @@ async fn handle_session_connection(
             ClientMessage::Prompt(payload) => {
                 let metadata = { state.lock().await.metadata.clone() };
                 if metadata.is_none() {
-                    return Err(InvalidSnafu {
-                        reason: "prompt is not allowed before metadata".to_string(),
-                    }
-                    .build());
+                    return Err(invalid_error("prompt is not allowed before metadata"));
                 }
                 if payload.interactive && !payload.reply {
-                    return Err(InvalidSnafu {
-                        reason: "interactive prompt requires reply mode".to_string(),
-                    }
-                    .build());
+                    return Err(invalid_error("interactive prompt requires reply mode"));
                 }
                 if payload.reply {
                     if discovery {
-                        return Err(InvalidSnafu {
-                            reason: "prompt reply is not allowed during discovery".to_string(),
-                        }
-                        .build());
+                        return Err(invalid_error(
+                            "prompt reply is not allowed during discovery",
+                        ));
                     }
                     if payload.schemas.is_empty() {
-                        return Err(InvalidSnafu {
-                            reason: "prompt reply requires schemas".to_string(),
-                        }
-                        .build());
+                        return Err(invalid_error("prompt reply requires schemas"));
                     }
                     let (response_tx, response_rx) = oneshot::channel();
                     let responder = PromptResponseSender::new(response_tx);
                     {
                         let mut guard = state.lock().await;
                         if guard.pending_reply_schemas.is_some() {
-                            return Err(InvalidSnafu {
-                                reason: "prompt reply already in progress".to_string(),
-                            }
-                            .build());
+                            return Err(invalid_error("prompt reply already in progress"));
                         }
                         guard.pending_reply_schemas = Some(payload.schemas.clone());
                         guard.pending_reply_responder = Some(responder.clone());
@@ -912,10 +898,7 @@ async fn handle_session_connection(
                         .is_err()
                     {
                         clear_pending_reply(&state).await;
-                        return Err(InvalidSnafu {
-                            reason: "prompt responder is not available".to_string(),
-                        }
-                        .build());
+                        return Err(invalid_error("prompt responder is not available"));
                     }
                     {
                         let mut guard = state.lock().await;
@@ -925,30 +908,21 @@ async fn handle_session_connection(
                         Ok(response) => response,
                         Err(_) => {
                             clear_pending_reply(&state).await;
-                            return Err(InvalidSnafu {
-                                reason: "prompt responder dropped response".to_string(),
-                            }
-                            .build());
+                            return Err(invalid_error("prompt responder dropped response"));
                         }
                     };
                     let response = match response {
                         Ok(response) => response,
                         Err(err) => {
                             clear_pending_reply(&state).await;
-                            return Err(InvalidSnafu {
-                                reason: format!("prompt responder failed: {err}"),
-                            }
-                            .build());
+                            return Err(invalid_error(format!("prompt responder failed: {err}")));
                         }
                     };
                     clear_pending_reply(&state).await;
                     conn.send_server_message(&ServerMessage::PromptResponse(response))
                         .await
                         .map_err(|err| {
-                            InvalidSnafu {
-                                reason: format!("failed to send prompt response: {err}"),
-                            }
-                            .build()
+                            invalid_error(format!("failed to send prompt response: {err}"))
                         })?;
                 } else if !discovery {
                     event_tx
@@ -966,35 +940,26 @@ async fn handle_session_connection(
             }
             ClientMessage::Reply(payload) => {
                 if discovery {
-                    let _ = conn
-                        .send_server_message(&ServerMessage::ReplyValidation(ReplyValidation {
-                            success: false,
-                            error: Some("reply is not allowed during discovery".to_string()),
-                            response: None,
-                        }))
-                        .await;
+                    send_reply_validation_best_effort(
+                        &mut conn,
+                        reply_validation_error("reply is not allowed during discovery"),
+                    )
+                    .await;
                     continue;
                 }
                 let schemas = { state.lock().await.pending_reply_schemas.clone() };
                 let Some(schemas) = schemas else {
-                    let _ = conn
-                        .send_server_message(&ServerMessage::ReplyValidation(ReplyValidation {
-                            success: false,
-                            error: Some("reply is not expected in combo session".to_string()),
-                            response: None,
-                        }))
-                        .await;
+                    send_reply_validation_best_effort(
+                        &mut conn,
+                        reply_validation_error("reply is not expected in combo session"),
+                    )
+                    .await;
                     continue;
                 };
                 let parsed = match parse_reply_fields(&payload.fields, &schemas) {
                     Ok(parsed) => parsed,
                     Err(err) => {
-                        let _ = conn
-                            .send_server_message(&ServerMessage::ReplyValidation(ReplyValidation {
-                                success: false,
-                                error: Some(err),
-                                response: None,
-                            }))
+                        send_reply_validation_best_effort(&mut conn, reply_validation_error(err))
                             .await;
                         continue;
                     }
@@ -1002,13 +967,13 @@ async fn handle_session_connection(
                 let response = match serde_json::to_string(&parsed) {
                     Ok(value) => value,
                     Err(err) => {
-                        let _ = conn
-                            .send_server_message(&ServerMessage::ReplyValidation(ReplyValidation {
-                                success: false,
-                                error: Some(format!("failed to serialize reply output: {err}")),
-                                response: None,
-                            }))
-                            .await;
+                        send_reply_validation_best_effort(
+                            &mut conn,
+                            reply_validation_error(format!(
+                                "failed to serialize reply output: {err}"
+                            )),
+                        )
+                        .await;
                         continue;
                     }
                 };
@@ -1019,31 +984,18 @@ async fn handle_session_connection(
                         let _ = responder.send(Ok(response.clone()));
                     }
                 }
-                conn.send_server_message(&ServerMessage::ReplyValidation(ReplyValidation {
-                    success: true,
-                    error: None,
-                    response: Some(response),
-                }))
+                conn.send_server_message(&ServerMessage::ReplyValidation(
+                    reply_validation_success(response),
+                ))
                 .await
-                .map_err(|err| {
-                    InvalidSnafu {
-                        reason: format!("failed to send reply validation: {err}"),
-                    }
-                    .build()
-                })?;
+                .map_err(|err| invalid_error(format!("failed to send reply validation: {err}")))?;
                 first_message = false;
             }
             ClientMessage::ComboRun(_) => {
-                return Err(InvalidSnafu {
-                    reason: "combo run is not allowed in combo session".to_string(),
-                }
-                .build());
+                return Err(invalid_error("combo run is not allowed in combo session"));
             }
             ClientMessage::Mcp(_) => {
-                return Err(InvalidSnafu {
-                    reason: "mcp request is not allowed in combo session".to_string(),
-                }
-                .build());
+                return Err(invalid_error("mcp request is not allowed in combo session"));
             }
         }
     }
@@ -1106,10 +1058,7 @@ async fn run_session_server(
 
     let state = state.lock().await.clone();
     if state.metadata.is_none() {
-        return Err(InvalidSnafu {
-            reason: "metadata not received from session".to_string(),
-        }
-        .build());
+        return Err(invalid_error("metadata not received from session"));
     }
 
     Ok(state)

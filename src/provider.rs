@@ -2,7 +2,7 @@ mod anthropic;
 mod openai;
 mod types;
 
-use std::{pin::Pin, time::Duration};
+use std::{future::Future, pin::Pin, time::Duration};
 
 use crate::StreamError;
 use futures_core::Stream;
@@ -58,43 +58,43 @@ impl Client {
         thinking: Option<Thinking>,
         request_options: &RequestOptions,
     ) -> Result<MessagesResponse> {
-        let result: Result<MessagesResponse> = match self {
-            Client::Anthropic(client) => {
-                let temperature = request_options.temperature.map(f64::from);
-                let max_tokens = request_options.max_tokens;
-                let response = client
-                    .messages()
-                    .maybe_system_prompt(system_prompt)
-                    .conversations(
-                        conversations
-                            .into_iter()
-                            .map(anthropic_api::Message::from)
-                            .collect(),
-                    )
-                    .tools(tools.into_iter().map(anthropic_api::Tool::from).collect())
-                    .maybe_thinking(thinking.map(anthropic_api::Thinking::from))
-                    .maybe_temperature(temperature)
-                    .maybe_max_tokens(max_tokens)
-                    .retry_config(anthropic_retry_config(request_options))
-                    .call()
-                    .await
-                    .whatever_context_display("failed to send messages")?;
-                Ok(response.into())
+        complete_with_retry_status(request_options, async {
+            match self {
+                Client::Anthropic(client) => {
+                    let (temperature, max_tokens) = anthropic_request_params(request_options);
+                    let response = client
+                        .messages()
+                        .maybe_system_prompt(system_prompt)
+                        .conversations(
+                            conversations
+                                .into_iter()
+                                .map(anthropic_api::Message::from)
+                                .collect(),
+                        )
+                        .tools(tools.into_iter().map(anthropic_api::Tool::from).collect())
+                        .maybe_thinking(thinking.map(anthropic_api::Thinking::from))
+                        .maybe_temperature(temperature)
+                        .maybe_max_tokens(max_tokens)
+                        .retry_config(anthropic_retry_config(request_options))
+                        .call()
+                        .await
+                        .whatever_context_display("failed to send messages")?;
+                    Ok(response.into())
+                }
+                Client::OpenAI(client) => openai::messages(
+                    client,
+                    system_prompt,
+                    conversations,
+                    tools,
+                    None,
+                    thinking,
+                    request_options,
+                )
+                .await
+                .whatever_context_display("failed to send messages"),
             }
-            Client::OpenAI(client) => openai::messages(
-                client,
-                system_prompt,
-                conversations,
-                tools,
-                None,
-                thinking,
-                request_options,
-            )
-            .await
-            .whatever_context_display("failed to send messages"),
-        };
-        notify_retry_finished(request_options, result.is_ok());
-        result
+        })
+        .await
     }
 
     pub async fn messages_stream(
@@ -105,48 +105,46 @@ impl Client {
         thinking: Option<Thinking>,
         request_options: &RequestOptions,
     ) -> Result<MessagesStream> {
-        let result: Result<MessagesStream> = match self {
-            Client::Anthropic(client) => {
-                let temperature = request_options.temperature.map(f64::from);
-                let max_tokens = request_options.max_tokens;
-                let stream = client
-                    .messages_stream()
-                    .maybe_system_prompt(system_prompt)
-                    .conversations(
-                        conversations
-                            .into_iter()
-                            .map(anthropic_api::Message::from)
-                            .collect(),
+        complete_with_retry_status(request_options, async {
+            match self {
+                Client::Anthropic(client) => {
+                    let (temperature, max_tokens) = anthropic_request_params(request_options);
+                    let stream = client
+                        .messages_stream()
+                        .maybe_system_prompt(system_prompt)
+                        .conversations(
+                            conversations
+                                .into_iter()
+                                .map(anthropic_api::Message::from)
+                                .collect(),
+                        )
+                        .tools(tools.into_iter().map(anthropic_api::Tool::from).collect())
+                        .maybe_thinking(thinking.map(anthropic_api::Thinking::from))
+                        .maybe_temperature(temperature)
+                        .maybe_max_tokens(max_tokens)
+                        .retry_config(anthropic_retry_config(request_options))
+                        .call()
+                        .await
+                        .whatever_context_display("failed to send messages stream")?;
+                    Ok(map_anthropic_stream(stream))
+                }
+                Client::OpenAI(client) => {
+                    let stream = openai::messages_stream(
+                        client,
+                        system_prompt,
+                        conversations,
+                        tools,
+                        None,
+                        thinking,
+                        request_options,
                     )
-                    .tools(tools.into_iter().map(anthropic_api::Tool::from).collect())
-                    .maybe_thinking(thinking.map(anthropic_api::Thinking::from))
-                    .maybe_temperature(temperature)
-                    .maybe_max_tokens(max_tokens)
-                    .retry_config(anthropic_retry_config(request_options))
-                    .call()
                     .await
                     .whatever_context_display("failed to send messages stream")?;
-                let mapped =
-                    stream.map(|event| event.map(Into::into).map_err(map_anthropic_stream_error));
-                Ok(Box::pin(mapped))
+                    Ok(Box::pin(stream) as MessagesStream)
+                }
             }
-            Client::OpenAI(client) => {
-                let stream = openai::messages_stream(
-                    client,
-                    system_prompt,
-                    conversations,
-                    tools,
-                    None,
-                    thinking,
-                    request_options,
-                )
-                .await
-                .whatever_context_display("failed to send messages stream")?;
-                Ok(Box::pin(stream))
-            }
-        };
-        notify_retry_finished(request_options, result.is_ok());
-        result
+        })
+        .await
     }
 
     pub async fn messages_with_tool_choice(
@@ -158,42 +156,42 @@ impl Client {
         thinking: Option<Thinking>,
         request_options: &RequestOptions,
     ) -> Result<MessagesResponse> {
-        let result: Result<MessagesResponse> = match self {
-            Client::Anthropic(client) => {
-                let temperature = request_options.temperature.map(f64::from);
-                let max_tokens = request_options.max_tokens;
-                let response = client
-                    .messages_with_tool_choice(
-                        system_prompt,
-                        conversations
-                            .into_iter()
-                            .map(anthropic_api::Message::from)
-                            .collect(),
-                        tools.into_iter().map(anthropic_api::Tool::from).collect(),
-                        tool_choice.into(),
-                        thinking.map(anthropic_api::Thinking::from),
-                        temperature,
-                        max_tokens,
-                        anthropic_retry_config(request_options),
-                    )
-                    .await
-                    .whatever_context_display("failed to request tool choice")?;
-                Ok(response.into())
+        complete_with_retry_status(request_options, async {
+            match self {
+                Client::Anthropic(client) => {
+                    let (temperature, max_tokens) = anthropic_request_params(request_options);
+                    let response = client
+                        .messages_with_tool_choice(
+                            system_prompt,
+                            conversations
+                                .into_iter()
+                                .map(anthropic_api::Message::from)
+                                .collect(),
+                            tools.into_iter().map(anthropic_api::Tool::from).collect(),
+                            tool_choice.into(),
+                            thinking.map(anthropic_api::Thinking::from),
+                            temperature,
+                            max_tokens,
+                            anthropic_retry_config(request_options),
+                        )
+                        .await
+                        .whatever_context_display("failed to request tool choice")?;
+                    Ok(response.into())
+                }
+                Client::OpenAI(client) => openai::messages(
+                    client,
+                    system_prompt,
+                    conversations,
+                    tools,
+                    Some(tool_choice),
+                    thinking,
+                    request_options,
+                )
+                .await
+                .whatever_context_display("failed to request tool choice"),
             }
-            Client::OpenAI(client) => openai::messages(
-                client,
-                system_prompt,
-                conversations,
-                tools,
-                Some(tool_choice),
-                thinking,
-                request_options,
-            )
-            .await
-            .whatever_context_display("failed to request tool choice"),
-        };
-        notify_retry_finished(request_options, result.is_ok());
-        result
+        })
+        .await
     }
 
     pub async fn messages_stream_with_tool_choice(
@@ -205,48 +203,55 @@ impl Client {
         thinking: Option<Thinking>,
         request_options: &RequestOptions,
     ) -> Result<MessagesStream> {
-        let result: Result<MessagesStream> = match self {
-            Client::Anthropic(client) => {
-                let temperature = request_options.temperature.map(f64::from);
-                let max_tokens = request_options.max_tokens;
-                let stream = client
-                    .messages_stream_with_tool_choice(
+        complete_with_retry_status(request_options, async {
+            match self {
+                Client::Anthropic(client) => {
+                    let (temperature, max_tokens) = anthropic_request_params(request_options);
+                    let stream = client
+                        .messages_stream_with_tool_choice(
+                            system_prompt,
+                            conversations
+                                .into_iter()
+                                .map(anthropic_api::Message::from)
+                                .collect(),
+                            tools.into_iter().map(anthropic_api::Tool::from).collect(),
+                            tool_choice.into(),
+                            thinking.map(anthropic_api::Thinking::from),
+                            temperature,
+                            max_tokens,
+                            anthropic_retry_config(request_options),
+                        )
+                        .await
+                        .whatever_context_display("failed to request tool choice stream")?;
+                    Ok(map_anthropic_stream(stream))
+                }
+                Client::OpenAI(client) => {
+                    let stream = openai::messages_stream(
+                        client,
                         system_prompt,
-                        conversations
-                            .into_iter()
-                            .map(anthropic_api::Message::from)
-                            .collect(),
-                        tools.into_iter().map(anthropic_api::Tool::from).collect(),
-                        tool_choice.into(),
-                        thinking.map(anthropic_api::Thinking::from),
-                        temperature,
-                        max_tokens,
-                        anthropic_retry_config(request_options),
+                        conversations,
+                        tools,
+                        Some(tool_choice),
+                        thinking,
+                        request_options,
                     )
                     .await
                     .whatever_context_display("failed to request tool choice stream")?;
-                let mapped =
-                    stream.map(|event| event.map(Into::into).map_err(map_anthropic_stream_error));
-                Ok(Box::pin(mapped))
+                    Ok(Box::pin(stream) as MessagesStream)
+                }
             }
-            Client::OpenAI(client) => {
-                let stream = openai::messages_stream(
-                    client,
-                    system_prompt,
-                    conversations,
-                    tools,
-                    Some(tool_choice),
-                    thinking,
-                    request_options,
-                )
-                .await
-                .whatever_context_display("failed to request tool choice stream")?;
-                Ok(Box::pin(stream))
-            }
-        };
-        notify_retry_finished(request_options, result.is_ok());
-        result
+        })
+        .await
     }
+}
+
+async fn complete_with_retry_status<T, F>(request_options: &RequestOptions, op: F) -> Result<T>
+where
+    F: Future<Output = Result<T>>,
+{
+    let result = op.await;
+    notify_retry_finished(request_options, result.is_ok());
+    result
 }
 
 fn notify_retry_finished(request_options: &RequestOptions, success: bool) {
@@ -273,6 +278,27 @@ fn anthropic_retry_config(request_options: &RequestOptions) -> anthropic_api::Re
         max_delay: Duration::from_millis(request_options.retry_max_delay_ms),
         notifier,
     }
+}
+
+fn anthropic_request_params(request_options: &RequestOptions) -> (Option<f64>, Option<usize>) {
+    (
+        request_options.temperature.map(f64::from),
+        request_options.max_tokens,
+    )
+}
+
+fn map_anthropic_stream<S>(stream: S) -> MessagesStream
+where
+    S: Stream<
+            Item = std::result::Result<
+                anthropic_api::MessagesStreamEvent,
+                anthropic_api::StreamError,
+            >,
+        > + Send
+        + 'static,
+{
+    let mapped = stream.map(|event| event.map(Into::into).map_err(map_anthropic_stream_error));
+    Box::pin(mapped)
 }
 
 fn map_anthropic_stream_error(err: anthropic_api::StreamError) -> StreamError {

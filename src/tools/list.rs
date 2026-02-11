@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::fs;
 
-use super::{ExecuteResult, Final, Input, Tool};
+use super::{ExecuteResult, Final, Input, Tool, parse_relative_path};
 
 #[derive(Default)]
 pub struct ListTool {}
@@ -70,12 +70,7 @@ impl Tool for ListTool {
             return err_msg!("Exceeded maximum entry limit for listing");
         }
 
-        let path = path
-            .parse::<std::path::PathBuf>()
-            .map_err(|err| format!("Invalid path format: {err}"))?;
-        if path.is_absolute() {
-            return err_msg!("Path must be relative to the working directory, not absolute");
-        }
+        let path = parse_relative_path(path)?;
 
         let metadata = fs::symlink_metadata(&path)
             .await

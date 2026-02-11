@@ -18,14 +18,15 @@ const CTRL_C_WINDOW: Duration = Duration::from_secs(2);
 pub enum ChatState {
     #[default]
     Ready,
-    Procesing,
+    #[serde(alias = "Procesing")]
+    Processing,
 }
 
 impl std::fmt::Display for ChatState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Ready => f.write_str("Ready"),
-            Self::Procesing => f.write_str("Procesing"),
+            Self::Processing => f.write_str("Processing"),
         }
     }
 }

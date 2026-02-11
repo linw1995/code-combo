@@ -197,14 +197,15 @@ impl Default for Inner {
 enum ChatState {
     #[default]
     Ready,
-    Procesing,
+    #[serde(alias = "Procesing")]
+    Processing,
 }
 
 impl std::fmt::Display for ChatState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Ready => f.write_str("Ready"),
-            Self::Procesing => f.write_str("Procesing"),
+            Self::Processing => f.write_str("Processing"),
         }
     }
 }
@@ -428,7 +429,7 @@ impl Chat<'static> {
         if state.focus == Focus::ShortcutHints {
             state.focus = self.prev_focus.clone().unwrap_or_default();
         }
-        if state.state == ChatState::Procesing {
+        if state.state == ChatState::Processing {
             // Persist Ready to avoid restoring a stale processing state.
             state.state = ChatState::Ready;
         }
@@ -1230,8 +1231,8 @@ impl Chat<'static> {
     }
 
     fn set_processing(&mut self) {
-        if self.state.state != ChatState::Procesing {
-            self.state.write().state = ChatState::Procesing;
+        if self.state.state != ChatState::Processing {
+            self.state.write().state = ChatState::Processing;
         }
     }
 
@@ -1645,7 +1646,7 @@ impl Chat<'static> {
             ChatState::Ready => {
                 Line::from(Span::styled(format!(" {state} "), theme.ui.status_ready))
             }
-            ChatState::Procesing => Line::from(vec![
+            ChatState::Processing => Line::from(vec![
                 Span::raw(" "),
                 Throbber::default()
                     .throbber_set(BRAILLE_EIGHT_DOUBLE)
@@ -2468,7 +2469,7 @@ impl Component for Chat<'static> {
     fn on_tick(&mut self) {
         self.cancellation_guard.on_trick();
 
-        if self.state.state == ChatState::Procesing {
+        if self.state.state == ChatState::Processing {
             self.indicator.calc_next();
             global::signal_dirty();
         }

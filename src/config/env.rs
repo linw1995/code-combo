@@ -15,14 +15,15 @@ impl EnvString {
     pub fn get(&mut self) -> Result<&str> {
         match self {
             EnvString::EnvVar { name, value } => {
-                if let Some(value) = value {
-                    return Ok(value.as_str());
-                } else {
+                if value.is_none() {
                     let value_from_env = std::env::var(&name)
                         .whatever_context(format!("failed to get {name} from env"))?;
                     *value = Some(value_from_env);
                 }
-                Ok(value.as_ref().unwrap().as_str())
+                match value.as_deref() {
+                    Some(cached) => Ok(cached),
+                    None => unreachable!("env value should be cached after loading"),
+                }
             }
             EnvString::String(value) => Ok(value),
         }

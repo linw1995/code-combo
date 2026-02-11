@@ -343,6 +343,31 @@ impl Agent {
         *self.messages.lock().await = messages.to_vec();
     }
 
+    async fn build_chat_response_from_blocks(
+        &mut self,
+        blocks: Vec<Block>,
+        stop_reason: Option<StopReason>,
+        usage: Option<crate::provider::UsageStats>,
+        request_options: &RequestOptions,
+    ) -> ChatResponse {
+        let message = if blocks.is_empty() {
+            Message::assistant(Content::Multiple(Vec::default()))
+        } else {
+            let mut msg = Message::assistant(Content::Multiple(blocks));
+            if request_options.stringify_nested_tool_inputs {
+                parse_stringified_tool_inputs_in_message(&mut msg, &self.executor);
+            }
+            self.messages.lock().await.push(msg.clone());
+            msg
+        };
+        self.mark_thinking_cleanup_pending(stop_reason.as_ref());
+        ChatResponse {
+            message,
+            stop_reason,
+            usage,
+        }
+    }
+
     pub async fn chat(&mut self, message: Message) -> Result<ChatResponse> {
         let request_options = self.request_options_for_current_model();
         let (_, client) = self.pick_provider()?;
@@ -370,24 +395,15 @@ impl Agent {
             })
             .whatever_context_display("failed to send messages")?;
 
-        let stop_reason = response.stop_reason.clone();
-        let usage = response.usage.clone();
-        let message = if response.content.is_empty() {
-            Message::assistant(Content::Multiple(Vec::default()))
-        } else {
-            let mut msg = Message::assistant(Content::Multiple(response.content));
-            if request_options.stringify_nested_tool_inputs {
-                parse_stringified_tool_inputs_in_message(&mut msg, &self.executor);
-            }
-            self.messages.lock().await.push(msg.clone());
-            msg
-        };
-        self.mark_thinking_cleanup_pending(stop_reason.as_ref());
-        Ok(ChatResponse {
-            message,
+        let crate::provider::MessagesResponse {
+            content,
             stop_reason,
             usage,
-        })
+            ..
+        } = response;
+        Ok(self
+            .build_chat_response_from_blocks(content, stop_reason, usage, &request_options)
+            .await)
     }
 
     pub async fn chat_with_history(&mut self) -> Result<ChatResponse> {
@@ -412,24 +428,15 @@ impl Agent {
             })
             .whatever_context_display("failed to send messages")?;
 
-        let stop_reason = response.stop_reason.clone();
-        let usage = response.usage.clone();
-        let message = if response.content.is_empty() {
-            Message::assistant(Content::Multiple(Vec::default()))
-        } else {
-            let mut msg = Message::assistant(Content::Multiple(response.content));
-            if request_options.stringify_nested_tool_inputs {
-                parse_stringified_tool_inputs_in_message(&mut msg, &self.executor);
-            }
-            self.messages.lock().await.push(msg.clone());
-            msg
-        };
-        self.mark_thinking_cleanup_pending(stop_reason.as_ref());
-        Ok(ChatResponse {
-            message,
+        let crate::provider::MessagesResponse {
+            content,
             stop_reason,
             usage,
-        })
+            ..
+        } = response;
+        Ok(self
+            .build_chat_response_from_blocks(content, stop_reason, usage, &request_options)
+            .await)
     }
 
     pub async fn chat_stream<F>(
@@ -574,25 +581,12 @@ impl Agent {
             }
 
             let (blocks, stop_reason, usage) = accumulator.finish();
-            let message = if blocks.is_empty() {
-                Message::assistant(Content::Multiple(Vec::default()))
-            } else {
-                let mut msg = Message::assistant(Content::Multiple(blocks));
-                if request_options.stringify_nested_tool_inputs {
-                    parse_stringified_tool_inputs_in_message(&mut msg, &self.executor);
-                }
-                self.messages.lock().await.push(msg.clone());
-                msg
-            };
-            self.mark_thinking_cleanup_pending(stop_reason.as_ref());
             if retried {
                 notify_stream_retry_finished(request_options, true);
             }
-            return Ok(ChatResponse {
-                message,
-                stop_reason,
-                usage,
-            });
+            return Ok(self
+                .build_chat_response_from_blocks(blocks, stop_reason, usage, request_options)
+                .await);
         }
     }
 

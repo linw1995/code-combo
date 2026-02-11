@@ -1,4 +1,4 @@
-use std::any::Any;
+use std::{any::Any, path::PathBuf};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -103,6 +103,14 @@ impl From<Final> for Output {
 /// Result for LLM
 pub type ExecuteResult = Result<Output, Final>;
 
+pub(crate) fn parse_relative_path(path: String) -> Result<PathBuf, Final> {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        return Err("Path must be relative to the working directory, not absolute".into());
+    }
+    Ok(path)
+}
+
 impl TryFrom<&Final> for crate::provider::Content {
     type Error = serde_json::Error;
 
@@ -139,5 +147,32 @@ impl Final {
 
     pub fn err(self) -> ExecuteResult {
         Err(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_relative_path;
+
+    #[test]
+    fn parse_relative_path_accepts_relative_path() {
+        let path = parse_relative_path("src/main.rs".to_string()).expect("relative path accepted");
+        assert_eq!(path.to_string_lossy(), "src/main.rs");
+    }
+
+    #[test]
+    fn parse_relative_path_rejects_absolute_path() {
+        let absolute = if cfg!(windows) {
+            r"C:\tmp\file.txt"
+        } else {
+            "/tmp/file.txt"
+        };
+        let err = parse_relative_path(absolute.to_string()).expect_err("absolute path rejected");
+        match err {
+            super::Final::Message(message) => {
+                assert!(message.contains("Path must be relative"));
+            }
+            super::Final::Json(value) => panic!("unexpected json error: {value}"),
+        }
     }
 }

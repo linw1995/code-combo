@@ -10,7 +10,7 @@ struct PresetFile {
     model_presets: Vec<ModelPreset>,
 }
 
-pub(crate) fn builtin_model_presets() -> Vec<ModelPreset> {
+pub(crate) fn builtin_model_presets() -> &'static [ModelPreset] {
     static PRESETS: OnceLock<Vec<ModelPreset>> = OnceLock::new();
     PRESETS
         .get_or_init(|| {
@@ -19,5 +19,17 @@ pub(crate) fn builtin_model_presets() -> Vec<ModelPreset> {
                 toml::from_str(content).expect("failed to parse builtin presets");
             parsed.model_presets
         })
-        .clone()
+        .as_slice()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::builtin_model_presets;
+
+    #[test]
+    fn builtin_presets_are_cached_once() {
+        let first = builtin_model_presets();
+        let second = builtin_model_presets();
+        assert_eq!(first.as_ptr(), second.as_ptr());
+    }
 }
