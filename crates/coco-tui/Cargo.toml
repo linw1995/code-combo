@@ -53,7 +53,7 @@ bon.workspace = true
 # Others
 ctor.workspace = true
 lazy_static.workspace = true
-bitflags = "2.10.0"
+bitflags = "2.11.0"
 uuid = { version = "1.11.0", features = ["v4"] }
 indoc.workspace = true
 time = { workspace = true, features = [
