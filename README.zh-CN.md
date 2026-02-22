@@ -5,6 +5,8 @@
 
 The Code Combo You Need.
 
+[English](README.md) | **简体中文**
+
 > [!CAUTION]
 > 开发中
 

@@ -5,6 +5,8 @@
 
 The Code Combo You Need.
 
+**English** | [简体中文](README.zh-CN.md)
+
 > [!CAUTION]
 > Work in Progress
 
