@@ -31,7 +31,8 @@ This also enables Combo Scripts to invoke MCPs.
 
 set -Ee
 
-coco metadata name=commit description="Code commit" thinking=on thinking_budget=2048 || exit 0
+coco metadata name=commit description="Code commit" \
+    thinking=on thinking_budget=2048 || exit 0
 
 DOC="
 Usage:
@@ -48,7 +49,8 @@ if [ -f .pre-commit-config.yaml ]; then
         coco record git status --short
         on_err() {
                 coco tell <<EOF
-If it's a formatting type check failure, it has most likely been automatically fixed by the checks.
+If it's a formatting type check failure, it has most likely been
+automatically fixed by the checks.
 
 After resolving the issue, you need to re-add the fixed files and re-execute.
 EOF

@@ -27,7 +27,8 @@ The Code Combo You Need.
 
 set -Ee
 
-coco metadata name=commit description="代码提交" thinking=on thinking_budget=2048 || exit 0
+coco metadata name=commit description="代码提交" \
+    thinking=on thinking_budget=2048 || exit 0
 
 DOC="
 Usage:

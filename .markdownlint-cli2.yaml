@@ -1,9 +1,0 @@
-# Configuration for markdownlint-cli2
-# https://github.com/DavidAnson/markdownlint-cli2#configuration-file
-
-config:
-  # MD013/line-length - Line length
-  MD013:
-    line_length: 80
-    # Don't check line length in code blocks
-    code_blocks: false
