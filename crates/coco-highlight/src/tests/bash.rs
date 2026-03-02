@@ -5,9 +5,9 @@ use tracing::debug;
 #[test]
 #[snafu::report]
 fn parse_bash_simple() -> Result<()> {
-    let source = indoc! {r#"
+    let source = indoc! {r"
             echo 'hello world'
-        "#}
+        "}
     .trim();
 
     let events = highlight(&Lang::Bash, &["function", "string"], source)?;
@@ -30,9 +30,9 @@ fn parse_bash_simple() -> Result<()> {
 #[test]
 #[snafu::report]
 fn parse_bash_shopts() -> Result<()> {
-    let source = indoc! {r#"
+    let source = indoc! {r"
             set -euo pipefail
-        "#}
+        "}
     .trim();
     let events = highlight(&Lang::Bash, &["function", "constant"], source)?;
     assert_eq!(

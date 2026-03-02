@@ -12,7 +12,7 @@ fn main() {
     println!("cargo:rerun-if-changed=.git/HEAD");
     // Also watch the current branch ref file for new commits
     if let Ok(head_content) = std::fs::read_to_string(".git/HEAD")
-        && let Some(branch_ref) = head_content.strip_prefix("ref: ").map(|s| s.trim())
+        && let Some(branch_ref) = head_content.strip_prefix("ref: ").map(str::trim)
     {
         println!("cargo:rerun-if-changed=.git/{branch_ref}");
     }
@@ -86,18 +86,20 @@ fn emit_built_time_utc() {
     let build_time = env::var("SOURCE_DATE_EPOCH")
         .ok()
         .and_then(|epoch| epoch.parse::<i64>().ok())
-        .map(|timestamp| {
-            time::UtcDateTime::from_unix_timestamp(timestamp)
-                .expect("failed to pase unix timestamp")
-                .format(&Rfc3339)
-                .expect("failed to format datetime")
-        })
-        .unwrap_or_else(|| {
-            // fallback to current time if SOURCE_DATE_EPOCH is not set
-            time::UtcDateTime::now()
-                .format(&Rfc3339)
-                .expect("failed to format datetime")
-        });
+        .map_or_else(
+            || {
+                // fallback to current time if SOURCE_DATE_EPOCH is not set
+                time::UtcDateTime::now()
+                    .format(&Rfc3339)
+                    .expect("failed to format datetime")
+            },
+            |timestamp| {
+                time::UtcDateTime::from_unix_timestamp(timestamp)
+                    .expect("failed to pase unix timestamp")
+                    .format(&Rfc3339)
+                    .expect("failed to format datetime")
+            },
+        );
 
     println!("cargo:rustc-env=BUILT_TIME_UTC={build_time}");
 }
