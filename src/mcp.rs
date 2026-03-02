@@ -8,7 +8,7 @@ use std::{
 
 use rmcp::{
     RoleClient,
-    model::{CallToolRequestParam, Tool},
+    model::{CallToolRequestParams, Tool},
     service::{ClientInitializeError, Peer, RunningService, ServiceError, ServiceExt},
     transport::{StreamableHttpClientTransport, TokioChildProcess},
 };
@@ -108,6 +108,7 @@ impl McpResponse {
 }
 
 #[derive(Debug, Snafu)]
+#[allow(clippy::large_enum_variant)]
 pub enum McpManagerError {
     #[snafu(display("unknown mcp server {name}"))]
     UnknownServer { name: String },
@@ -246,9 +247,11 @@ impl McpManager {
             .with_timeout(
                 server,
                 timeout_ms,
-                peer.call_tool(CallToolRequestParam {
+                peer.call_tool(CallToolRequestParams {
+                    meta: None,
                     name: payload.tool.into(),
                     arguments,
+                    task: None,
                 }),
             )
             .await?;
@@ -676,6 +679,8 @@ pub(crate) mod tests {
                     StreamableHttpServerConfig {
                         stateful_mode: true,
                         sse_keep_alive: None,
+                        sse_retry: None,
+                        json_response: false,
                         cancellation_token: CancellationToken::new(),
                     },
                 );
