@@ -82,6 +82,7 @@
 
               nativeCheckInputs = with pkgs; [
                 bash
+                cacert
               ];
               cargoTestFlags = [
                 "--all"
