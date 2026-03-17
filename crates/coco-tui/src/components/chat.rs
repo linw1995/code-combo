@@ -588,7 +588,7 @@ impl Chat<'static> {
                     self.set_pending_combo_feedback_action(id.clone());
                 }
                 self.set_combo_thinking_active(thinking.as_ref().is_some_and(|cfg| cfg.enabled));
-                self.set_ready();
+                self.set_processing();
             }
             ComboEvent::ReplyToolUse { offload: false, .. } => {
                 self.set_combo_thinking_active(false);
@@ -4266,6 +4266,20 @@ mod tests {
         chat.focus_next_pending_user_action_or_input();
         assert_eq!(chat.state.focus, Focus::Messages);
         assert_eq!(chat.messages.selected_idx(), Some(idx_b));
+    }
+
+    #[test]
+    fn combo_prompt_keeps_chat_processing_for_non_interactive_reply() {
+        let mut chat = Chat::new(Config::default());
+        chat.handle_combo_event(&ComboEvent::Prompt {
+            id: "combo-1".to_string(),
+            name: "demo".to_string(),
+            prompt: "need feedback".to_string(),
+            thinking: None,
+            session_sock: Some("/tmp/combo.sock".to_string()),
+        });
+
+        assert!(matches!(chat.state.state, ChatState::Processing));
     }
 
     #[test]
