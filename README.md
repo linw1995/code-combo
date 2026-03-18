@@ -10,6 +10,8 @@ The Code Combo You Need.
 > [!CAUTION]
 > Work in Progress
 
+![demo video](https://github.com/user-attachments/assets/80f2ab11-9312-424b-9a2d-e0e5ac89cdb5)
+
 Due to the stochasticity of LLM generation, this project aims to solidify
 common usage patterns to improve the determinism and inference efficiency
 of results.
