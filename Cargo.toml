@@ -33,7 +33,7 @@ tempfile = "3.22.0"
 tree-sitter = { version = "0.25" }
 tree-sitter-md = { version = "0.5.3" }
 futures-core = "0.3.32"
-futures-util = "0.3.31"
+futures-util = "0.3.32"
 tokio-util = "0.7.16"
 clap = { version = "4.5.60", features = ["derive", "string"] }
 nix = { version = "0.31.2", features = ["signal", "process"] }
