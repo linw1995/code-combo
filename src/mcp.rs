@@ -243,17 +243,12 @@ impl McpManager {
                 });
             }
         };
+        let request = match arguments {
+            Some(arguments) => CallToolRequestParams::new(payload.tool).with_arguments(arguments),
+            None => CallToolRequestParams::new(payload.tool),
+        };
         let result = self
-            .with_timeout(
-                server,
-                timeout_ms,
-                peer.call_tool(CallToolRequestParams {
-                    meta: None,
-                    name: payload.tool.into(),
-                    arguments,
-                    task: None,
-                }),
-            )
+            .with_timeout(server, timeout_ms, peer.call_tool(request))
             .await?;
         let value = serialize_to_json_value(result, "tool result")?;
         Ok(value)
@@ -655,11 +650,8 @@ pub(crate) mod tests {
     #[tool_handler]
     impl ServerHandler for TestMcpServer {
         fn get_info(&self) -> ServerInfo {
-            ServerInfo {
-                instructions: Some("Test MCP server".to_string()),
-                capabilities: ServerCapabilities::builder().enable_tools().build(),
-                ..Default::default()
-            }
+            ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+                .with_instructions("Test MCP server")
         }
     }
 
@@ -676,13 +668,12 @@ pub(crate) mod tests {
                 StreamableHttpService::new(
                     || Ok(TestMcpServer::new()),
                     session_manager,
-                    StreamableHttpServerConfig {
-                        stateful_mode: true,
-                        sse_keep_alive: None,
-                        sse_retry: None,
-                        json_response: false,
-                        cancellation_token: CancellationToken::new(),
-                    },
+                    StreamableHttpServerConfig::default()
+                        .with_sse_keep_alive(None)
+                        .with_sse_retry(None)
+                        .with_stateful_mode(true)
+                        .with_json_response(false)
+                        .with_cancellation_token(CancellationToken::new()),
                 );
             let listener = TcpListener::bind("127.0.0.1:0")
                 .await
