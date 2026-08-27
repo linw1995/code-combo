@@ -66,14 +66,26 @@
                 GIT_DIRTY = git_dirty;
                 SOURCE_DATE_EPOCH = git_last_modified;
               };
-              cargoLock = {
-                lockFile = ./Cargo.lock;
+              cargoDeps =
+                (rustPlatform.importCargoLock.override {
+                  # Use the official CDN directly while preserving lockfile checksums.
+                  fetchurl = args:
+                    pkgs.fetchurl (args
+                      // {
+                        url =
+                          builtins.replaceStrings
+                          ["https://crates.io/api/v1/crates/"]
+                          ["https://static.crates.io/crates/"]
+                          args.url;
+                      });
+                }) {
+                  lockFile = ./Cargo.lock;
 
-                outputHashes = {
-                  "tree-sitter-diff-0.1.0" = "sha256-8rYLNGgoZSvvfqO2++nAgFKmvbkKJ3m+9B8bTXp6Us4=";
-                  "tui-textarea-0.7.0" = "sha256-3ENi0XCVkhJAj9mgMXXkCY2FZ1VcVrSjfidBCsYdfMA=";
+                  outputHashes = {
+                    "tree-sitter-diff-0.1.0" = "sha256-8rYLNGgoZSvvfqO2++nAgFKmvbkKJ3m+9B8bTXp6Us4=";
+                    "tui-textarea-0.7.0" = "sha256-3ENi0XCVkhJAj9mgMXXkCY2FZ1VcVrSjfidBCsYdfMA=";
+                  };
                 };
-              };
               cargoBuildFlags = ["-p" "coco-tui"];
 
               preCheck = ''
