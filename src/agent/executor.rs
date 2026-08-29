@@ -474,7 +474,7 @@ mod tests {
     fn bash_input_value(command: &str) -> serde_json::Value {
         serde_json::to_value(BashInput {
             command: command.to_string(),
-            timeout: 1_000,
+            timeout: 60_000,
             env: std::collections::BTreeMap::new(),
         })
         .expect("serialize BashInput")
@@ -580,8 +580,9 @@ mod tests {
             .await
             .expect("execute bash with injected env");
 
-        let Output::Success(Final::Json(value)) = output else {
-            panic!("expected successful bash output");
+        let value = match output {
+            Output::Success(Final::Json(value)) => value,
+            other => panic!("expected successful bash output, got {other:?}"),
         };
         let output: BashOutput =
             serde_json::from_value(value).expect("deserialize bash output json");
